@@ -47,7 +47,8 @@ cmake --build .
 
 - **Shaders (`glslc` compiled to SPIR-V):**
   - `path_tracer.rgen` - Ray generation shader.
-  - `path_tracer.rmiss` - Ray miss shader.
+  - `path_tracer.rmiss` - Primary ray miss shader.
+  - `shadow.rmiss` - Shadow ray miss shader; marks a ray as unoccluded when no geometry is hit.
   - `path_tracer.rchit` - Ray closest hit shader.
   - `sky.comp` - Environment compute shader.
   - `path_tracer_common.glsl` - Shared shader utilities, mathematical constants, and payload structures.
@@ -56,6 +57,8 @@ cmake --build .
   - `ObjModel.h` / `.cpp` - Dedicated internal `.obj` 3D mesh parser.
   - `RuntimeConfig.h` / `.cpp` - Parsing mapping for handling application specifications and attributes from `path_tracer_config.json`.
   - `main.cpp` - Execution entrypoint.
+- **Assets:**
+  - `models/box.obj` / `models/box.mtl` - Bundled default box mesh used by the example scene configuration.
 - **Build & Configuration:**
   - `build.ps1` - PowerShell script mapping MSVC environments to build with `cmake`.
   - `CMakeLists.txt` - CMake configuration linking native modules and compiling GLSL to SPIR-V.
