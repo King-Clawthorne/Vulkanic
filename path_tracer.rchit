@@ -1,3 +1,20 @@
+// Closest-hit shader — the heart of the path tracer.
+//
+// On a surface hit we:
+//   1. Add emissive contribution; if the surface is a pure light, return.
+//   2. Build a tangent-space frame around the world-space hit normal.
+//   3. Direct sun lighting via next-event estimation: cone-sample the
+//      sun direction and trace a shadow ray; on miss, add the GGX BRDF
+//      response weighted by sun radiance and solid angle.
+//   4. Russian-roulette path termination once depth ≥ 3.
+//   5. Indirect bounce: anisotropic GGX VNDF sampling (Heitz 2018) for
+//      the next direction, plus the Fdez-Aguera multiscatter energy-
+//      compensation term so rough surfaces don't lose energy at high
+//      roughness.
+//   6. Recurse via traceRayEXT into the same hitgroup; the path
+//      eventually escapes to the sky miss shader or is terminated by
+//      Russian roulette / max-bounce gating in the rgen shader.
+
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_tracing : require
@@ -8,6 +25,9 @@ layout(location = 0) rayPayloadInEXT RayPayload payload;
 layout(location = 1) rayPayloadEXT ShadowPayload shadowPayload;
 hitAttributeEXT vec2 hitAttributes;
 
+// Smith-Lambda term for the GGX masking-shadowing function. Returns a
+// large finite number for grazing-angle directions so the 1/(1+Λ) form
+// never produces a div-by-zero.
 float SmithLambda(float ax, float ay, vec3 localDirection)
 {
     float z2 = localDirection.z * localDirection.z;
@@ -20,6 +40,8 @@ float SmithLambda(float ax, float ay, vec3 localDirection)
     return 0.5 * (-1.0 + sqrt(1.0 + slope));
 }
 
+// Anisotropic GGX normal-distribution function evaluated in the local
+// (tangent-space) frame. ax / ay are the per-axis roughness parameters.
 float GgxDistribution(float ax, float ay, vec3 H_local)
 {
     if (H_local.z <= 0.0)
@@ -33,6 +55,9 @@ float GgxDistribution(float ax, float ay, vec3 H_local)
     return 1.0 / max(PI * ax * ay * denom * denom, 1.0e-6);
 }
 
+// Evaluate the full anisotropic GGX BRDF for a (V, L) pair in tangent
+// space. Used by the direct-sun lighting path; the indirect path uses
+// VNDF importance sampling and so collapses some terms.
 vec3 EvalGgxBrdf(vec3 V_local, vec3 L_local, float ax, float ay, vec3 eta, vec3 extinction)
 {
     if (V_local.z <= 0.0 || L_local.z <= 0.0)
@@ -50,6 +75,8 @@ vec3 EvalGgxBrdf(vec3 V_local, vec3 L_local, float ax, float ay, vec3 eta, vec3 
 
 void main()
 {
+    // Look up per-instance data using the custom index baked into the
+    // TLAS instance record at build time.
     InstanceData instanceData = instanceBuffer.instances[gl_InstanceCustomIndexEXT];
     Material material = GetInstanceMaterial(instanceData);
     payload.radiance.xyz += payload.throughput.xyz * material.emission;
@@ -64,11 +91,15 @@ void main()
         return;
     }
 
+    // Reconstruct the world-space hit point from the launch ray origin
+    // and the reported hit T.
     vec3 hitPosition = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
     mat3 worldToObjectLinear =
         mat3(gl_WorldToObjectEXT[0].xyz, gl_WorldToObjectEXT[1].xyz, gl_WorldToObjectEXT[2].xyz);
     vec3 objectNormal = GetTriangleObjectNormal(instanceData, gl_PrimitiveID, hitAttributes);
     vec3 normal = TransformNormalToWorld(objectNormal, worldToObjectLinear);
+    // Flip the shading normal toward the incoming ray for back-facing
+    // hits so the BSDF math always operates in the upper hemisphere.
     if (dot(normal, gl_WorldRayDirectionEXT) > 0.0)
     {
         normal = -normal;
@@ -129,6 +160,9 @@ void main()
         }
     }
 
+    // Russian roulette after a few guaranteed bounces — survival
+    // probability is tied to the remaining throughput so dim paths die
+    // quickly while bright ones keep accumulating.
     if (payload.state.y >= 3u)
     {
         float surviveProbability = clamp(MaxComponent(payload.throughput.xyz), 0.05, 0.95);
@@ -191,6 +225,10 @@ void main()
     }
 
     payload.state.x = rng.state;
+    // Recurse along the sampled direction. OffsetRay nudges the origin
+    // outside the surface to avoid self-intersection. Note: we
+    // intentionally only set gl_RayFlagsOpaqueEXT here — adding back-
+    // face culling makes objects render pitch black.
     traceRayEXT(topLevelAS,
     gl_RayFlagsOpaqueEXT,
     0xFF,

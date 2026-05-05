@@ -1,3 +1,25 @@
+// VulkanPathTracer.cpp — full Vulkan + Win32 implementation of the renderer.
+//
+// File layout (search the SECTION banners below):
+//   * helpers          — small utilities (error wrappers, math types,
+//                        descriptor / SBT / acceleration-structure structs).
+//   * window procedure — Win32 input plumbing for the camera controls.
+//   * Vulkan app       — the VulkanApp class: device setup, swapchain,
+//                        scene upload, BLAS/TLAS build, ray-tracing
+//                        pipeline + SBT, sky compute pass, the render loop,
+//                        and teardown.
+//
+// High-level flow when RunVulkanPathTracer() is called:
+//   1. Read path_tracer_config.json + load OBJ assets.
+//   2. Create a Win32 window, Vulkan instance, surface, device, queues.
+//   3. Build per-frame resources: storage image, descriptor sets, swapchain.
+//   4. Upload geometry/material/instance buffers and build BLAS + TLAS.
+//   5. Compile the sky compute shader and the ray-tracing pipeline; build
+//      the shader binding table for raygen / miss / hit groups.
+//   6. Drive the message loop: each frame integrates camera input, runs
+//      the sky compute pass, dispatches the ray-tracing pipeline into the
+//      storage image, and blits to the swapchain.
+
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -22,8 +44,20 @@
 #include <stdexcept>
 #include <vector>
 
+// =====================================================================
 // SECTION: helpers
+//
+// Cross-cutting utilities used by the rest of the file: error reporting
+// wrappers around the Win32 BOOL / Vulkan VkResult conventions, SPIR-V
+// blob loading, alignment math, and the small POD structs that describe
+// queue families, swapchain support, GPU buffers, and acceleration
+// structures. Also defines the std140-friendly upload structs (SceneData,
+// InstanceData, MaterialData) shared with the shaders — the static_assert
+// lines lock the layouts so any accidental field shuffle fails the build.
+// =====================================================================
 
+// Throw a std::runtime_error on a failed Win32 BOOL return so call sites
+// can treat any non-zero result as success without nested if-blocks.
 static void ThrowIfFalse(BOOL condition, const char* message)
 {
     if (!condition)
@@ -32,6 +66,9 @@ static void ThrowIfFalse(BOOL condition, const char* message)
     }
 }
 
+// Map any non-success VkResult to a std::runtime_error tagged with the
+// numeric result code, so the user sees both the operation that failed
+// and the Vulkan-level reason.
 static void ThrowVk(VkResult result, const char* message)
 {
     if (result != VK_SUCCESS)
@@ -42,6 +79,10 @@ static void ThrowVk(VkResult result, const char* message)
     }
 }
 
+// Load a SPIR-V module (or any binary blob) from disk into a std::vector.
+// Resolution mirrors the runtime config: search exe dir → exe parent →
+// CWD; first hit wins. The file is opened in binary mode so the size from
+// tellg() matches the actual byte count.
 static std::vector<char> LoadBinaryFile(const wchar_t* fileName)
 {
     const auto shaderPath = ResolveRuntimeFilePath(fileName);
@@ -72,6 +113,10 @@ static std::vector<char> LoadBinaryFile(const wchar_t* fileName)
     return data;
 }
 
+// Round 'value' up to the next multiple of 'alignment'. Assumes
+// alignment is a power of two; used heavily when packing the shader
+// binding table where each group must start on a device-reported
+// alignment boundary.
 static VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize alignment)
 {
     if (alignment == 0)
@@ -81,6 +126,8 @@ static VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// Indices of the queue families this app needs. Optional because they're
+// discovered one at a time during physical-device selection.
 struct QueueFamilyIndices
 {
     std::optional<uint32_t> graphicsFamily;
@@ -92,6 +139,8 @@ struct QueueFamilyIndices
     }
 };
 
+// Snapshot of what a (physical device, surface) pair supports. Captured
+// once during init and again on swapchain recreation (window resize).
 struct SwapchainSupport
 {
     VkSurfaceCapabilitiesKHR capabilities{};
@@ -99,6 +148,8 @@ struct SwapchainSupport
     std::vector<VkPresentModeKHR> presentModes;
 };
 
+// Generic GPU buffer + its backing memory. Owned together so destruction
+// is just a matched pair of vk*Free / vkDestroyBuffer calls.
 struct BufferAllocation
 {
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -106,12 +157,21 @@ struct BufferAllocation
     VkDeviceSize size = 0;
 };
 
+// An acceleration structure handle plus the device buffer that backs it.
+// Used for both BLAS (per-mesh) and TLAS (scene-wide) instances.
 struct AccelerationStructureAllocation
 {
     VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
     BufferAllocation buffer;
 };
 
+// Sky / scene uniforms uploaded to the ray-tracing pipeline.
+//
+// Each vec4 packs multiple scalars together to keep the std140 layout
+// compact and to match the shader-side struct one-for-one. The static
+// assertion below pins the size at 96 bytes so any future field reshuffle
+// that breaks alignment fails to compile rather than corrupting the GPU
+// view of the data.
 struct alignas(16) SceneData
 {
     float skyBetaRayleighBetaM[4];
@@ -122,10 +182,13 @@ struct alignas(16) SceneData
     uint32_t skySampleCounts[4];
 };
 
-static_assert(sizeof(SceneData) == 80, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 96, "Scene data layout must stay 16-byte aligned.");
 
 static_assert(sizeof(ModelVertex) == 32, "Model vertex layout must stay 16-byte aligned.");
 
+// Per-instance data indexed in the closest-hit shader by gl_InstanceID.
+// Packs the material index together with the first-index offset into the
+// shared index buffer so the hit shader can fetch its triangle's data.
 struct alignas(16) InstanceData
 {
     uint32_t materialIndexFirstIndex[4];
@@ -133,6 +196,9 @@ struct alignas(16) InstanceData
 
 static_assert(sizeof(InstanceData) == 16, "Instance data layout must stay 16-byte aligned.");
 
+// GPU-side material record. Roughness rides in albedo.w to keep the
+// struct an exact multiple of vec4s — the closest-hit shader unpacks it
+// when building the GGX BSDF.
 struct alignas(16) MaterialData
 {
     float albedoRoughness[4];
@@ -143,6 +209,9 @@ struct alignas(16) MaterialData
 
 static_assert(sizeof(MaterialData) == 64, "Material data layout must stay 16-byte aligned.");
 
+// Where a single mesh's vertices and indices live inside the shared
+// scene-wide vertex / index buffers. firstIndex is also stuffed into the
+// per-instance data so the hit shader can locate its triangle.
 struct ModelGeometryRange
 {
     uint32_t firstVertex = 0;
@@ -151,12 +220,17 @@ struct ModelGeometryRange
     uint32_t indexCount = 0;
 };
 
+// One mesh's bottom-level acceleration structure paired with the geometry
+// range it was built from. The TLAS references these by their device
+// addresses.
 struct ModelAccelerationStructure
 {
     ModelGeometryRange geometry;
     AccelerationStructureAllocation blas;
 };
 
+// 3x3 row-major matrix used only for camera basis math; world transforms
+// for instances live in 3x4 row-major form straight in the TLAS.
 struct Mat3
 {
     float m[3][3]{};
@@ -291,7 +365,15 @@ struct PushConstants
 
 static_assert(sizeof(PushConstants) == 104, "Push constant layout must match the shader.");
 
+// =====================================================================
 // SECTION: window procedure
+//
+// Win32 message handling for the render window. The path tracer takes raw
+// keyboard / mouse input directly (no input library) so the WndProc here
+// just translates messages into flags on a small InputState struct that
+// the render loop polls each frame. Mouse-look uses raw input so motion
+// is independent of the desktop pointer-acceleration curve.
+// =====================================================================
 
 static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -305,11 +387,33 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPA
     }
 }
 
+// =====================================================================
 // SECTION: Vulkan app
+//
+// VulkanApp owns every Vulkan handle the renderer needs and drives the
+// frame loop. The constructor walks through Vulkan setup top-to-bottom:
+// instance + surface + device, swapchain, command pools, the storage
+// image the path tracer writes into, descriptor sets, scene resources
+// (vertex/index/material/instance/sky buffers), BLAS/TLAS builds, and
+// finally the ray-tracing pipeline plus its shader-binding table.
+//
+// Render() runs once per frame: poll the camera, push fresh uniforms,
+// dispatch the sky compute shader, dispatch the ray-tracing pipeline,
+// blit the storage image into the acquired swapchain image, and present.
+// All resources are released in the destructor in reverse construction
+// order so partial-init failure paths (which throw mid-construction)
+// still tear down cleanly via RAII member destructors where possible.
+// =====================================================================
 
+// Owns every Vulkan handle and orchestrates the renderer. Public surface
+// is intentionally thin (just Run()); construction is two-phase via Run()
+// rather than the ctor so failures can throw with cleanup driven by
+// Cleanup() rather than partial-RAII destructors.
 class VulkanPathTracer
 {
 public:
+    // Default scene/render configuration file, resolved relative to the
+    // executable by ResolveRuntimeFilePath().
     static constexpr const wchar_t* CONFIG_FILE_NAME = L"path_tracer_config.json";
 
     ~VulkanPathTracer()
@@ -317,6 +421,9 @@ public:
         Cleanup();
     }
 
+    // Top-level driver: load config → init Vulkan → render until the
+    // window closes → tear everything down. Throws on any failure; the
+    // caller in main() converts that into a non-zero exit code.
     void Run()
     {
         LoadInitialRuntimeConfig();
@@ -511,6 +618,9 @@ private:
         return instances;
     }
 
+    // Allocate the small uniform buffer that holds SceneData (sky
+    // parameters consumed by the ray-tracing pipeline) for the current
+    // frame.
     void CreateSceneBuffers()
     {
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData),
@@ -528,6 +638,8 @@ private:
                          false);
     }
 
+    // Release the uniform buffer created by CreateSceneBuffers(). Safe to
+    // call when the buffer was never created (no-op).
     void DestroySceneBuffers()
     {
         DestroyBuffer(m_sceneDataBuffer);
@@ -535,6 +647,9 @@ private:
         DestroyBuffer(m_materialDataBuffer);
     }
 
+    // Pack the current RuntimeConfig.skySpectral into a SceneData record
+    // and stage it into the scene UBO. Called whenever the config is
+    // (re)loaded.
     void UploadSceneDataFromConfig()
     {
         const SceneData sceneData = BuildSceneData();
@@ -547,6 +662,9 @@ private:
         UploadToBuffer(m_materialDataBuffer, materialData.data(), materialData.size() * sizeof(MaterialData));
     }
 
+    // Bind the live scene resources (TLAS, storage image, vertex/index/
+    // material/instance buffers, sky cubemap, scene UBO) into the
+    // descriptor sets. Called after any change in scene topology.
     void UpdateDescriptorSetContents()
     {
         if (m_descriptorSets.empty())
@@ -659,6 +777,9 @@ private:
         }
     }
 
+    // Tear down all geometry-side resources (vertex/index/material/
+    // instance buffers, every BLAS, the TLAS, scratch buffers). Used
+    // both during normal shutdown and during a hot config reload.
     void DestroyGeometryResources()
     {
         if (m_tlas.handle != VK_NULL_HANDLE)
@@ -683,6 +804,10 @@ private:
         DestroyBuffer(m_vertexBuffer);
     }
 
+    // Load every model referenced by the current config, concatenate
+    // them into shared vertex/index buffers, build per-mesh BLASes, and
+    // upload the material array. Leaves the TLAS rebuild to
+    // RebuildTopLevelAccelerationStructure().
     void CreateGeometryResourcesFromConfig()
     {
         std::vector<ModelVertex> vertices;
@@ -793,6 +918,10 @@ private:
         }
     }
 
+    // Build (or rebuild) the top-level acceleration structure from the
+    // current instance list. Each instance gets its TRS transform baked
+    // into a 3x4 row-major matrix and references one BLAS by device
+    // address.
     void RebuildTopLevelAccelerationStructure()
     {
         if (m_tlas.handle != VK_NULL_HANDLE)
@@ -860,6 +989,9 @@ private:
         DestroyBuffer(tlasScratch);
     }
 
+    // Re-apply the current m_config to live GPU resources. Optionally
+    // rebuilds geometry (when the model list changed) and/or re-uploads
+    // the sky/material data only.
     void RefreshSceneFromConfig(bool rebuildGeometryResources,
                                 bool rebuildTopLevelAccelerationStructure,
                                 bool recreateSceneBuffers)
@@ -894,6 +1026,9 @@ private:
         }
     }
 
+    // Diff the incoming config against the current one and trigger the
+    // cheapest valid set of refresh actions (camera reset, scene rebuild,
+    // sky re-upload, etc.).
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
         const bool modelDefinitionsChanged = HasModelDefinitionsChanged(config, m_config);
@@ -937,6 +1072,9 @@ private:
         }
     }
 
+    // Load and parse path_tracer_config.json from disk for the first
+    // time. Records the file's last-write time so ReloadRuntimeConfigIfNeeded
+    // can pick up live edits.
     void LoadInitialRuntimeConfig()
     {
         m_configPath = ResolveRuntimeFilePath(CONFIG_FILE_NAME);
@@ -957,6 +1095,10 @@ private:
         std::printf("[Config] Loaded %s\n", m_configPath.string().c_str());
     }
 
+    // Poll the config file's last-write time once per frame; on a change
+    // re-parse it and ApplyRuntimeConfig() the result. Failures during
+    // reload are logged and ignored so a typo in the JSON does not crash
+    // an interactive editing session.
     void ReloadRuntimeConfigIfNeeded()
     {
         if (m_configPath.empty())
@@ -991,6 +1133,8 @@ private:
         m_configLastWriteTime = currentWriteTime;
     }
 
+    // Snap the camera back to the configured initialPosition / initialLookAt
+    // and recompute its yaw/pitch.
     void ResetCamera()
     {
         m_cameraPosition = m_config.initialPosition;
@@ -1014,6 +1158,9 @@ private:
         return {std::sin(m_cameraYaw), 0.0f, std::cos(m_cameraYaw)};
     }
 
+    // Consume accumulated mouse-delta input and rotate the camera. Pitch
+    // is clamped to ±maxPitchDegrees so the camera never goes upside
+    // down and the yaw axis remains world-up.
     void UpdateMouseLook()
     {
         const bool windowFocused = GetForegroundWindow() == m_window;
@@ -1051,6 +1198,9 @@ private:
         m_cameraPitch = std::clamp(m_cameraPitch - mouseDeltaY * m_config.mouseSensitivity, -maxPitch, maxPitch);
     }
 
+    // Integrate WASD/arrow input over deltaSeconds, applying the move
+    // speed (or fast move speed when shift is held). Movement is in the
+    // camera's local frame so strafing always matches the screen.
     void UpdateCamera(double deltaSeconds)
     {
         const float deltaTime = static_cast<float>(std::min(deltaSeconds, 0.1));
@@ -1123,6 +1273,8 @@ private:
         }
     }
 
+    // Register the window class and create the main render window at
+    // the configured resolution. Returns once the window is visible.
     void CreateWindowAndShow()
     {
         const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -1169,6 +1321,9 @@ private:
         std::puts("[Controls] Hold RMB to look. Move with WASD, rise/fall with Q/E or Ctrl/Space, Shift to boost, R to reset.");
     }
 
+    // Create the VkInstance with the platform surface extensions
+    // required for Win32. No validation layers are requested by default;
+    // they can be enabled via the SDK's environment variables.
     void CreateInstance()
     {
         const std::array<const char*, 2> extensions = {
@@ -1193,6 +1348,8 @@ private:
         ThrowVk(vkCreateInstance(&createInfo, nullptr, &m_instance), "Failed to create Vulkan instance");
     }
 
+    // Create the Win32 VkSurfaceKHR linking the HWND to the Vulkan
+    // instance.
     void CreateSurface()
     {
         VkWin32SurfaceCreateInfoKHR createInfo{};
@@ -1368,6 +1525,9 @@ private:
         return (swapchainSupport.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     }
 
+    // Iterate adapters and select the first one that supports the
+    // required ray-tracing extensions, queue families, and swapchain
+    // configuration. Throws if no adapter qualifies.
     void PickPhysicalDevice()
     {
         uint32_t deviceCount = 0;
@@ -1399,6 +1559,9 @@ private:
         }
     }
 
+    // Create the VkDevice with the required ray-tracing / acceleration-
+    // structure / buffer-device-address feature chain enabled, plus the
+    // graphics+present queue handles.
     void CreateLogicalDevice()
     {
         const float queuePriority = 1.0f;
@@ -1551,6 +1714,8 @@ private:
         return allocation;
     }
 
+    // Free both the VkBuffer and its backing VkDeviceMemory and zero out
+    // the allocation so it can be safely re-used or destroyed twice.
     void DestroyBuffer(BufferAllocation& allocation)
     {
         if (allocation.buffer != VK_NULL_HANDLE)
@@ -1601,6 +1766,9 @@ private:
         return commandBuffer;
     }
 
+    // Submit a one-shot command buffer to the graphics queue, wait for
+    // it to finish, and free it. Used for setup work (transfers, BLAS
+    // builds) where stalling is acceptable.
     void EndSingleTimeCommands(VkCommandBuffer commandBuffer) const
     {
         ThrowVk(vkEndCommandBuffer(commandBuffer), "Failed to end one-time command buffer");
@@ -1615,6 +1783,8 @@ private:
         vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
     }
 
+    // Stage host data into a device-local buffer via a temporary
+    // host-visible staging buffer + a copy on the graphics queue.
     void UploadToBuffer(const BufferAllocation& allocation, const void* data, size_t dataSize) const
     {
         if (dataSize > static_cast<size_t>(allocation.size))
@@ -1647,6 +1817,9 @@ private:
         return allocation;
     }
 
+    // Composite step that builds geometry resources, the TLAS, the
+    // scene UBO, and binds them into the descriptor sets for the first
+    // time.
     void CreateRayTracingScene()
     {
         if (m_commandPool == VK_NULL_HANDLE)
@@ -1694,6 +1867,11 @@ private:
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 
+    // Create (or recreate after a resize) the swapchain, its image
+    // views, and the storage image the path tracer writes into. The
+    // storage image is a separate VkImage rather than the swapchain
+    // image so we can use whatever color format the GPU prefers for
+    // ray-tracing output and blit into the presentation format.
     void CreateSwapchain()
     {
         const auto support = QuerySwapchainSupport(m_physicalDevice);
@@ -1770,6 +1948,9 @@ private:
         }
     }
 
+    // Define the descriptor-set layout shared by the ray-tracing and
+    // sky-compute pipelines: TLAS, storage image, vertex/index buffers,
+    // material/instance SSBOs, sky cube, and the scene UBO.
     void CreateDescriptorSetLayout()
     {
         VkDescriptorSetLayoutBinding binding{};
@@ -1856,6 +2037,9 @@ private:
         return allocation;
     }
 
+    // Compile the raygen / miss / closest-hit shader modules from their
+    // SPIR-V blobs and assemble the VkPipeline for the ray-tracing
+    // pipeline (and the separate compute pipeline used for sky.comp).
     void CreatePipeline()
     {
         if (m_rayTracingPipelineProperties.maxRayRecursionDepth < m_config.maxBounces)
@@ -1992,6 +2176,9 @@ private:
         vkDestroyShaderModule(m_device, raygenModule, nullptr);
     }
 
+    // Build the shader-binding-table buffer that vkCmdTraceRaysKHR uses
+    // to look up handles for the raygen, miss, and hit groups. The
+    // device-reported handle alignment / stride drive the layout.
     void CreateShaderBindingTables()
     {
         constexpr uint32_t kShaderGroupCount = 4;
@@ -2046,6 +2233,9 @@ private:
         m_callableShaderBindingTableRegion = {};
     }
 
+    // Allocate the descriptor pool and one descriptor set per layout
+    // slot. Initial bindings are deferred to UpdateDescriptorSetContents()
+    // because they depend on scene resources that are created later.
     void CreateDescriptorSets()
     {
         VkDescriptorPoolSize poolSize{};
@@ -2088,6 +2278,8 @@ private:
         UpdateDescriptorSetContents();
     }
 
+    // Create the graphics-queue command pool used for both per-frame
+    // command buffers and one-shot setup commands.
     void CreateCommandPool()
     {
         VkCommandPoolCreateInfo createInfo{};
@@ -2098,6 +2290,7 @@ private:
                 "Failed to create command pool");
     }
 
+    // Allocate one primary command buffer per frame in flight.
     void CreateCommandBuffers()
     {
         m_commandBuffers.resize(m_config.frameCount);
@@ -2110,6 +2303,8 @@ private:
                 "Failed to allocate command buffers");
     }
 
+    // Allocate the per-frame semaphores (image-available, render-
+    // finished) and fences that gate command-buffer reuse.
     void CreateSyncObjects()
     {
         m_frames.resize(m_config.frameCount);
@@ -2171,6 +2366,12 @@ private:
         return constants;
     }
 
+    // Record one frame's worth of work into commandBuffer:
+    //   1. Compute pass that fills the sky cube.
+    //   2. Image barrier transitioning the storage image to GENERAL.
+    //   3. vkCmdTraceRaysKHR dispatch.
+    //   4. Barriers + blit copying the storage image into the
+    //      acquired swapchain image at imageIndex.
     void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
     {
         VkCommandBufferBeginInfo beginInfo{};
@@ -2248,6 +2449,9 @@ private:
         m_swapchainLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 
+    // Wait for the current in-flight slot, acquire a swapchain image,
+    // record + submit the frame's command buffer, then present.
+    // Handles VK_ERROR_OUT_OF_DATE_KHR by recreating the swapchain.
     void RenderFrame()
     {
         FrameResources& frame = m_frames[m_currentFrame];
@@ -2298,6 +2502,8 @@ private:
         m_currentFrame = (m_currentFrame + 1) % static_cast<uint32_t>(m_frames.size());
     }
 
+    // Throttled window-title update displaying live FPS and per-frame
+    // milliseconds — cheap diagnostic for performance tuning.
     void UpdateWindowTitle(double fps, double frameMs)
     {
         wchar_t buffer[256]{};
@@ -2309,6 +2515,10 @@ private:
         SetWindowTextW(m_window, buffer);
     }
 
+    // Main loop: pump Win32 messages, hot-reload config, advance camera,
+    // and render until WM_QUIT. Uses a fixed-timestep clock for the
+    // camera integration so movement speed is independent of frame
+    // rate.
     void MessageLoop()
     {
         using Clock = std::chrono::steady_clock;
@@ -2352,6 +2562,9 @@ private:
         }
     }
 
+    // Idle the device, then destroy every Vulkan handle in reverse
+    // construction order. Idempotent — safe to invoke from the
+    // destructor after a successful run or after a partial-init throw.
     void Cleanup()
     {
         if (m_device != VK_NULL_HANDLE)
@@ -2468,6 +2681,9 @@ private:
     PFN_vkCmdTraceRaysKHR m_vkCmdTraceRaysKHR = nullptr;
 };
 
+// Public C-style entry point exported by VulkanPathTracer.h. Constructs a
+// VulkanPathTracer instance on the stack and runs it; any throw escapes
+// upward to main().
 void RunVulkanPathTracer()
 {
     VulkanPathTracer app;

@@ -1,3 +1,17 @@
+// path_tracer_common.glsl — shared shader header.
+//
+// Pulled in by every ray-tracing stage (rgen, rmiss, rchit, shadow.rmiss)
+// and by sky.comp via #include. Defines:
+//   * The descriptor-set bindings (output image, TLAS, scene UBO, the
+//     instance/material/vertex/index SSBOs).
+//   * The push-constant block carrying camera + per-frame state.
+//   * Common math helpers, the RNG (Wang hash + LCG), the GGX/Fresnel
+//     utilities used by the closest-hit shader, and the sun cone-sampling
+//     primitives used for direct lighting.
+//   * The RayPayload / ShadowPayload structs that flow through traceRayEXT.
+// The bindings here MUST match the descriptor-set layout built in
+// VulkanPathTracer::CreateDescriptorSetLayout().
+
 #ifndef PATH_TRACER_COMMON_INCLUDED
 #define PATH_TRACER_COMMON_INCLUDED
 
@@ -65,6 +79,8 @@ layout(push_constant) uniform PushConstants
 
 #include "sky.comp"
 
+// Unpacked, shader-friendly material. Built from the std430-packed
+// MaterialData by GetInstanceMaterial().
 struct Material
 {
     vec3 albedo;
@@ -74,6 +90,9 @@ struct Material
     vec3 extinction;
 };
 
+// Path-tracing payload sent to traceRayEXT. radiance accumulates light,
+// throughput tracks the running BSDF/PDF product, state.x carries the
+// RNG seed, state.y carries the current bounce index.
 struct RayPayload
 {
     vec4 radiance;
@@ -81,11 +100,15 @@ struct RayPayload
     uvec4 state;
 };
 
+// Lightweight payload for shadow rays — set to 1 by the shadow miss
+// shader if the path was unoccluded.
 struct ShadowPayload
 {
     uint visible;
 };
 
+// Wang hash — used to seed per-pixel RNG state from a tile-friendly
+// integer so neighbouring pixels diverge after one mix.
 uint Hash(uint x)
 {
     x ^= 2747636419u;
@@ -97,6 +120,8 @@ uint Hash(uint x)
     return x;
 }
 
+// Numerical-Recipes LCG. Cheap and good enough for Monte Carlo
+// integration when seeded by Hash() per pixel.
 float NextFloat(inout uint state)
 {
     state = 1664525u * state + 1013904223u;
@@ -113,6 +138,8 @@ vec3 GetSunDirection()
     return normalize(sceneData.skySunDirection.xyz);
 }
 
+// Evaluate the analytic sky model along a ray direction. Used by the
+// primary miss shader for image-based lighting.
 vec3 SampleSky(vec3 direction, inout uint rngState)
 {
     RNG rng;
@@ -122,11 +149,16 @@ vec3 SampleSky(vec3 direction, inout uint rngState)
     return sky * pc.skyBottomExposure.w;
 }
 
+// Solid angle of the sun cone — the area of a spherical cap with the
+// configured sun radius. Used to weight direct sun samples.
 float SunSolidAngle()
 {
     return 2.0 * PI * (1.0 - cos(SkySunRadius()));
 }
 
+// Sun radiance attenuated by the atmosphere along the sun direction —
+// "what reaches the ground" in the sky model. Reused by every direct
+// lighting sample.
 vec3 SunIncidentRadiance()
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
@@ -152,6 +184,8 @@ float MaxComponent(vec3 value)
     return max(value.r, max(value.g, value.b));
 }
 
+// Conductor Fresnel — supports complex IOR (eta + i·extinction) so the
+// same code path covers both dielectrics (extinction = 0) and metals.
 vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
 {
     cosThetaI = clamp(cosThetaI, 0.0, 1.0);
@@ -182,6 +216,9 @@ Material GetInstanceMaterial(InstanceData instanceData)
     return material;
 }
 
+// Reconstruct an object-space shading normal at a hit by interpolating
+// the three vertex normals with barycentrics. Falls back to the face
+// normal if interpolated normals are degenerate.
 vec3 GetTriangleObjectNormal(InstanceData instanceData, uint primitiveId, vec2 barycentrics)
 {
     uint firstIndex = instanceData.materialIndexFirstIndex.y + primitiveId * 3u;
@@ -201,6 +238,8 @@ vec3 GetTriangleObjectNormal(InstanceData instanceData, uint primitiveId, vec2 b
     return normalize(cross(edge0, edge1));
 }
 
+// Object-to-world normal transform via the transpose of the inverse
+// linear part — the standard rule for normals under non-uniform scale.
 vec3 TransformNormalToWorld(vec3 objectNormal, mat3 worldToObjectLinear)
 {
     return normalize(transpose(worldToObjectLinear) * objectNormal);

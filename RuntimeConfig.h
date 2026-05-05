@@ -1,5 +1,13 @@
 #pragma once
 
+// RuntimeConfig — strongly-typed mirror of path_tracer_config.json.
+//
+// This header also defines the project's tiny self-contained math types
+// (Vec3 and helpers). Keeping math here — rather than pulling in GLM —
+// matches the project's "no third-party wrapper clutter" goal and keeps
+// the same Vec3 layout shared between the OBJ loader, config parser, and
+// the Vulkan front-end.
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -7,8 +15,12 @@
 #include <string>
 #include <vector>
 
+// Single source of truth for pi across the C++ side; shaders define their
+// own copies in path_tracer_common.glsl.
 inline constexpr float kPi = 3.14159265358979323846f;
 
+// Plain 3-component float vector. Trivially copyable, matches std430 layout
+// for a tightly-packed vec3 on the GPU once padded by the caller.
 struct Vec3
 {
     float x = 0.0f;
@@ -73,6 +85,13 @@ inline Vec3 Cross(const Vec3& left, const Vec3& right)
     };
 }
 
+// Material parameters for the ray-tracing closest-hit shader.
+//
+// albedo     — diffuse reflectance in [0,1] per channel.
+// emission   — emissive radiance (non-negative; HDR allowed).
+// roughness  — GGX surface roughness in [0,1]; 0 = mirror, 1 = fully rough.
+// eta        — index of refraction per RGB channel (used by the Fresnel term).
+// extinction — absorption coefficient per RGB channel (conductor k value).
 struct MaterialConfig
 {
     std::array<float, 3> albedo{1.0f, 1.0f, 1.0f};
@@ -93,6 +112,8 @@ inline bool operator!=(const MaterialConfig& left, const MaterialConfig& right)
     return !(left == right);
 }
 
+// One mesh asset (path to an .obj file). Resolved against the search paths
+// in ResolveModelFilePath() at load time.
 struct ModelAssetConfig
 {
     std::string fileName = "box.obj";
@@ -108,6 +129,9 @@ inline bool operator!=(const ModelAssetConfig& left, const ModelAssetConfig& rig
     return !(left == right);
 }
 
+// One scene instance — references a mesh and a material by index into the
+// arrays in RuntimeConfig and supplies its own TRS transform.
+// Rotation is consumed as Euler angles in degrees (XYZ order in the loader).
 struct ModelInstanceConfig
 {
     Vec3 position{};
@@ -128,6 +152,13 @@ inline bool operator!=(const ModelInstanceConfig& left, const ModelInstanceConfi
     return !(left == right);
 }
 
+// Physical sky / atmosphere parameters fed to sky.comp. These follow the
+// Bruneton/Nishita single-scattering parameterization: Rayleigh + Mie
+// scattering against an Earth-sized sphere, plus a directional sun disk.
+//
+// Units are SI (metres) for the radii and scale heights; scattering
+// coefficients are 1/m. secondarySamples / viewSteps / samples control
+// numerical integration cost.
 struct SkySpectralConfig
 {
     std::array<float, 3> betaRayleigh{3.8e-6f, 13.5e-6f, 33.1e-6f};
@@ -146,6 +177,8 @@ struct SkySpectralConfig
     uint32_t samples = 1;
 };
 
+// Top-level configuration loaded from path_tracer_config.json. All fields
+// have defaults so a missing config still produces a valid scene.
 struct RuntimeConfig
 {
     uint32_t width = 960;
@@ -170,6 +203,17 @@ struct RuntimeConfig
     std::vector<ModelInstanceConfig> instances{ModelInstanceConfig{}};
 };
 
+// Resolve a runtime asset (config, SPIR-V blob, etc.) by checking the
+// executable directory, its parent, and the current working directory.
+// Returns {} when no candidate exists; the caller decides whether this is
+// fatal.
 std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName);
+
+// Load an entire text file into memory as a single std::string. Throws on
+// open / read failure or empty file.
 std::string LoadTextFile(const std::filesystem::path& filePath);
+
+// Parse and fully validate a path_tracer_config.json document. Throws
+// std::runtime_error with a descriptive context message on any structural
+// or semantic error.
 RuntimeConfig ParseRuntimeConfig(const std::string& jsonText);

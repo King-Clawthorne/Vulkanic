@@ -1,7 +1,24 @@
+// sky.comp — physical-sky model included by every shader stage.
+//
+// Despite the .comp name this is a header-style file: the actual entry
+// point is render_sky_pixel(), called from path_tracer.rmiss for every
+// missed primary/indirect ray. The model is a single-scattering Rayleigh
+// + Mie atmosphere parameterized by the constants in SceneData (Earth
+// radius, scale heights, scattering coefficients, sun direction, etc.).
+//
+// Numerical integration cost is controlled by skySampleCounts:
+//   x = secondary samples (along the sun-light path)
+//   y = view steps        (along the eye ray)
+//   z = primary samples   (per pixel sky integration)
+// These also drive the Russian-roulette / cone-sampling RNG below.
+
 #ifndef SKY_COMP_INCLUDED
 #define SKY_COMP_INCLUDED
 
 const float PI = 3.14159265358979323846;
+
+// Lightweight per-shader RNG state. Distinct from the path-tracing RNG
+// above so the sky integration can run with its own decorrelated stream.
 
 struct RNG
 {
@@ -26,6 +43,8 @@ void sky_build_basis(vec3 n, out vec3 t, out vec3 b)
     b = cross(n, t);
 }
 
+// Uniformly sample a direction inside a cone of half-angle coneAngle
+// around dir. Used both for sun-disk sampling and for soft sun shadowing.
 vec3 sample_cone(vec3 dir, float coneAngle, inout RNG rng)
 {
     vec2 xi = rng_next2(rng);
@@ -114,6 +133,8 @@ int SkySamples()
 // ATMOSPHERE INTERSECTION
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Sphere intersection in geocentric coordinates. Returns the entry/exit
+// distances; a negative x with positive y means the ray starts inside.
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
 {
     float b = dot(origin, dir);
@@ -128,6 +149,8 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
 // OPTICAL DEPTH INTEGRALS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Approximate Rayleigh / Mie optical depth along a ray by summing
+// exponentially-attenuated density at num_steps midpoint samples.
 vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
 {
     vec2 t_atmos = ray_sphere(origin, dir, SkyAtmosphereRadius());
@@ -148,6 +171,9 @@ vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
     return vec2(od_R, od_M);
 }
 
+// Spectral transmittance along (origin, dir): the per-channel fraction
+// of light that survives Rayleigh + Mie extinction. Used both for
+// sun-light attenuation and for inter-slab attenuation in sky_tint.
 vec3 transmittance(vec3 origin, vec3 dir, int steps)
 {
     vec2 od = optical_depth_ray(origin, dir, steps);
@@ -175,6 +201,8 @@ float phase_mie(float cos_theta)
 // SKY_TINT — spectral sky color for view direction V toward sun L
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Sun-disk visibility factor [0,1] with a thin softened limb (SkySunAa)
+// to keep the disk anti-aliased without supersampling.
 float sun_disk(vec3 V, vec3 L)
 {
     float mu = dot(normalize(V), normalize(L));
@@ -183,6 +211,10 @@ float sun_disk(vec3 V, vec3 L)
     return smoothstep(outer, inner, mu);
 }
 
+// Single-scattering inscatter integral along view direction V toward
+// sun direction L. Walks the atmosphere in SkyViewSteps slabs,
+// accumulating Rayleigh + Mie inscatter weighted by their phase
+// functions and the transmittance from each slab to the sun.
 vec3 sky_tint(vec3 V, vec3 L)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
@@ -230,6 +262,9 @@ vec3 sky_tint(vec3 V, vec3 L)
     return color;
 }
 
+// One-sample sky radiance: blends the deterministic single-scatter
+// integral with a stochastic multi-scatter approximation (cone-sampled
+// around the sun) and adds the direct sun-disk contribution on top.
 vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
 {
     vec3 singleScatter = sky_tint(V, L);
@@ -252,6 +287,8 @@ vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
     return sky + directSun;
 }
 
+// Public entry point used by the path tracer: averages SkySamples
+// independent sky_radiance() evaluations to drive variance down.
 vec3 render_sky_pixel(vec3 V, vec3 L, inout RNG rng)
 {
     vec3 accum = vec3(0.0);

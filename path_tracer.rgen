@@ -1,3 +1,14 @@
+// Ray-generation shader.
+//
+// One launch per output pixel. For each pixel we:
+//   1. Seed an LCG-style RNG from the pixel coords + frame number so each
+//      frame is decorrelated.
+//   2. Stratified sub-pixel jitter for samplesPerPixel rays.
+//   3. Build a primary ray from the camera's TRS basis stored in the push
+//      constants.
+//   4. Trace, accumulate the returned radiance, then tonemap and store in
+//      the output image consumed by the swapchain blit.
+
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_tracing : require
@@ -8,6 +19,8 @@ layout(location = 0) rayPayloadEXT RayPayload payload;
 
 void main()
 {
+    // gl_LaunchSizeEXT is rounded up to the dispatch granularity, so
+    // discard threads outside the render target instead of writing to OOB.
     if (gl_LaunchIDEXT.x >= pc.imageSize.x || gl_LaunchIDEXT.y >= pc.imageSize.y)
     {
         return;
@@ -27,8 +40,12 @@ void main()
 
     for (uint sampleIndex = 0; sampleIndex < samplesPerPixel; ++sampleIndex)
     {
+        // Sub-pixel jitter — the RNG advance gives us decorrelated samples
+        // across both pixel and frame.
         vec2 jitter = NextFloat2(rngState);
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
+        // Screen space goes [-1,1] in X and Y; flip Y to match the image
+        // coordinate convention (origin at top-left).
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
         vec3 rayOrigin = cameraPosition;
@@ -56,6 +73,8 @@ void main()
         accumulatedRadiance += payload.radiance.xyz;
     }
 
+    // Average across SPP, scale by the exposure stop, and tonemap into
+    // display-referred space.
     vec3 displayColour = ToneMap(accumulatedRadiance / max(1u, samplesPerPixel) * pc.skyBottomExposure.w);
     imageStore(outputImage, ivec2(pixel), vec4(displayColour, 1.0));
 }

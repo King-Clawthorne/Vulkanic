@@ -1,3 +1,13 @@
+// RuntimeConfig.cpp — JSON config loader.
+//
+// Implements a tiny, dependency-free JSON parser (JsonParser) plus a set of
+// strongly-typed converters that map the parsed tree onto the
+// RuntimeConfig struct. The parser supports the subset of RFC 8259 actually
+// used by path_tracer_config.json: objects, arrays, strings (with the
+// standard escape set, no \uXXXX), doubles via std::strtod, true/false/null,
+// and arbitrary whitespace. All errors carry a human-readable context
+// string identifying the offending JSON path.
+
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
@@ -17,6 +27,9 @@
 #include <utility>
 #include <variant>
 
+// Search a fixed list of conventional locations for a runtime file
+// (config / SPIR-V / etc.). Mirrors ResolveModelFilePath() but uses wide
+// strings since these names are baked into the binary as L"..." literals.
 std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
 {
     WCHAR exePath[MAX_PATH]{};
@@ -44,6 +57,9 @@ std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
     return {};
 }
 
+// Slurp a whole file into a std::string. Opened in binary mode so size
+// reported by tellg() matches the byte count read; otherwise CRLF
+// translation on Windows would silently shrink the buffer.
 std::string LoadTextFile(const std::filesystem::path& filePath)
 {
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
@@ -71,6 +87,9 @@ std::string LoadTextFile(const std::filesystem::path& filePath)
 
 namespace
 {
+// Generic JSON node. The std::variant carries the actual payload; the
+// AsXxx() helpers fail loudly with a context string when a node has the
+// wrong type, which keeps the call sites concise.
 struct JsonValue
 {
     using Array = std::vector<JsonValue>;
@@ -127,11 +146,14 @@ struct JsonValue
     }
 };
 
+// Recursive-descent JSON parser over a borrowed std::string_view. The
+// parser is single-use: construct, call Parse(), then discard.
 class JsonParser
 {
 public:
     explicit JsonParser(std::string_view text) : m_text(text) {}
 
+    // Parse the entire document and assert no trailing data remains.
     JsonValue Parse()
     {
         JsonValue value = ParseValue();
@@ -144,6 +166,9 @@ public:
     }
 
 private:
+    // Dispatch on the first non-whitespace character to one of the typed
+    // sub-parsers. Each sub-parser leaves m_position pointing past its
+    // last consumed character.
     JsonValue ParseValue()
     {
         SkipWhitespace();
@@ -311,6 +336,9 @@ private:
         throw std::runtime_error("Unterminated JSON string.");
     }
 
+    // Defer numeric parsing to std::strtod; it accepts the JSON number
+    // grammar (and a little more, but the dispatcher in ParseValue already
+    // gates on '-' or a digit so the slack is harmless).
     double ParseNumber()
     {
         const char* begin = m_text.data() + m_position;
@@ -396,6 +424,8 @@ const JsonValue* FindMember(const JsonValue::Object& object, std::string_view ke
     return &iterator->second;
 }
 
+// Convert a JSON number to float, rejecting NaN/Inf and out-of-range
+// magnitudes that would silently saturate when cast.
 float ParseFloatValue(const JsonValue& value, const std::string& context)
 {
     const double number = value.AsNumber(context);
@@ -408,6 +438,8 @@ float ParseFloatValue(const JsonValue& value, const std::string& context)
     return static_cast<float>(number);
 }
 
+// Convert a JSON number to uint32_t, rejecting fractional or negative
+// inputs so the caller never has to second-guess floor/round behavior.
 uint32_t ParseUint32Value(const JsonValue& value, const std::string& context)
 {
     const double number = value.AsNumber(context);
@@ -483,6 +515,8 @@ bool HasNegativeElement(const std::array<float, 3>& value)
     return value[0] < 0.0f || value[1] < 0.0f || value[2] < 0.0f;
 }
 
+// Fill a MaterialConfig from a JSON object. Every field is optional; the
+// MaterialConfig defaults model a neutral white diffuse surface.
 MaterialConfig ParseMaterialConfig(const JsonValue::Object& object)
 {
     MaterialConfig material{};
@@ -510,6 +544,9 @@ ModelAssetConfig ParseModelAssetConfig(const JsonValue::Object& object, const st
     return model;
 }
 
+// Pull the global render / camera / input / sky sections off the root
+// object. Each sub-section is optional, and within a section every field
+// is optional, so partial configs are valid.
 void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
 {
     if (const JsonValue* renderValue = FindMember(root, "render"))
@@ -568,6 +605,10 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
     }
 }
 
+// Build the scene graph: materials and models are declared as named
+// dictionaries, instances are an ordered array referring to them by name.
+// The function resolves names to indices here so downstream code only ever
+// sees plain integer references.
 void ParseSceneConfig(const JsonValue::Object& root, RuntimeConfig& config)
 {
     const JsonValue* materialsValue = FindMember(root, "materials");
@@ -712,6 +753,10 @@ void ValidateInstance(const ModelInstanceConfig& instance, size_t instanceIndex,
 }
 } // namespace
 
+// Public entry point: parse, populate, then run an exhaustive set of
+// semantic checks. Throws on the first problem found rather than
+// accumulating errors; the renderer cannot meaningfully degrade past most
+// of these issues so fail-fast is the simpler contract.
 RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
 {
     RuntimeConfig config{};

@@ -1,3 +1,11 @@
+// ObjModel.cpp — minimal Wavefront .obj loader.
+//
+// The parser walks the file line-by-line, accumulates v / vn records into
+// flat arrays, and emits a triangulated, GPU-ready vertex buffer for each
+// face. Polygons with more than three vertices are fan-triangulated; faces
+// without explicit normals get a synthesized face normal so the closest-hit
+// shader always has a usable shading normal.
+
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 
@@ -15,12 +23,19 @@
 
 namespace
 {
+// One vertex reference in a face record. OBJ uses 1-based indices and
+// allows negative indices (relative to the end of the array), so the raw
+// integer is preserved here and resolved later by ResolveObjIndex().
 struct ObjIndex
 {
     int position = 0;
     int normal = 0;
 };
 
+// Normalize, but fall back to +Y when the vector is degenerate. Used both
+// for parsed normals and for synthesized face normals on degenerate
+// triangles, where any unit vector is preferable to producing NaNs that
+// would later poison the BVH and shading code.
 Vec3 NormalizeSafe(const Vec3& value)
 {
     const float length = Length(value);
@@ -31,6 +46,9 @@ Vec3 NormalizeSafe(const Vec3& value)
     return value * (1.0f / length);
 }
 
+// Translate a raw OBJ index into a zero-based array position.
+// OBJ semantics: positive = 1-based from the start, negative = relative
+// from the end (-1 = last element), 0 is illegal.
 int ResolveObjIndex(int index, size_t count, const std::string& context)
 {
     if (index > 0)
@@ -56,6 +74,9 @@ int ResolveObjIndex(int index, size_t count, const std::string& context)
     throw std::runtime_error(context + " uses OBJ index 0, which is invalid.");
 }
 
+// Parse an integer from a string_view without copying it into a std::string.
+// std::from_chars guarantees the entire token must be consumed for success,
+// so trailing garbage in a face token is rejected here.
 int ParseObjInteger(std::string_view token, const std::string& context)
 {
     int value = 0;
@@ -67,6 +88,9 @@ int ParseObjInteger(std::string_view token, const std::string& context)
     return value;
 }
 
+// Parse a single face vertex reference of the form "v", "v/vt", "v//vn",
+// or "v/vt/vn". Texture coordinates are accepted syntactically but ignored
+// because the path tracer only consumes positions and normals.
 ObjIndex ParseFaceIndex(std::string_view token, const std::string& context)
 {
     ObjIndex result{};
@@ -95,6 +119,9 @@ ObjIndex ParseFaceIndex(std::string_view token, const std::string& context)
     return result;
 }
 
+// Pack a (position, normal) pair into the GPU-aligned ModelVertex layout
+// expected by the ray-tracing pipeline. position.w is forced to 1 so the
+// shader can multiply by an instance transform without a separate splat.
 ModelVertex MakeModelVertex(const Vec3& position, const Vec3& normal)
 {
     ModelVertex vertex{};
@@ -109,6 +136,9 @@ ModelVertex MakeModelVertex(const Vec3& position, const Vec3& normal)
 }
 } // namespace
 
+// Search a small, fixed list of locations for a model file. The order is
+// chosen so that an installed deployment (Models/ next to the exe) takes
+// precedence over the source-tree layout (Models/ next to the build dir).
 std::filesystem::path ResolveModelFilePath(const std::string& fileName)
 {
     const std::filesystem::path filePath(fileName);
@@ -144,6 +174,12 @@ std::filesystem::path ResolveModelFilePath(const std::string& fileName)
     return {};
 }
 
+// Stream the file line-by-line and build an indexed triangle mesh.
+//
+// The function intentionally produces a 1:1 vertex-to-index mapping rather
+// than welding shared vertices: the path tracer's BLAS build is fast even
+// for redundant geometry, and skipping a hash-based dedup keeps the loader
+// short and predictable.
 ObjModel LoadObjModel(const std::filesystem::path& filePath)
 {
     std::ifstream file(filePath);
@@ -227,6 +263,10 @@ ObjModel LoadObjModel(const std::filesystem::path& filePath)
             model.indices.push_back(vertexIndex);
         };
 
+        // Fan-triangulate the face: anchor on vertex 0 and emit
+        // (0, i, i+1) triangles. Works for convex polygons; concave
+        // n-gons in malformed assets will produce visible artifacts but
+        // are not a supported input.
         for (size_t i = 1; i + 1 < faceIndices.size(); ++i)
         {
             const int i0 = ResolveObjIndex(faceIndices[0].position,
