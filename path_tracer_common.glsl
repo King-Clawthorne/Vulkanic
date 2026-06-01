@@ -25,6 +25,9 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 skySunRadiance;
     vec4 skySunDirection;
     uvec4 skySampleCounts;
+    // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
+    // orders, z = Mie table angle bins, w unused.
+    vec4 skyVrtParams;
 } sceneData;
 
 struct InstanceData
@@ -34,7 +37,7 @@ struct InstanceData
 
 struct MaterialData
 {
-    vec4 albedoRoughness;
+    vec4 albedo;
     vec4 emission;
     vec4 eta;
     vec4 extinction;
@@ -66,6 +69,14 @@ layout(std430, set = 0, binding = 6) readonly buffer IndexBuffer
     uint indices[];
 } indexBuffer;
 
+// Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
+// (F11, F12, F33, F34) at one scattering angle; entries are stored band-major
+// (band * angleBins + bin), bands = R,G,B, bin i ↦ theta = i/(bins-1)·π.
+layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
+{
+    vec4 entries[];
+} mieMatrixBuffer;
+
 layout(push_constant) uniform PushConstants
 {
     vec4 cameraPositionFrame;
@@ -74,8 +85,9 @@ layout(push_constant) uniform PushConstants
     vec4 cameraUpTanHalfFovY;
     vec4 skyBottomExposure;
     vec4 skyTopAspect;
-    // Camera polarization filter: x = enabled (0/1), y = filter axis angle
-    // in radians (measured in the image plane from the camera right axis).
+    // Camera polarization filter: x = enabled (0/1), y = major-axis angle
+    // in radians (image plane, from the camera right axis), z = ellipticity
+    // angle in radians (-pi/4..pi/4; 0 = linear, +/-pi/4 = circular), w unused.
     vec4 polarizer;
     uvec2 imageSize;
 } pc;
@@ -88,7 +100,6 @@ struct Material
 {
     vec3 albedo;
     vec3 emission;
-    float roughness;
     vec3 eta;
     vec3 extinction;
 };
@@ -142,7 +153,8 @@ vec3 GetSunDirection()
 }
 
 // Evaluate the analytic sky model along a ray direction. Used by the
-// primary miss shader for image-based lighting.
+// primary miss shader for image-based lighting on indirect bounces (intensity
+// only, single scattering for speed).
 vec3 SampleSky(vec3 direction, inout uint rngState)
 {
     RNG rng;
@@ -150,6 +162,47 @@ vec3 SampleSky(vec3 direction, inout uint rngState)
     vec3 sky = render_sky_pixel(direction, GetSunDirection(), rng);
     rngState = rng.state;
     return sky * pc.skyBottomExposure.w;
+}
+
+// Full polarized vector-radiative-transfer sky for the camera-visible ray.
+// Returns the exposure-scaled radiance and, via out parameters: the degree and
+// camera-plane axis angle of LINEAR polarization, plus the signed degree of
+// CIRCULAR polarization (Stokes V/I; sign = handedness). Circular polarization
+// is purely a multiple-scattering, Mie-driven effect here.
+vec3 SampleSkyStokes(vec3 direction, inout uint rngState,
+                     out float degree, out float axisAngle, out float circularDegree)
+{
+    RNG rng;
+    rng.state = rngState;
+    vec3 sumI = vec3(0.0);
+    vec3 sumQ = vec3(0.0);
+    vec3 sumU = vec3(0.0);
+    vec3 sumV = vec3(0.0);
+    int n = max(1, SkySamples());
+    for (int i = 0; i < n; ++i)
+    {
+        Stokes s = render_sky_stokes(direction, GetSunDirection(), SkyScatteringOrders(), rng);
+        sumI += s.I;
+        sumQ += s.Q;
+        sumU += s.U;
+        sumV += s.V;
+    }
+    float inv = 1.0 / float(n);
+    sumI *= inv;
+    sumQ *= inv;
+    sumU *= inv;
+    sumV *= inv;
+    rngState = rng.state;
+
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float intensity = dot(sumI, luma);
+    float q = dot(sumQ, luma);
+    float u = dot(sumU, luma);
+    float v = dot(sumV, luma);
+    degree = clamp(length(vec2(q, u)) / max(intensity, 1.0e-6), 0.0, 1.0);
+    axisAngle = 0.5 * atan(u, q);
+    circularDegree = clamp(v / max(intensity, 1.0e-6), -1.0, 1.0);
+    return sumI * pc.skyBottomExposure.w;
 }
 
 // Solid angle of the sun cone — the area of a spherical cap with the
@@ -248,10 +301,6 @@ void RecordPolarization(inout RayPayload p, vec3 incomingDir, vec3 normal, Mater
     float rpScalar = dot(rp, luma);
     float degree = (rsScalar - rpScalar) / max(rsScalar + rpScalar, 1.0e-4);
 
-    // Rough surfaces scatter the reflected polarization; smooth ones preserve
-    // it. Fade the effect out as roughness rises.
-    degree *= (1.0 - clamp(material.roughness, 0.0, 1.0));
-
     // Orientation of the polarization axis projected into the camera image
     // plane, measured from the camera right axis (matches the filter angle).
     float axisX = dot(sAxis, pc.cameraRightBounces.xyz);
@@ -265,9 +314,8 @@ Material GetInstanceMaterial(InstanceData instanceData)
 {
     Material material;
     MaterialData materialData = materialBuffer.materials[instanceData.materialIndexFirstIndex.x];
-    material.albedo = materialData.albedoRoughness.xyz;
+    material.albedo = materialData.albedo.xyz;
     material.emission = materialData.emission.xyz;
-    material.roughness = materialData.albedoRoughness.w;
     material.eta = materialData.eta.xyz;
     material.extinction = materialData.extinction.xyz;
     return material;

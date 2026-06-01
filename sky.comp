@@ -129,6 +129,21 @@ int SkySamples()
     return int(sceneData.skySampleCounts.z);
 }
 
+float SkyRayleighDepolarization()
+{
+    return sceneData.skyVrtParams.x;
+}
+
+int SkyScatteringOrders()
+{
+    return int(sceneData.skyVrtParams.y);
+}
+
+int SkyMieAngleBins()
+{
+    return int(sceneData.skyVrtParams.z);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ATMOSPHERE INTERSECTION
 // ═══════════════════════════════════════════════════════════════════════════
@@ -197,10 +212,6 @@ float phase_mie(float cos_theta)
     return (1.0 - g2) / (4.0 * PI * denom);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SKY_TINT — spectral sky color for view direction V toward sun L
-// ═══════════════════════════════════════════════════════════════════════════
-
 // Sun-disk visibility factor [0,1] with a thin softened limb (SkySunAa)
 // to keep the disk anti-aliased without supersampling.
 float sun_disk(vec3 V, vec3 L)
@@ -211,94 +222,346 @@ float sun_disk(vec3 V, vec3 L)
     return smoothstep(outer, inner, mu);
 }
 
-// Single-scattering inscatter integral along view direction V toward
-// sun direction L. Walks the atmosphere in SkyViewSteps slabs,
-// accumulating Rayleigh + Mie inscatter weighted by their phase
-// functions and the transmittance from each slab to the sun.
-vec3 sky_tint(vec3 V, vec3 L)
+// ═══════════════════════════════════════════════════════════════════════════
+// POLARIZED VECTOR RADIATIVE TRANSFER
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The sky radiance is solved as a Stokes-vector (I, Q, U, V) transfer problem
+// rather than a scalar one. Single scattering is integrated deterministically
+// along the view ray; multiple scattering is estimated by Monte Carlo to 2nd
+// order with full polarization (the order that produces the neutral points and
+// pulls the peak degree of polarization down to a realistic value). Rayleigh
+// uses an analytic depolarized scattering matrix; aerosols use the precomputed
+// Lorenz–Mie matrix in mieMatrixBuffer.
+
+// Stokes vector carried per RGB band. Q is the linear component along the
+// frame's reference axis, U the 45° component, V the circular component.
+struct Stokes
 {
-    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    vec3 I;
+    vec3 Q;
+    vec3 U;
+    vec3 V;
+};
 
-    vec2 t_atmos = ray_sphere(origin, V, SkyAtmosphereRadius());
-    if (t_atmos.y < 0.0) return vec3(0.0);
+Stokes stokes_zero()
+{
+    Stokes s;
+    s.I = vec3(0.0);
+    s.Q = vec3(0.0);
+    s.U = vec3(0.0);
+    s.V = vec3(0.0);
+    return s;
+}
 
+Stokes stokes_add(Stokes a, Stokes b)
+{
+    Stokes r;
+    r.I = a.I + b.I;
+    r.Q = a.Q + b.Q;
+    r.U = a.U + b.U;
+    r.V = a.V + b.V;
+    return r;
+}
+
+Stokes stokes_scale(Stokes a, vec3 k)
+{
+    Stokes r;
+    r.I = a.I * k;
+    r.Q = a.Q * k;
+    r.U = a.U * k;
+    r.V = a.V * k;
+    return r;
+}
+
+// Transverse (meridian) basis for a beam propagating along d, built from a
+// fixed world-up reference so successive scattering events share a consistent
+// polarization reference frame.
+void beam_basis(vec3 d, out vec3 a, out vec3 b)
+{
+    vec3 up = abs(d.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    a = normalize(up - d * dot(d, up));
+    b = cross(d, a);
+}
+
+// Re-express a Stokes vector from transverse frame (oldA,oldB) to (newA,newB);
+// both bases are orthonormal and perpendicular to the same propagation
+// direction. Only the linear (Q,U) components rotate.
+Stokes stokes_reframe(Stokes s, vec3 oldA, vec3 oldB, vec3 newA, vec3 newB)
+{
+    float c = dot(newA, oldA);
+    float sn = dot(newA, oldB);
+    float c2 = c * c - sn * sn; // cos 2φ
+    float s2 = 2.0 * c * sn;    // sin 2φ
+    Stokes r = s;
+    r.Q = s.Q * c2 + s.U * s2;
+    r.U = -s.Q * s2 + s.U * c2;
+    return r;
+}
+
+// Block-diagonal single-scattering Mueller matrix, per band:
+//   [[m11,m12,0,0],[m12,m22,0,0],[0,0,m33,m34],[0,0,-m34,m44]].
+struct Mueller
+{
+    vec3 m11;
+    vec3 m12;
+    vec3 m22;
+    vec3 m33;
+    vec3 m34;
+    vec3 m44;
+};
+
+Stokes mueller_apply(Mueller m, Stokes s)
+{
+    Stokes r;
+    r.I = m.m11 * s.I + m.m12 * s.Q;
+    r.Q = m.m12 * s.I + m.m22 * s.Q;
+    r.U = m.m33 * s.U + m.m34 * s.V;
+    r.V = -m.m34 * s.U + m.m44 * s.V;
+    return r;
+}
+
+// Rayleigh scattering matrix (wavelength-independent) with molecular
+// depolarization (Hansen & Travis 1974), normalized so (1/4π)∫m11 dΩ = 1.
+Mueller rayleigh_mueller(float cosTheta)
+{
+    float rho = SkyRayleighDepolarization();
+    float delta = (1.0 - rho) / (1.0 + 0.5 * rho);
+    float deltaP = (1.0 - 2.0 * rho) / max(1.0 - rho, 1.0e-4);
+    float mu2 = cosTheta * cosTheta;
+    float base = 0.75 * (1.0 + mu2);
+    float p12 = -0.75 * (1.0 - mu2);
+    float p33 = 1.5 * cosTheta;
+
+    Mueller m;
+    m.m11 = vec3(delta * base + (1.0 - delta));
+    m.m12 = vec3(delta * p12);
+    m.m22 = vec3(delta * base);
+    m.m33 = vec3(delta * p33);
+    m.m34 = vec3(0.0);
+    m.m44 = vec3(delta * deltaP * p33);
+    return m;
+}
+
+// Sample the precomputed Lorenz–Mie table (F11,F12,F33,F34) per band at the
+// given scattering angle, linearly interpolating between angle bins. For
+// spheres F22 = F11 and F44 = F33.
+Mueller mie_mueller(float cosTheta)
+{
+    int bins = max(2, SkyMieAngleBins());
+    float theta = acos(clamp(cosTheta, -1.0, 1.0));
+    float fbin = theta / PI * float(bins - 1);
+    int i0 = clamp(int(floor(fbin)), 0, bins - 1);
+    int i1 = min(i0 + 1, bins - 1);
+    float frac = fbin - float(i0);
+
+    vec3 f11 = vec3(0.0);
+    vec3 f12 = vec3(0.0);
+    vec3 f33 = vec3(0.0);
+    vec3 f34 = vec3(0.0);
+    for (int band = 0; band < 3; ++band)
+    {
+        vec4 e0 = mieMatrixBuffer.entries[band * bins + i0];
+        vec4 e1 = mieMatrixBuffer.entries[band * bins + i1];
+        vec4 e = mix(e0, e1, frac);
+        f11[band] = e.x;
+        f12[band] = e.y;
+        f33[band] = e.z;
+        f34[band] = e.w;
+    }
+
+    Mueller m;
+    m.m11 = f11;
+    m.m12 = f12;
+    m.m22 = f11;
+    m.m33 = f33;
+    m.m34 = f34;
+    m.m44 = f33;
+    return m;
+}
+
+// Volume scattering matrix at a point: (1/4π)(β_R ρ_R · Rayleigh +
+// β_M ρ_M · Mie), so m11 plays the role of the phase function in the
+// in-scatter integral. Elements are per band.
+Mueller volume_scatter_mueller(float cosTheta, float rhoR, float rhoM)
+{
+    Mueller r = rayleigh_mueller(cosTheta);
+    Mueller a = mie_mueller(cosTheta);
+    vec3 wR = SkyBetaR() * rhoR;
+    vec3 wM = vec3(SkyBetaM() * rhoM);
+    float inv4pi = 1.0 / (4.0 * PI);
+
+    Mueller c;
+    c.m11 = (wR * r.m11 + wM * a.m11) * inv4pi;
+    c.m12 = (wR * r.m12 + wM * a.m12) * inv4pi;
+    c.m22 = (wR * r.m22 + wM * a.m22) * inv4pi;
+    c.m33 = (wR * r.m33 + wM * a.m33) * inv4pi;
+    c.m34 = (wR * r.m34 + wM * a.m34) * inv4pi;
+    c.m44 = (wR * r.m44 + wM * a.m44) * inv4pi;
+    return c;
+}
+
+// Scatter an incoming Stokes beam (propagating along din, expressed in its own
+// meridian frame) into outgoing direction dout, returning the result in dout's
+// meridian frame. Handles the meridian→scattering-plane→meridian rotations.
+Stokes scatter_stokes(Stokes sIn, vec3 din, vec3 dout, float rhoR, float rhoM)
+{
+    float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
+    Mueller m = volume_scatter_mueller(cosTheta, rhoR, rhoM);
+
+    vec3 ain;
+    vec3 bin;
+    beam_basis(din, ain, bin);
+    vec3 aout;
+    vec3 bout;
+    beam_basis(dout, aout, bout);
+
+    vec3 p = cross(din, dout);
+    float pl = length(p);
+    if (pl < 1.0e-6)
+    {
+        // Forward/back scatter: scattering plane is undefined and p12 ≈ 0, so
+        // polarization is negligible — apply the matrix in the incoming frame.
+        return mueller_apply(m, sIn);
+    }
+    p /= pl;
+    vec3 sInAxis = cross(p, din);   // in-plane, ⊥ din (parallel reference)
+    vec3 sOutAxis = cross(p, dout); // in-plane, ⊥ dout
+
+    Stokes s = stokes_reframe(sIn, ain, bin, sInAxis, p);
+    s = mueller_apply(m, s);
+    s = stokes_reframe(s, sOutAxis, p, aout, bout);
+    return s;
+}
+
+// Single-scattering Stokes radiance seen from origin looking along viewDir
+// (sun direction L). Result is expressed in the meridian frame of the
+// outgoing (-viewDir) beam.
+Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
+{
+    Stokes result = stokes_zero();
+    vec2 t_atmos = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
+    if (t_atmos.y < 0.0)
+    {
+        return result;
+    }
     float t_start = max(t_atmos.x, 0.0);
     float t_end = t_atmos.y;
+    float step_size = (t_end - t_start) / float(steps);
 
-    float step_size = (t_end - t_start) / float(SkyViewSteps());
-    vec3 in_scatter_R = vec3(0.0);
-    vec3 in_scatter_M = vec3(0.0);
+    vec3 din = -L;        // sunlight propagation direction
+    vec3 dout = -viewDir; // toward the observer
     vec3 T_cam = vec3(1.0);
 
-    float cos_theta = dot(V, L);
-    float ph_R = phase_rayleigh(cos_theta);
-    float ph_M = phase_mie(cos_theta);
+    Stokes sSun = stokes_zero();
+    sSun.I = vec3(1.0); // unit unpolarized sun; radiance folded in below
 
-    for (int i = 0; i < SkyViewSteps(); i++)
+    for (int i = 0; i < steps; ++i)
     {
         float t = t_start + (float(i) + 0.5) * step_size;
-        vec3 pos = origin + V * t;
-
+        vec3 pos = origin + viewDir * t;
         float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
-        float rho_R = exp(-altitude / SkyScaleHeightRayleigh());
-        float rho_M = exp(-altitude / SkyScaleHeightMie());
+        float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
+        float rhoM = exp(-altitude / SkyScaleHeightMie());
 
-        vec3 T_slab = exp(-(SkyBetaR() * rho_R + SkyBetaM() * rho_M) * step_size);
-        T_cam *= T_slab;
-
-        vec3 sun_dir_at_pos = normalize(L);
-        if (dot(normalize(pos), sun_dir_at_pos) < -0.02) continue;
-
+        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM) * step_size);
+        if (dot(normalize(pos), L) < -0.02)
+        {
+            continue;
+        }
         vec3 T_sun = transmittance(pos, L, 8);
 
-        vec3 scatter_R = SkyBetaR() * rho_R * ph_R * T_cam * T_sun;
-        vec3 scatter_M = SkyBetaM() * rho_M * ph_M * T_cam * T_sun;
-
-        in_scatter_R += scatter_R * step_size;
-        in_scatter_M += scatter_M * step_size;
+        Stokes scattered = scatter_stokes(sSun, din, dout, rhoR, rhoM);
+        vec3 w = SkySunRadiance() * T_cam * T_sun * step_size;
+        result = stokes_add(result, stokes_scale(scattered, w));
     }
-
-    vec3 color = SkySunRadiance() * (in_scatter_R + in_scatter_M);
-    return color;
+    return result;
 }
 
-// One-sample sky radiance: blends the deterministic single-scatter
-// integral with a stochastic multi-scatter approximation (cone-sampled
-// around the sun) and adds the direct sun-disk contribution on top.
-vec3 sky_radiance(vec3 V, vec3 L, inout RNG rng)
+// Full polarized sky radiance toward viewDir, returned in the camera image
+// plane (Q along camera-right) so the polarization filter can read it
+// directly. Single scattering is deterministic; 2nd-order multiple scattering
+// (enabled when SCATTERING_ORDERS ≥ 2) is Monte Carlo and fully polarized.
+Stokes render_sky_stokes(vec3 viewDir, vec3 L, int maxOrders, inout RNG rng)
 {
-    vec3 singleScatter = sky_tint(V, L);
+    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    int orders = max(1, maxOrders);
 
-    vec3 multiScatterAccum = vec3(0.0);
-    for (int i = 0; i < SkySecondarySamples(); ++i)
+    Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps());
+
+    if (orders >= 2)
     {
-        vec3 jitteredSun = sample_cone(L, 0.09, rng);
-        multiScatterAccum += sky_tint(V, jitteredSun);
+        vec2 t_atmos = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
+        if (t_atmos.y >= 0.0)
+        {
+            float t_start = max(t_atmos.x, 0.0);
+            float t_end = t_atmos.y;
+            int steps = SkyViewSteps();
+            float step_size = (t_end - t_start) / float(steps);
+            int dirSamples = max(1, SkySecondarySamples());
+            int innerSteps = max(2, steps / 2);
+            vec3 dout = -viewDir;
+            vec3 T_cam = vec3(1.0);
+
+            for (int i = 0; i < steps; ++i)
+            {
+                float t = t_start + (float(i) + 0.5) * step_size;
+                vec3 pos = origin + viewDir * t;
+                float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+                float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
+                float rhoM = exp(-altitude / SkyScaleHeightMie());
+                T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM) * step_size);
+
+                Stokes msAccum = stokes_zero();
+                for (int s = 0; s < dirSamples; ++s)
+                {
+                    // Uniform-sphere sample of the incoming direction wi.
+                    vec2 xi = rng_next2(rng);
+                    float z = 1.0 - 2.0 * xi.x;
+                    float rad = sqrt(max(0.0, 1.0 - z * z));
+                    float phi = 2.0 * PI * xi.y;
+                    vec3 wi = vec3(rad * cos(phi), z, rad * sin(phi));
+                    float invPdf = 4.0 * PI;
+
+                    // Single-scattered light arriving at pos along wi, then
+                    // re-scattered toward the observer (propagation dir -wi).
+                    Stokes inc = single_scatter_stokes(pos, wi, L, innerSteps);
+                    Stokes scattered = scatter_stokes(inc, -wi, dout, rhoR, rhoM);
+                    msAccum = stokes_add(msAccum, stokes_scale(scattered, vec3(invPdf)));
+                }
+
+                vec3 w = T_cam * step_size / float(dirSamples);
+                sky = stokes_add(sky, stokes_scale(msAccum, w));
+            }
+        }
     }
 
-    vec3 multiScatter = multiScatterAccum / float(SkySecondarySamples());
-    vec3 sky = mix(singleScatter, multiScatter, 0.35);
+    // Direct sun disk (unpolarized).
+    float disk = sun_disk(viewDir, L);
+    vec3 T_sunDisk = transmittance(origin, L, 16);
+    sky.I += disk * SkySunRadiance() * T_sunDisk;
 
-    float disk = sun_disk(V, L);
-    vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
-    vec3 T_sun = transmittance(origin, L, 16);
-    vec3 directSun = disk * SkySunRadiance() * T_sun;
-
-    return sky + directSun;
+    // Re-express in the camera image plane (Q along camera-right) for the filter.
+    vec3 aout;
+    vec3 bout;
+    beam_basis(-viewDir, aout, bout);
+    sky = stokes_reframe(sky, aout, bout, pc.cameraRightBounces.xyz, pc.cameraUpTanHalfFovY.xyz);
+    return sky;
 }
 
-// Public entry point used by the path tracer: averages SkySamples
-// independent sky_radiance() evaluations to drive variance down.
+// Public entry point used by the path tracer: averages SkySamples independent
+// polarized evaluations and returns the intensity (used for image-based
+// lighting on indirect bounces). The primary ray calls render_sky_stokes
+// directly so it can also read the polarization.
 vec3 render_sky_pixel(vec3 V, vec3 L, inout RNG rng)
 {
+    // Indirect bounces only need intensity; single scattering keeps them cheap.
     vec3 accum = vec3(0.0);
     for (int i = 0; i < SkySamples(); i++)
     {
-        accum += sky_radiance(V, L, rng);
+        accum += render_sky_stokes(V, L, 1, rng).I;
     }
-    accum /= float(SkySamples());
-
-    return accum;
+    return accum / float(SkySamples());
 }
 
 #endif

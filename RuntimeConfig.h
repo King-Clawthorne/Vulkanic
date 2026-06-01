@@ -89,22 +89,23 @@ inline Vec3 Cross(const Vec3& left, const Vec3& right)
 //
 // albedo     — diffuse reflectance in [0,1] per channel.
 // emission   — emissive radiance (non-negative; HDR allowed).
-// roughness  — GGX surface roughness in [0,1]; 0 = mirror, 1 = fully rough.
 // eta        — index of refraction per RGB channel (used by the Fresnel term).
 // extinction — absorption coefficient per RGB channel (conductor k value).
+//
+// Surfaces are always perfectly smooth (mirror); there is no roughness
+// parameter.
 struct MaterialConfig
 {
     std::array<float, 3> albedo{1.0f, 1.0f, 1.0f};
     std::array<float, 3> emission{0.0f, 0.0f, 0.0f};
-    float roughness = 0.0f;
     std::array<float, 3> eta{1.5f, 1.5f, 1.5f};
     std::array<float, 3> extinction{1.5f, 1.5f, 1.5f};
 };
 
 inline bool operator==(const MaterialConfig& left, const MaterialConfig& right)
 {
-    return left.albedo == right.albedo && left.emission == right.emission && left.roughness == right.roughness
-           && left.eta == right.eta && left.extinction == right.extinction;
+    return left.albedo == right.albedo && left.emission == right.emission && left.eta == right.eta
+           && left.extinction == right.extinction;
 }
 
 inline bool operator!=(const MaterialConfig& left, const MaterialConfig& right)
@@ -175,7 +176,33 @@ struct SkySpectralConfig
     uint32_t secondarySamples = 1;
     uint32_t viewSteps = 5;
     uint32_t samples = 1;
+
+    // ── Vector radiative transfer (polarized sky) ──
+    // Rayleigh molecular depolarization factor (air ≈ 0.0279). Caps the
+    // single-scatter degree of polarization below the ideal 1.0.
+    float rayleighDepolarization = 0.0279f;
+    // Aerosol model for the precomputed Lorenz–Mie scattering matrix.
+    float aerosolRefractiveIndexReal = 1.33f;
+    float aerosolRefractiveIndexImag = 0.0f;
+    float aerosolMeanRadiusMicrometers = 0.2f; // log-normal geometric mean radius
+    float aerosolSigma = 1.5f;                 // log-normal geometric std dev (> 1)
+    std::array<float, 3> aerosolWavelengthsNmRgb{680.0f, 550.0f, 440.0f};
+    uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
+    // Monte Carlo multiple-scattering depth for the polarized sky integrator.
+    uint32_t scatteringOrders = 3;
 };
+
+// True when any field that feeds the precomputed Lorenz–Mie scattering matrix
+// changes — the table is sun-independent, so it only needs rebuilding here.
+inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectralConfig& right)
+{
+    return left.aerosolRefractiveIndexReal != right.aerosolRefractiveIndexReal
+           || left.aerosolRefractiveIndexImag != right.aerosolRefractiveIndexImag
+           || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers
+           || left.aerosolSigma != right.aerosolSigma
+           || left.aerosolWavelengthsNmRgb != right.aerosolWavelengthsNmRgb
+           || left.mieTableAngleBins != right.mieTableAngleBins;
+}
 
 // Top-level configuration loaded from path_tracer_config.json. All fields
 // have defaults so a missing config still produces a valid scene.

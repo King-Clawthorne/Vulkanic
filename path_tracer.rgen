@@ -71,19 +71,30 @@ void main()
 
         rngState = payload.state.x;
 
-        // Camera polarization filter. RecordPolarization() stashed the
-        // degree (throughput.w) and axis angle (radiance.w) of the light
-        // leaving the first surface toward the camera. Malus's law for
-        // partially polarized light through an ideal linear polarizer:
-        // unpolarized light (degree = 0) is simply halved, while a fully
-        // polarized beam is cut to zero when the filter is crossed with it.
+        // Camera polarization filter. The analyzer is represented as a unit
+        // Stokes vector: its major-axis angle comes from polarizer.y and its
+        // ellipticity angle from polarizer.z. Linear is ellipticity 0; circular
+        // is +/-pi/4. The incoming Stokes components are reconstructed from
+        // the stored linear degree/axis plus signed circular V/I in state.z.
         float filterTransmission = 1.0;
         if (pc.polarizer.x > 0.5)
         {
             float degree = payload.throughput.w;
             float axisAngle = payload.radiance.w;
-            float deltaAngle = pc.polarizer.y - axisAngle;
-            filterTransmission = 0.5 * (1.0 + degree * cos(2.0 * deltaAngle));
+            float circularDegree = uintBitsToFloat(payload.state.z);
+
+            vec3 incomingStokes = vec3(
+                degree * cos(2.0 * axisAngle),
+                degree * sin(2.0 * axisAngle),
+                circularDegree);
+
+            float analyzerLinear = cos(2.0 * pc.polarizer.z);
+            vec3 analyzerStokes = vec3(
+                analyzerLinear * cos(2.0 * pc.polarizer.y),
+                analyzerLinear * sin(2.0 * pc.polarizer.y),
+                sin(2.0 * pc.polarizer.z));
+
+            filterTransmission = 0.5 * (1.0 + dot(incomingStokes, analyzerStokes));
         }
 
         accumulatedRadiance += payload.radiance.xyz * filterTransmission;

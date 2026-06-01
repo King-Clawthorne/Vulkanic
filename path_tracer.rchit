@@ -7,10 +7,9 @@
 //      sun direction and trace a shadow ray; on miss, add the GGX BRDF
 //      response weighted by sun radiance and solid angle.
 //   4. Russian-roulette path termination once depth ≥ 3.
-//   5. Indirect bounce: anisotropic GGX VNDF sampling (Heitz 2018) for
-//      the next direction, plus the Fdez-Aguera multiscatter energy-
-//      compensation term so rough surfaces don't lose energy at high
-//      roughness.
+//   5. Indirect bounce: GGX VNDF sampling (Heitz 2018) for the next
+//      direction. Surfaces are always perfectly smooth, so this resolves
+//      to a near-mirror reflection.
 //   6. Recurse via traceRayEXT into the same hitgroup; the path
 //      eventually escapes to the sky miss shader or is terminated by
 //      Russian roulette / max-bounce gating in the rgen shader.
@@ -129,10 +128,10 @@ void main()
 
     vec3 V_local = normalize(vec3(dot(V, tangent), dot(V, bitangent), dot(V, normal)));
 
-    float a = material.roughness * material.roughness;
-    float anisotropy = max(0.0, material.emission.x * 0.0);
-    float ax = max(0.001, a * (1.0 + anisotropy));
-    float ay = max(0.001, a * (1.0 - anisotropy));
+    // Surfaces are always perfectly smooth (roughness = 0), so the GGX
+    // roughness collapses to the clamp floor and the lobe is a tight mirror.
+    float ax = 0.001;
+    float ay = 0.001;
 
     // ── Direct sun lighting (next-event estimation, sampled over the sun cone) ──
     {

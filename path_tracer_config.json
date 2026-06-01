@@ -4,7 +4,7 @@
     "height": 540,
     "frameCount": 2,
     "samplesPerPixel": 32,
-    "maxBounces": 3
+    "maxBounces": 4
   },
   "camera": {
     "initialPosition": [0.0, 2.0, -10.0],
@@ -20,7 +20,7 @@
   },
   "sky": {
     "bottomColor": [0.03, 0.04, 0.06],
-    "exposure": 0.5,
+    "exposure": 1.0,
     "topColor": [0.55, 0.72, 0.95],
     "spectralConstants": {
       "BETA_R": [3.8e-6, 13.5e-6, 33.1e-6],
@@ -36,7 +36,15 @@
       "SUN_AA": 0.01,
       "secondarySamples": 1,
       "VIEW_STEPS": 5,
-      "Samples": 1
+      "Samples": 1,
+      "RAYLEIGH_DEPOLARIZATION": 0.0279,
+      "AEROSOL_IOR_REAL": 1.33,
+      "AEROSOL_IOR_IMAG": 0.0,
+      "AEROSOL_MEAN_RADIUS_UM": 0.2,
+      "AEROSOL_SIGMA": 1.5,
+      "AEROSOL_WAVELENGTHS_NM": [680.0, 550.0, 440.0],
+      "MIE_TABLE_ANGLE_BINS": 181,
+      "SCATTERING_ORDERS": 3
     }
   },
   "models": {
@@ -46,16 +54,14 @@
   },
   "materials": {
     "chrome": {
-      "albedo": [0.3, 0.6, 0.9],
+      "albedo": [0.8, 0.9, 1.0],
       "emission": [0.0, 0.0, 0.0],
-      "roughness": 1.0,
       "eta": [1.5, 1.5, 1.5],
       "extinction": [1.5, 1.5, 1.5]
     },
     "gold": {
-      "albedo": [0.9, 0.6, 0.3],
+      "albedo": [1.0, 0.9, 0.8],
       "emission": [0.0, 0.0, 0.0],
-      "roughness": 0.0,
       "eta": [0.2, 0.4, 1.5],
       "extinction": [3.1, 2.7, 1.9]
     }

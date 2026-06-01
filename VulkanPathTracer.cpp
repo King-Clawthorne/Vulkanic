@@ -26,6 +26,7 @@
 
 #include "VulkanPathTracer.h"
 
+#include "MieScattering.h"
 #include "ObjModel.h"
 #include "RuntimeConfig.h"
 
@@ -180,9 +181,13 @@ struct alignas(16) SceneData
     float skySunRadiance[4];
     float skySunDirection[4];
     uint32_t skySampleCounts[4];
+    // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
+    // orders, z = Mie table angle bins, w unused. The Mie scattering matrix
+    // itself rides in the binding-7 SSBO, not here.
+    float skyVrtParams[4];
 };
 
-static_assert(sizeof(SceneData) == 96, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 112, "Scene data layout must stay 16-byte aligned.");
 
 static_assert(sizeof(ModelVertex) == 32, "Model vertex layout must stay 16-byte aligned.");
 
@@ -196,12 +201,12 @@ struct alignas(16) InstanceData
 
 static_assert(sizeof(InstanceData) == 16, "Instance data layout must stay 16-byte aligned.");
 
-// GPU-side material record. Roughness rides in albedo.w to keep the
-// struct an exact multiple of vec4s — the closest-hit shader unpacks it
-// when building the GGX BSDF.
+// GPU-side material record. Each field is padded to a full vec4 to keep
+// the struct an exact multiple of vec4s for std430. The unused w lanes are
+// left at zero.
 struct alignas(16) MaterialData
 {
-    float albedoRoughness[4];
+    float albedo[4];
     float emission[4];
     float eta[4];
     float extinction[4];
@@ -349,7 +354,10 @@ static bool HasSkySpectralChanged(const SkySpectralConfig& left, const SkySpectr
            || left.sunAa != right.sunAa
            || left.secondarySamples != right.secondarySamples
            || left.viewSteps != right.viewSteps
-           || left.samples != right.samples;
+           || left.samples != right.samples
+           || left.rayleighDepolarization != right.rayleighDepolarization
+           || left.scatteringOrders != right.scatteringOrders
+           || HasMieAerosolChanged(left, right);
 }
 
 struct PushConstants
@@ -531,6 +539,10 @@ private:
         sceneData.skySampleCounts[0] = m_config.skySpectral.secondarySamples;
         sceneData.skySampleCounts[1] = m_config.skySpectral.viewSteps;
         sceneData.skySampleCounts[2] = m_config.skySpectral.samples;
+        sceneData.skyVrtParams[0] = m_config.skySpectral.rayleighDepolarization;
+        sceneData.skyVrtParams[1] = static_cast<float>(m_config.skySpectral.scatteringOrders);
+        sceneData.skyVrtParams[2] = static_cast<float>(m_config.skySpectral.mieTableAngleBins);
+        sceneData.skyVrtParams[3] = 0.0f;
         return sceneData;
     }
 
@@ -545,10 +557,9 @@ private:
     MaterialData BuildMaterialData(const MaterialConfig& materialConfig) const
     {
         MaterialData materialData{};
-        materialData.albedoRoughness[0] = materialConfig.albedo[0];
-        materialData.albedoRoughness[1] = materialConfig.albedo[1];
-        materialData.albedoRoughness[2] = materialConfig.albedo[2];
-        materialData.albedoRoughness[3] = materialConfig.roughness;
+        materialData.albedo[0] = materialConfig.albedo[0];
+        materialData.albedo[1] = materialConfig.albedo[1];
+        materialData.albedo[2] = materialConfig.albedo[2];
         materialData.emission[0] = materialConfig.emission[0];
         materialData.emission[1] = materialConfig.emission[1];
         materialData.emission[2] = materialConfig.emission[2];
@@ -638,6 +649,41 @@ private:
                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                          false);
+        CreateMieScatteringBuffer();
+    }
+
+    // Translate the aerosol fields of the live config into the Mie precompute
+    // parameters.
+    MieAerosolParams BuildMieAerosolParams() const
+    {
+        const SkySpectralConfig& s = m_config.skySpectral;
+        MieAerosolParams params{};
+        params.refractiveIndexReal = s.aerosolRefractiveIndexReal;
+        params.refractiveIndexImag = s.aerosolRefractiveIndexImag;
+        params.meanRadiusMicrometers = s.aerosolMeanRadiusMicrometers;
+        params.sigma = s.aerosolSigma;
+        params.wavelengthsNmRgb[0] = s.aerosolWavelengthsNmRgb[0];
+        params.wavelengthsNmRgb[1] = s.aerosolWavelengthsNmRgb[1];
+        params.wavelengthsNmRgb[2] = s.aerosolWavelengthsNmRgb[2];
+        params.angleBins = static_cast<int>(s.mieTableAngleBins);
+        return params;
+    }
+
+    // Bake the Lorenz–Mie scattering matrix on the CPU and stage it into the
+    // binding-7 SSBO sampled by the polarized sky integrator. The table is
+    // immutable for the buffer's lifetime, so it is uploaded here rather than
+    // through UploadSceneDataFromConfig.
+    void CreateMieScatteringBuffer()
+    {
+        const MieAerosolParams params = BuildMieAerosolParams();
+        const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(params);
+        const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
+        m_mieScatteringBuffer = CreateBuffer(size,
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                             false);
+        UploadToBuffer(m_mieScatteringBuffer, table.data(), table.size() * sizeof(MieMatrixEntry));
+        std::printf("[Sky] Baked Lorenz-Mie scattering matrix: %d angle bins x 3 bands.\n", params.angleBins);
     }
 
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
@@ -647,6 +693,7 @@ private:
         DestroyBuffer(m_sceneDataBuffer);
         DestroyBuffer(m_instanceDataBuffer);
         DestroyBuffer(m_materialDataBuffer);
+        DestroyBuffer(m_mieScatteringBuffer);
     }
 
     // Pack the current RuntimeConfig.skySpectral into a SceneData record
@@ -766,7 +813,20 @@ private:
             indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             indexWrite.pBufferInfo = &indexDataInfo;
 
-            const std::array<VkWriteDescriptorSet, 7> writes = {
+            VkDescriptorBufferInfo mieDataInfo{};
+            mieDataInfo.buffer = m_mieScatteringBuffer.buffer;
+            mieDataInfo.offset = 0;
+            mieDataInfo.range = m_mieScatteringBuffer.size;
+
+            VkWriteDescriptorSet mieWrite{};
+            mieWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            mieWrite.dstSet = m_descriptorSets[i];
+            mieWrite.dstBinding = 7;
+            mieWrite.descriptorCount = 1;
+            mieWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            mieWrite.pBufferInfo = &mieDataInfo;
+
+            const std::array<VkWriteDescriptorSet, 8> writes = {
                 write,
                 accelerationWrite,
                 sceneWrite,
@@ -774,6 +834,7 @@ private:
                 materialWrite,
                 vertexWrite,
                 indexWrite,
+                mieWrite,
             };
             vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
@@ -1040,6 +1101,7 @@ private:
         const bool sceneBufferLayoutChanged =
             config.instances.size() != m_config.instances.size() || config.materials.size() != m_config.materials.size();
         const bool skySpectralChanged = HasSkySpectralChanged(config.skySpectral, m_config.skySpectral);
+        const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
         if (m_physicalDevice != VK_NULL_HANDLE
             && config.maxBounces > m_rayTracingPipelineProperties.maxRayRecursionDepth)
         {
@@ -1070,7 +1132,7 @@ private:
         {
             RefreshSceneFromConfig(modelDefinitionsChanged,
                                    modelDefinitionsChanged || instanceTransformChanged || instanceBindingChanged,
-                                   sceneBufferLayoutChanged);
+                                   sceneBufferLayoutChanged || mieAerosolChanged);
         }
     }
 
@@ -1222,22 +1284,47 @@ private:
         if (polarizerToggleDown && !m_polarizerToggleKeyDown)
         {
             m_polarizerEnabled = !m_polarizerEnabled;
-            std::printf("[Polarizer] %s (axis %.0f deg)\n",
+            std::printf("[Polarizer] %s (%s)\n",
                         m_polarizerEnabled ? "ON" : "OFF",
-                        m_polarizerAngleRadians * 180.0f / kPi);
+                        m_polarizerElliptical ? "elliptical" : "linear");
         }
         m_polarizerToggleKeyDown = polarizerToggleDown;
 
+        // C toggles between a linear analyzer and an elliptical one.
+        const bool polarizerModeDown = windowFocused && IsKeyDown('C');
+        if (polarizerModeDown && !m_polarizerModeKeyDown)
+        {
+            m_polarizerElliptical = !m_polarizerElliptical;
+            std::printf("[Polarizer] mode: %s\n", m_polarizerElliptical ? "elliptical" : "linear");
+        }
+        m_polarizerModeKeyDown = polarizerModeDown;
+
         if (windowFocused)
         {
-            constexpr float kPolarizerRotateSpeed = 1.5f; // radians per second
-            if (IsKeyDown(VK_OEM_4)) // '[' rotates the filter axis one way
+            constexpr float kPolarizerRotateSpeed = 6.3f; // radians per second
+            if (m_polarizerElliptical)
             {
-                m_polarizerAngleRadians -= kPolarizerRotateSpeed * deltaTime;
+                // [ / ] adjust ellipticity; +/-45 degrees reaches circular.
+                if (IsKeyDown(VK_OEM_4))
+                {
+                    m_polarizerEllipticityRadians -= kPolarizerRotateSpeed * deltaTime;
+                }
+                if (IsKeyDown(VK_OEM_6))
+                {
+                    m_polarizerEllipticityRadians += kPolarizerRotateSpeed * deltaTime;
+                }
+                m_polarizerEllipticityRadians = std::clamp(m_polarizerEllipticityRadians, -kPi * 0.25f, kPi * 0.25f);
             }
-            if (IsKeyDown(VK_OEM_6)) // ']' rotates it the other way
+            else
             {
-                m_polarizerAngleRadians += kPolarizerRotateSpeed * deltaTime;
+                if (IsKeyDown(VK_OEM_4)) // '[' rotates the filter axis one way
+                {
+                    m_polarizerAngleRadians -= kPolarizerRotateSpeed * deltaTime;
+                }
+                if (IsKeyDown(VK_OEM_6)) // ']' rotates it the other way
+                {
+                    m_polarizerAngleRadians += kPolarizerRotateSpeed * deltaTime;
+                }
             }
         }
 
@@ -1346,7 +1433,8 @@ private:
         std::printf("[Config] Edit %s and save to hot-reload tuning.\n", m_configPath.string().c_str());
         std::puts("[Config] width, height, and frameCount are loaded from JSON at startup.");
         std::puts("[Controls] Hold RMB to look. Move with WASD, rise/fall with Q/E or Ctrl/Space, Shift to boost, R to reset.");
-        std::puts("[Controls] P toggles the polarization filter; [ and ] rotate its axis.");
+        std::puts("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
+        std::puts("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
     }
 
     // Create the VkInstance with the platform surface extensions
@@ -2023,7 +2111,17 @@ private:
         indexBinding.descriptorCount = 1;
         indexBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
-        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
+        // Lorenz–Mie scattering-matrix table for the polarized sky. Sampled by
+        // the miss shader (and reachable from raygen/closest-hit via the shared
+        // sky header), so expose it to all three stages.
+        VkDescriptorSetLayoutBinding mieBinding{};
+        mieBinding.binding = 7;
+        mieBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        mieBinding.descriptorCount = 1;
+        mieBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
+                                | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+        const std::array<VkDescriptorSetLayoutBinding, 8> bindings = {
             binding,
             accelerationBinding,
             sceneBinding,
@@ -2031,6 +2129,7 @@ private:
             materialBinding,
             vertexBinding,
             indexBinding,
+            mieBinding,
         };
 
         VkDescriptorSetLayoutCreateInfo createInfo{};
@@ -2277,7 +2376,7 @@ private:
         scenePoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size());
         VkDescriptorPoolSize storageBufferPoolSize{};
         storageBufferPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        storageBufferPoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size() * 4);
+        storageBufferPoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size() * 5);
         const std::array<VkDescriptorPoolSize, 4> poolSizes = {
             poolSize,
             accelerationPoolSize,
@@ -2391,7 +2490,7 @@ private:
 
         constants.polarizer[0] = m_polarizerEnabled ? 1.0f : 0.0f;
         constants.polarizer[1] = m_polarizerAngleRadians;
-        constants.polarizer[2] = 0.0f;
+        constants.polarizer[2] = m_polarizerElliptical ? m_polarizerEllipticityRadians : 0.0f;
         constants.polarizer[3] = 0.0f;
 
         constants.imageSize[0] = m_swapchainExtent.width;
@@ -2676,6 +2775,7 @@ private:
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_instanceDataBuffer{};
     BufferAllocation m_materialDataBuffer{};
+    BufferAllocation m_mieScatteringBuffer{};
     BufferAllocation m_raygenShaderBindingTable{};
     BufferAllocation m_missShaderBindingTable{};
     BufferAllocation m_hitShaderBindingTable{};
@@ -2703,12 +2803,16 @@ private:
     bool m_mouseLookActive = false;
     POINT m_lastMousePosition{};
 
-    // Camera polarization filter. P toggles it on/off; [ and ] rotate the
-    // filter axis at runtime. The angle is measured in the camera image
-    // plane from the camera's right axis.
+    // Camera polarization filter. P toggles it on/off; C switches between a
+    // linear analyzer and an elliptical one. In linear mode [ and ] rotate the
+    // major axis (measured in the camera image plane from the right axis); in
+    // elliptical mode [ and ] adjust ellipticity (-45..+45 degrees).
     bool m_polarizerEnabled = false;
     float m_polarizerAngleRadians = 0.0f;
     bool m_polarizerToggleKeyDown = false;
+    bool m_polarizerElliptical = false;
+    bool m_polarizerModeKeyDown = false;
+    float m_polarizerEllipticityRadians = kPi * 0.125f;
 
     PFN_vkGetBufferDeviceAddressKHR m_vkGetBufferDeviceAddressKHR = nullptr;
     PFN_vkCreateAccelerationStructureKHR m_vkCreateAccelerationStructureKHR = nullptr;

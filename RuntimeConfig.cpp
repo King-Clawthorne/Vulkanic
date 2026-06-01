@@ -522,7 +522,6 @@ MaterialConfig ParseMaterialConfig(const JsonValue::Object& object)
     MaterialConfig material{};
     ParseOptionalJsonFloat3(object, "albedo", material.albedo);
     ParseOptionalJsonFloat3(object, "emission", material.emission);
-    ParseOptionalJsonNumber(object, "roughness", material.roughness);
     ParseOptionalJsonFloat3(object, "eta", material.eta);
     ParseOptionalJsonFloat3(object, "extinction", material.extinction);
     return material;
@@ -601,6 +600,22 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonUint32(spectral, "secondarySamples", config.skySpectral.secondarySamples);
             ParseOptionalJsonUint32(spectral, "VIEW_STEPS", config.skySpectral.viewSteps);
             ParseOptionalJsonUint32(spectral, "Samples", config.skySpectral.samples);
+
+            // Polarized vector radiative transfer controls.
+            ParseOptionalJsonNumber(spectral, "RAYLEIGH_DEPOLARIZATION",
+                                    config.skySpectral.rayleighDepolarization);
+            ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_REAL",
+                                    config.skySpectral.aerosolRefractiveIndexReal);
+            ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_IMAG",
+                                    config.skySpectral.aerosolRefractiveIndexImag);
+            ParseOptionalJsonNumber(spectral, "AEROSOL_MEAN_RADIUS_UM",
+                                    config.skySpectral.aerosolMeanRadiusMicrometers);
+            ParseOptionalJsonNumber(spectral, "AEROSOL_SIGMA", config.skySpectral.aerosolSigma);
+            ParseOptionalJsonFloat3(spectral, "AEROSOL_WAVELENGTHS_NM",
+                                    config.skySpectral.aerosolWavelengthsNmRgb);
+            ParseOptionalJsonUint32(spectral, "MIE_TABLE_ANGLE_BINS",
+                                    config.skySpectral.mieTableAngleBins);
+            ParseOptionalJsonUint32(spectral, "SCATTERING_ORDERS", config.skySpectral.scatteringOrders);
         }
     }
 }
@@ -710,10 +725,6 @@ void ValidateMaterial(const MaterialConfig& material)
     if (HasNegativeElement(material.emission))
     {
         throw std::runtime_error("\"emission\" values must be non-negative.");
-    }
-    if (material.roughness < 0.0f || material.roughness > 1.0f)
-    {
-        throw std::runtime_error("\"roughness\" must be between 0 and 1.");
     }
     if (HasNegativeElement(material.eta))
     {
@@ -841,6 +852,34 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     if (config.skySpectral.secondarySamples == 0 || config.skySpectral.viewSteps == 0 || config.skySpectral.samples == 0)
     {
         throw std::runtime_error("Sky sample counts must be greater than 0.");
+    }
+    if (config.skySpectral.rayleighDepolarization < 0.0f || config.skySpectral.rayleighDepolarization >= 1.0f)
+    {
+        throw std::runtime_error("\"RAYLEIGH_DEPOLARIZATION\" must be in [0, 1).");
+    }
+    if (config.skySpectral.aerosolRefractiveIndexReal <= 0.0f
+        || config.skySpectral.aerosolRefractiveIndexImag < 0.0f)
+    {
+        throw std::runtime_error("Aerosol refractive index must have positive real part and non-negative imaginary part.");
+    }
+    if (config.skySpectral.aerosolMeanRadiusMicrometers <= 0.0f || config.skySpectral.aerosolSigma <= 1.0f)
+    {
+        throw std::runtime_error("\"AEROSOL_MEAN_RADIUS_UM\" must be > 0 and \"AEROSOL_SIGMA\" must be > 1.");
+    }
+    if (HasNegativeElement(config.skySpectral.aerosolWavelengthsNmRgb)
+        || config.skySpectral.aerosolWavelengthsNmRgb[0] <= 0.0f
+        || config.skySpectral.aerosolWavelengthsNmRgb[1] <= 0.0f
+        || config.skySpectral.aerosolWavelengthsNmRgb[2] <= 0.0f)
+    {
+        throw std::runtime_error("\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
+    }
+    if (config.skySpectral.mieTableAngleBins < 2)
+    {
+        throw std::runtime_error("\"MIE_TABLE_ANGLE_BINS\" must be at least 2.");
+    }
+    if (config.skySpectral.scatteringOrders == 0)
+    {
+        throw std::runtime_error("\"SCATTERING_ORDERS\" must be at least 1.");
     }
     if (config.models.empty())
     {

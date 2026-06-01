@@ -60,6 +60,7 @@ add_executable(Vulkanic
         main.cpp
         ObjModel.cpp
         RuntimeConfig.cpp
+        MieScattering.cpp
         VulkanPathTracer.cpp)
 add_dependencies(Vulkanic vulkan_shader)
 target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan)
