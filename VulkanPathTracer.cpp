@@ -1301,17 +1301,16 @@ private:
 
         if (windowFocused)
         {
-            constexpr float kPolarizerRotateSpeed = 6.3f; // radians per second
             if (m_polarizerElliptical)
             {
                 // [ / ] adjust ellipticity; +/-45 degrees reaches circular.
                 if (IsKeyDown(VK_OEM_4))
                 {
-                    m_polarizerEllipticityRadians -= kPolarizerRotateSpeed * deltaTime;
+                    m_polarizerEllipticityRadians -= m_config.polarizerRotateSpeed * deltaTime;
                 }
                 if (IsKeyDown(VK_OEM_6))
                 {
-                    m_polarizerEllipticityRadians += kPolarizerRotateSpeed * deltaTime;
+                    m_polarizerEllipticityRadians += m_config.polarizerRotateSpeed * deltaTime;
                 }
                 m_polarizerEllipticityRadians = std::clamp(m_polarizerEllipticityRadians, -kPi * 0.25f, kPi * 0.25f);
             }
@@ -1319,11 +1318,11 @@ private:
             {
                 if (IsKeyDown(VK_OEM_4)) // '[' rotates the filter axis one way
                 {
-                    m_polarizerAngleRadians -= kPolarizerRotateSpeed * deltaTime;
+                    m_polarizerAngleRadians -= m_config.polarizerRotateSpeed * deltaTime;
                 }
                 if (IsKeyDown(VK_OEM_6)) // ']' rotates it the other way
                 {
-                    m_polarizerAngleRadians += kPolarizerRotateSpeed * deltaTime;
+                    m_polarizerAngleRadians += m_config.polarizerRotateSpeed * deltaTime;
                 }
             }
         }

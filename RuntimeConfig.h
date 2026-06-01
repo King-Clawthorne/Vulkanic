@@ -220,6 +220,7 @@ struct RuntimeConfig
     float fastMoveSpeed = 10.0f;
     float mouseSensitivity = 0.0035f;
     float keyLookSpeed = 1.8f;
+    float polarizerRotateSpeed = 6.3f;
     float maxPitchDegrees = 89.0f;
     std::array<float, 3> skyBottomColor{0.03f, 0.04f, 0.06f};
     float skyExposure = 1.35f;

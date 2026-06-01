@@ -16,7 +16,8 @@
     "moveSpeed": 4.0,
     "fastMoveSpeed": 10.0,
     "mouseSensitivity": 0.0035,
-    "keyLookSpeed": 1.8
+    "keyLookSpeed": 1.8,
+    "polarizerRotateSpeed": 6.3
   },
   "sky": {
     "bottomColor": [0.03, 0.04, 0.06],
