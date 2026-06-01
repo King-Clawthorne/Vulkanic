@@ -105,6 +105,14 @@ void main()
         normal = -normal;
     }
 
+    // On the first (camera-visible) hit, record how strongly this reflection
+    // polarizes the light so the ray-generation shader can apply the camera's
+    // polarization filter. Skipped entirely when the filter is switched off.
+    if (payload.state.y == 0u && pc.polarizer.x > 0.5)
+    {
+        RecordPolarization(payload, gl_WorldRayDirectionEXT, normal, material);
+    }
+
     payload.throughput.xyz *= material.albedo;
     if (MaxComponent(payload.throughput.xyz) < 1.0e-6)
     {

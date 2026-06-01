@@ -360,10 +360,12 @@ struct PushConstants
     float cameraUpTanHalfFovY[4];
     float skyBottomExposure[4];
     float skyTopAspect[4];
+    // x = filter enabled (0/1), y = filter axis angle in radians, z/w unused.
+    float polarizer[4];
     uint32_t imageSize[2];
 };
 
-static_assert(sizeof(PushConstants) == 104, "Push constant layout must match the shader.");
+static_assert(sizeof(PushConstants) == 120, "Push constant layout must match the shader.");
 
 // =====================================================================
 // SECTION: window procedure
@@ -1214,6 +1216,31 @@ private:
         }
         m_resetCameraKeyDown = resetCameraDown;
 
+        // Polarization filter: P toggles it (edge-triggered so one press is
+        // one toggle), [ and ] rotate the filter axis while held.
+        const bool polarizerToggleDown = windowFocused && IsKeyDown('P');
+        if (polarizerToggleDown && !m_polarizerToggleKeyDown)
+        {
+            m_polarizerEnabled = !m_polarizerEnabled;
+            std::printf("[Polarizer] %s (axis %.0f deg)\n",
+                        m_polarizerEnabled ? "ON" : "OFF",
+                        m_polarizerAngleRadians * 180.0f / kPi);
+        }
+        m_polarizerToggleKeyDown = polarizerToggleDown;
+
+        if (windowFocused)
+        {
+            constexpr float kPolarizerRotateSpeed = 1.5f; // radians per second
+            if (IsKeyDown(VK_OEM_4)) // '[' rotates the filter axis one way
+            {
+                m_polarizerAngleRadians -= kPolarizerRotateSpeed * deltaTime;
+            }
+            if (IsKeyDown(VK_OEM_6)) // ']' rotates it the other way
+            {
+                m_polarizerAngleRadians += kPolarizerRotateSpeed * deltaTime;
+            }
+        }
+
         if (!windowFocused)
         {
             return;
@@ -1319,6 +1346,7 @@ private:
         std::printf("[Config] Edit %s and save to hot-reload tuning.\n", m_configPath.string().c_str());
         std::puts("[Config] width, height, and frameCount are loaded from JSON at startup.");
         std::puts("[Controls] Hold RMB to look. Move with WASD, rise/fall with Q/E or Ctrl/Space, Shift to boost, R to reset.");
+        std::puts("[Controls] P toggles the polarization filter; [ and ] rotate its axis.");
     }
 
     // Create the VkInstance with the platform surface extensions
@@ -2361,6 +2389,11 @@ private:
         constants.skyTopAspect[3] =
             static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
 
+        constants.polarizer[0] = m_polarizerEnabled ? 1.0f : 0.0f;
+        constants.polarizer[1] = m_polarizerAngleRadians;
+        constants.polarizer[2] = 0.0f;
+        constants.polarizer[3] = 0.0f;
+
         constants.imageSize[0] = m_swapchainExtent.width;
         constants.imageSize[1] = m_swapchainExtent.height;
         return constants;
@@ -2669,6 +2702,13 @@ private:
     bool m_resetCameraKeyDown = false;
     bool m_mouseLookActive = false;
     POINT m_lastMousePosition{};
+
+    // Camera polarization filter. P toggles it on/off; [ and ] rotate the
+    // filter axis at runtime. The angle is measured in the camera image
+    // plane from the camera's right axis.
+    bool m_polarizerEnabled = false;
+    float m_polarizerAngleRadians = 0.0f;
+    bool m_polarizerToggleKeyDown = false;
 
     PFN_vkGetBufferDeviceAddressKHR m_vkGetBufferDeviceAddressKHR = nullptr;
     PFN_vkCreateAccelerationStructureKHR m_vkCreateAccelerationStructureKHR = nullptr;

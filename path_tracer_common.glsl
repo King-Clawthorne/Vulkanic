@@ -74,6 +74,9 @@ layout(push_constant) uniform PushConstants
     vec4 cameraUpTanHalfFovY;
     vec4 skyBottomExposure;
     vec4 skyTopAspect;
+    // Camera polarization filter: x = enabled (0/1), y = filter axis angle
+    // in radians (measured in the image plane from the camera right axis).
+    vec4 polarizer;
     uvec2 imageSize;
 } pc;
 
@@ -184,9 +187,12 @@ float MaxComponent(vec3 value)
     return max(value.r, max(value.g, value.b));
 }
 
-// Conductor Fresnel — supports complex IOR (eta + i·extinction) so the
-// same code path covers both dielectrics (extinction = 0) and metals.
-vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
+// Conductor Fresnel split into its s- and p-polarized reflectance
+// components — supports complex IOR (eta + i·extinction) so the same code
+// path covers both dielectrics (extinction = 0) and metals. The camera
+// polarization filter needs the two components separately; the scalar
+// FresnelReflectance() below just averages them.
+void FresnelReflectanceSP(float cosThetaI, vec3 eta, vec3 extinction, out vec3 rs, out vec3 rp)
 {
     cosThetaI = clamp(cosThetaI, 0.0, 1.0);
     vec3 eta2 = eta * eta;
@@ -199,9 +205,60 @@ vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
     vec3 rpNumerator = (eta2 + extinction2) * cosThetaI2 - twoEtaCosTheta + vec3(1.0);
     vec3 rpDenominator = (eta2 + extinction2) * cosThetaI2 + twoEtaCosTheta + vec3(1.0);
 
-    vec3 rs = rsNumerator / max(rsDenominator, vec3(1.0e-6));
-    vec3 rp = rpNumerator / max(rpDenominator, vec3(1.0e-6));
-    return clamp(0.5 * (rs + rp), vec3(0.0), vec3(1.0));
+    rs = clamp(rsNumerator / max(rsDenominator, vec3(1.0e-6)), vec3(0.0), vec3(1.0));
+    rp = clamp(rpNumerator / max(rpDenominator, vec3(1.0e-6)), vec3(0.0), vec3(1.0));
+}
+
+vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
+{
+    vec3 rs;
+    vec3 rp;
+    FresnelReflectanceSP(cosThetaI, eta, extinction, rs, rp);
+    return 0.5 * (rs + rp);
+}
+
+// Estimate the linear-polarization state imparted by a reflection off this
+// surface and stash it in the payload so the ray-generation shader can
+// apply the camera's polarization filter (Malus's law). Only meaningful for
+// the first, camera-visible hit. We model the dominant effect: an unpolarized
+// incident beam reflecting off a surface becomes partially polarized
+// perpendicular to the plane of incidence, with the degree set by the gap
+// between the s- and p-Fresnel terms (maximal near Brewster's angle).
+//   payload.throughput.w := degree of linear polarization (0..1)
+//   payload.radiance.w   := polarization axis angle in the camera image plane
+void RecordPolarization(inout RayPayload p, vec3 incomingDir, vec3 normal, Material material)
+{
+    // The s-polarization axis is perpendicular to the plane of incidence.
+    vec3 sAxis = cross(incomingDir, normal);
+    float sLen = length(sAxis);
+    if (sLen < 1.0e-5)
+    {
+        return; // Near-normal incidence: no preferred polarization axis.
+    }
+    sAxis /= sLen;
+
+    float cosThetaI = clamp(dot(-incomingDir, normal), 0.0, 1.0);
+    vec3 rs;
+    vec3 rp;
+    FresnelReflectanceSP(cosThetaI, material.eta, material.extinction, rs, rp);
+
+    // Collapse to luminance-weighted scalars for the degree of polarization.
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float rsScalar = dot(rs, luma);
+    float rpScalar = dot(rp, luma);
+    float degree = (rsScalar - rpScalar) / max(rsScalar + rpScalar, 1.0e-4);
+
+    // Rough surfaces scatter the reflected polarization; smooth ones preserve
+    // it. Fade the effect out as roughness rises.
+    degree *= (1.0 - clamp(material.roughness, 0.0, 1.0));
+
+    // Orientation of the polarization axis projected into the camera image
+    // plane, measured from the camera right axis (matches the filter angle).
+    float axisX = dot(sAxis, pc.cameraRightBounces.xyz);
+    float axisY = dot(sAxis, pc.cameraUpTanHalfFovY.xyz);
+
+    p.throughput.w = clamp(degree, 0.0, 1.0);
+    p.radiance.w = atan(axisY, axisX);
 }
 
 Material GetInstanceMaterial(InstanceData instanceData)

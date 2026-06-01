@@ -70,7 +70,23 @@ void main()
         0);
 
         rngState = payload.state.x;
-        accumulatedRadiance += payload.radiance.xyz;
+
+        // Camera polarization filter. RecordPolarization() stashed the
+        // degree (throughput.w) and axis angle (radiance.w) of the light
+        // leaving the first surface toward the camera. Malus's law for
+        // partially polarized light through an ideal linear polarizer:
+        // unpolarized light (degree = 0) is simply halved, while a fully
+        // polarized beam is cut to zero when the filter is crossed with it.
+        float filterTransmission = 1.0;
+        if (pc.polarizer.x > 0.5)
+        {
+            float degree = payload.throughput.w;
+            float axisAngle = payload.radiance.w;
+            float deltaAngle = pc.polarizer.y - axisAngle;
+            filterTransmission = 0.5 * (1.0 + degree * cos(2.0 * deltaAngle));
+        }
+
+        accumulatedRadiance += payload.radiance.xyz * filterTransmission;
     }
 
     // Average across SPP, scale by the exposure stop, and tonemap into
