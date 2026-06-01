@@ -26,7 +26,8 @@ The repository implements the full pipeline from the OS layer up:
 - **Hardware-Accelerated Ray Tracing** — `VK_KHR_ray_tracing_pipeline` with ray-generation (`path_tracer.rgen`), closest-hit (`path_tracer.rchit`), primary miss (`path_tracer.rmiss`), and shadow miss (`shadow.rmiss`) shaders. BLAS per mesh, one TLAS for the scene.
 - **Advanced Material Rendering** — anisotropic GGX with Heitz 2018 VNDF importance sampling, complex-IOR (conductor) Fresnel, and the Fdez-Aguera multiscatter energy-compensation term so rough surfaces stay bright.
 - **Direct Sun Lighting** — next-event estimation against a configurable sun cone, with TerminateOnFirstHit + SkipClosestHit shadow rays for cheap occlusion.
-- **Compute Shader Atmosphere** — Rayleigh + Mie single-scattering sky integrated in `sky.comp` and shared with the miss shader for image-based lighting.
+- **Polarized Atmosphere** — Rayleigh + Lorenz-Mie sky rendering in `sky.comp`, including a CPU-baked Mie scattering-matrix table and Stokes-vector transport for camera-visible sky rays.
+- **Runtime Polarization Filter** — press `P` to enable the camera analyzer, `C` to switch linear/elliptical mode, and use `[` / `]` to rotate the linear axis or adjust elliptical handedness/strength.
 - **Native Asset Loaders** — a hand-written `.obj` parser (`ObjModel.cpp`) and a hand-written JSON parser (`RuntimeConfig.cpp`) load the scene and the tunable parameters at startup.
 - **Hot Config Reload** — `path_tracer_config.json` is polled each frame; edits to materials, instances, sky, or camera apply without restarting.
 - **Shader Debugging** — `VK_KHR_shader_non_semantic_info` and unoptimized GLSL→SPIR-V output keep RenderDoc / Nsight legible.
@@ -74,18 +75,48 @@ cmake ..
 cmake --build .
 ```
 
+## Runtime Controls
+
+- Hold right mouse button and move the mouse to look around.
+- `W` / `A` / `S` / `D` move horizontally.
+- `Q` / `E` or `Ctrl` / `Space` move down/up.
+- Hold `Shift` for fast movement.
+- Arrow keys look around without the mouse.
+- `R` resets the camera to the JSON `initialPosition` / `initialLookAt`.
+- `P` toggles the polarization filter.
+- `C` switches the filter between linear and elliptical modes.
+- In linear mode, `[` / `]` rotate the analyzer axis.
+- In elliptical mode, `[` / `]` adjust ellipticity from left-circular through linear to right-circular.
+
+Input rates live in `path_tracer_config.json` under `input`, including `moveSpeed`, `fastMoveSpeed`, `mouseSensitivity`, `keyLookSpeed`, and `polarizerRotateSpeed`.
+
+## Runtime Configuration
+
+`path_tracer_config.json` drives the scene and most renderer parameters:
+
+- `render` sets resolution, swapchain frame count, samples per pixel, and maximum path depth.
+- `camera` sets the startup view and vertical field of view.
+- `input` controls movement, look speed, mouse sensitivity, and polarization adjustment speed.
+- `sky.spectralConstants` controls the atmospheric model, sun, Rayleigh depolarization, aerosol parameters, Mie table resolution, and scattering orders.
+- `models` maps scene model names to `.obj` files. Files are resolved from the repo's `models/` folder.
+- `materials` defines per-material albedo, emission, conductor IOR (`eta`), and extinction (`k`).
+- `instances` places models in the TLAS with independent material, position, rotation, and scale.
+
+Most edits hot-reload while the app is running. Width, height, and `frameCount` are read at startup and require a restart.
+
 ## Project Structure
 
 - **Shaders (`glslc` → SPIR-V):**
   - `path_tracer.rgen` — ray generation (camera rays + tonemap + write).
-  - `path_tracer.rmiss` — primary-ray miss (sky lookup).
+  - `path_tracer.rmiss` — primary-ray miss (polarized sky on camera rays, cheaper sky on indirect rays).
   - `shadow.rmiss` — shadow-ray miss (marks the path as unoccluded).
   - `path_tracer.rchit` — closest-hit shader (BSDF, NEE, Russian roulette, recursion).
-  - `sky.comp` — atmospheric sky model included by every stage.
+  - `sky.comp` — Rayleigh/Mie atmosphere and Stokes-vector sky transport included by every stage.
   - `path_tracer_common.glsl` — descriptor bindings, payloads, RNG, math.
 - **C++ Core:**
   - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, ray-tracing pipeline, Win32 window + message loop.
   - `ObjModel.h` / `.cpp` — self-contained `.obj` mesh parser.
+  - `MieScattering.h` / `.cpp` — CPU Lorenz-Mie scattering-matrix precompute for the polarized sky.
   - `RuntimeConfig.h` / `.cpp` — JSON parser + scene/runtime configuration.
   - `main.cpp` — entry point.
 - **Assets:**
