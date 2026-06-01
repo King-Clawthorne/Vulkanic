@@ -1,6 +1,6 @@
 # Vulkanic
 
-A lightweight, purely native C++17 Vulkan path tracer demonstrating hardware-accelerated ray tracing on Windows. **Vulkanic** avoids heavy third-party framework dependencies, showing how to build a path tracer using the Vulkan API and the Win32 API from scratch.
+A lightweight, purely native C++17 Vulkan real-time render engine focused on physically plausible polarization. **Vulkanic** uses hardware ray tracing to simulate polarized light through atmospheric scattering, reflective materials, and a runtime camera analyzer that can switch between linear and elliptical polarization modes.
 
 ---
 
@@ -8,16 +8,17 @@ A lightweight, purely native C++17 Vulkan path tracer demonstrating hardware-acc
 
 ### Situation
 
-Most open-source Vulkan ray-tracing samples are either trapped inside large, opinionated frameworks (engine repos, vendor SDK demo suites) or layered on top of GLFW + GLM + TinyObjLoader + a JSON library. That stack makes it hard to see *which* lines actually drive the GPU and which are framework glue. Newcomers learning `VK_KHR_ray_tracing_pipeline` end up reading wrappers around wrappers before they ever see a `vkCmdTraceRaysKHR` call.
+Most real-time renderers treat polarization as either a post-process trick or ignore it entirely. Scientific polarization renderers usually live offline, while Vulkan ray-tracing samples tend to focus on generic path tracing without modeling Stokes-vector light transport, atmospheric depolarization, or analyzer behavior. Vulkanic is meant to bridge that gap: a readable native Vulkan renderer that can interactively explore physically motivated linear and elliptical polarization effects.
 
 ### Task
 
-Build a complete, runnable Monte Carlo path tracer that:
+Build a complete, runnable real-time path-traced render engine that:
 
 - Targets the raw Vulkan 1.2 ray-tracing extensions on Windows.
 - Has **zero** third-party wrappers — no GLFW, no GLM, no TinyObjLoader, no nlohmann::json.
-- Stays small enough to read end-to-end in an afternoon.
-- Still produces a physically plausible image (GGX BRDF, conductor Fresnel, energy compensation, atmospheric sky, ACES tonemap).
+- Accurately carries polarization state where it matters: Rayleigh/Mie sky scattering, reflective surfaces, and camera filtering.
+- Lets the user switch between linear and elliptical analyzer modes at runtime.
+- Still produces a physically plausible image with GGX BRDFs, conductor Fresnel, atmospheric sky, and ACES tonemapping.
 
 ### Action
 
@@ -27,19 +28,20 @@ The repository implements the full pipeline from the OS layer up:
 - **Advanced Material Rendering** — anisotropic GGX with Heitz 2018 VNDF importance sampling, complex-IOR (conductor) Fresnel, and the Fdez-Aguera multiscatter energy-compensation term so rough surfaces stay bright.
 - **Direct Sun Lighting** — next-event estimation against a configurable sun cone, with TerminateOnFirstHit + SkipClosestHit shadow rays for cheap occlusion.
 - **Polarized Atmosphere** — Rayleigh + Lorenz-Mie sky rendering in `sky.comp`, including a CPU-baked Mie scattering-matrix table and Stokes-vector transport for camera-visible sky rays.
-- **Runtime Polarization Filter** — press `P` to enable the camera analyzer, `C` to switch linear/elliptical mode, and use `[` / `]` to rotate the linear axis or adjust elliptical handedness/strength.
+- **Runtime Polarization Analyzer** — press `P` to enable the camera analyzer, `C` to switch linear/elliptical mode, and use `[` / `]` to rotate the linear axis or adjust elliptical handedness/strength.
 - **Native Asset Loaders** — a hand-written `.obj` parser (`ObjModel.cpp`) and a hand-written JSON parser (`RuntimeConfig.cpp`) load the scene and the tunable parameters at startup.
 - **Hot Config Reload** — `path_tracer_config.json` is polled each frame; edits to materials, instances, sky, or camera apply without restarting.
 - **Shader Debugging** — `VK_KHR_shader_non_semantic_info` and unoptimized GLSL→SPIR-V output keep RenderDoc / Nsight legible.
 
 ### Result
 
-A single ~5,000-line repository containing every layer needed to render a physically based scene with hardware ray tracing:
+A compact repository containing every layer needed for an interactive polarization-aware renderer:
 
 - One executable, one config file, one models folder. Run `build.ps1` and you have a moving camera over a path-traced scene.
+- Linear and elliptical polarization can be toggled live, making the renderer useful for studying sky polarization, reflection-induced polarization, and analyzer response.
 - The Vulkan code is organized so that each major step (instance → device → swapchain → BLAS/TLAS → pipeline → SBT → render loop) is a single, self-contained method on `VulkanApp` — searchable via the `SECTION:` banners in `VulkanPathTracer.cpp`.
 - Every shader file documents the algorithm it implements at the top, so the closest-hit shader reads as "what BSDF/sampling/RR we do" rather than just GLSL noise.
-- The whole project is a usable reference for anyone porting another renderer to Vulkan ray tracing or learning the extension surface without a framework in the way.
+- The whole project is a usable reference for anyone building a Vulkan renderer that needs physically motivated polarization rather than only scalar RGB radiance.
 
 ---
 
