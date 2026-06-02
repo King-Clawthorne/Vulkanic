@@ -28,6 +28,10 @@ layout(set = 0, binding = 2) uniform SceneData
     // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
     // orders, z = Mie table angle bins, w unused.
     vec4 skyVrtParams;
+    // Ozone: xyz = per-RGB Chappuis absorption coefficient, w = layer peak altitude.
+    vec4 skyOzone;
+    // Ground coupling: xyz = Lambertian ground albedo, w = ozone tent half-width.
+    vec4 skyGround;
 } sceneData;
 
 struct InstanceData
@@ -104,14 +108,27 @@ struct Material
     vec3 extinction;
 };
 
-// Path-tracing payload sent to traceRayEXT. radiance accumulates light,
-// throughput tracks the running BSDF/PDF product, state.x carries the
-// RNG seed, state.y carries the current bounce index.
+// Path-tracing payload sent to traceRayEXT.
+//
+// Scalar path (polarization filter OFF):
+//   radiance.xyz   accumulated radiance (Stokes I per band)
+//   throughput.xyz running BSDF/PDF product
+// Polarized path (filter ON): full-Stokes transport. radiance.xyz still holds
+// the accumulated Stokes I; the extra fields below carry the rest:
+//   mueller[0..2]  per-band (R,G,B) 4x4 Mueller throughput, camera -> vertex
+//   stokesQ/U/V    accumulated Stokes Q/U/V per band (xyz = RGB)
+//   frameX.xyz     current Stokes reference axis (perpendicular to the ray)
+// state.x = RNG seed, state.y = current bounce index.
 struct RayPayload
 {
     vec4 radiance;
     vec4 throughput;
     uvec4 state;
+    mat4 mueller[3];
+    vec4 stokesQ;
+    vec4 stokesU;
+    vec4 stokesV;
+    vec4 frameX;
 };
 
 // Lightweight payload for shadow rays — set to 1 by the shadow miss
@@ -162,47 +179,6 @@ vec3 SampleSky(vec3 direction, inout uint rngState)
     vec3 sky = render_sky_pixel(direction, GetSunDirection(), rng);
     rngState = rng.state;
     return sky * pc.skyBottomExposure.w;
-}
-
-// Full polarized vector-radiative-transfer sky for the camera-visible ray.
-// Returns the exposure-scaled radiance and, via out parameters: the degree and
-// camera-plane axis angle of LINEAR polarization, plus the signed degree of
-// CIRCULAR polarization (Stokes V/I; sign = handedness). Circular polarization
-// is purely a multiple-scattering, Mie-driven effect here.
-vec3 SampleSkyStokes(vec3 direction, inout uint rngState,
-                     out float degree, out float axisAngle, out float circularDegree)
-{
-    RNG rng;
-    rng.state = rngState;
-    vec3 sumI = vec3(0.0);
-    vec3 sumQ = vec3(0.0);
-    vec3 sumU = vec3(0.0);
-    vec3 sumV = vec3(0.0);
-    int n = max(1, SkySamples());
-    for (int i = 0; i < n; ++i)
-    {
-        Stokes s = render_sky_stokes(direction, GetSunDirection(), SkyScatteringOrders(), rng);
-        sumI += s.I;
-        sumQ += s.Q;
-        sumU += s.U;
-        sumV += s.V;
-    }
-    float inv = 1.0 / float(n);
-    sumI *= inv;
-    sumQ *= inv;
-    sumU *= inv;
-    sumV *= inv;
-    rngState = rng.state;
-
-    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
-    float intensity = dot(sumI, luma);
-    float q = dot(sumQ, luma);
-    float u = dot(sumU, luma);
-    float v = dot(sumV, luma);
-    degree = clamp(length(vec2(q, u)) / max(intensity, 1.0e-6), 0.0, 1.0);
-    axisAngle = 0.5 * atan(u, q);
-    circularDegree = clamp(v / max(intensity, 1.0e-6), -1.0, 1.0);
-    return sumI * pc.skyBottomExposure.w;
 }
 
 // Solid angle of the sun cone — the area of a spherical cap with the
@@ -270,44 +246,113 @@ vec3 FresnelReflectance(float cosThetaI, vec3 eta, vec3 extinction)
     return 0.5 * (rs + rp);
 }
 
-// Estimate the linear-polarization state imparted by a reflection off this
-// surface and stash it in the payload so the ray-generation shader can
-// apply the camera's polarization filter (Malus's law). Only meaningful for
-// the first, camera-visible hit. We model the dominant effect: an unpolarized
-// incident beam reflecting off a surface becomes partially polarized
-// perpendicular to the plane of incidence, with the degree set by the gap
-// between the s- and p-Fresnel terms (maximal near Brewster's angle).
-//   payload.throughput.w := degree of linear polarization (0..1)
-//   payload.radiance.w   := polarization axis angle in the camera image plane
-void RecordPolarization(inout RayPayload p, vec3 incomingDir, vec3 normal, Material material)
+// ── Complex arithmetic (vec2 = a + i·b) for amplitude (phase) Fresnel ──
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec2 cdiv(vec2 a, vec2 b) { float d = max(dot(b, b), 1.0e-20); return vec2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y) / d; }
+vec2 csqrt(vec2 z)
 {
-    // The s-polarization axis is perpendicular to the plane of incidence.
-    vec3 sAxis = cross(incomingDir, normal);
-    float sLen = length(sAxis);
-    if (sLen < 1.0e-5)
+    float r = length(z);
+    float re = sqrt(max(0.5 * (r + z.x), 0.0));
+    float im = sqrt(max(0.5 * (r - z.x), 0.0));
+    return vec2(re, z.y < 0.0 ? -im : im);
+}
+
+// Complex amplitude reflection coefficients for one band (relative index
+// m = eta + i·k), incidence from vacuum at cosThetaI. Their squared magnitudes
+// match FresnelReflectanceSP; their relative phase drives the elliptical
+// (Mueller M34) term that linear-only models drop.
+void FresnelAmplitudesBand(float cosThetaI, float eta, float k, out vec2 rs, out vec2 rp)
+{
+    cosThetaI = clamp(cosThetaI, 0.0, 1.0);
+    vec2 m = vec2(eta, k);
+    vec2 ci = vec2(cosThetaI, 0.0);
+    float sin2 = max(0.0, 1.0 - cosThetaI * cosThetaI);
+    vec2 ct = csqrt(vec2(1.0, 0.0) - cdiv(vec2(sin2, 0.0), cmul(m, m))); // cosThetaT
+    vec2 mct = cmul(m, ct);
+    vec2 mci = cmul(m, ci);
+    rs = cdiv(ci - mct, ci + mct);
+    rp = cdiv(mci - ct, mci + ct);
+}
+
+// Per-band specular reflection Mueller matrix, in the frame where Q is along
+// the s-axis (perpendicular to the plane of incidence):
+//   [[A,B,0,0],[B,A,0,0],[0,0,C,S],[0,0,-S,C]]
+// A=(Rs+Rp)/2, B=(Rs-Rp)/2, C=Re(rs·conj(rp)), S=Im(rs·conj(rp)). Dielectrics
+// (k=0) give S=0 (linear only); metals give S≠0 (elliptical).
+void ReflectionMueller(float cosThetaI, vec3 eta, vec3 extinction, out mat4 m[3])
+{
+    for (int b = 0; b < 3; ++b)
     {
-        return; // Near-normal incidence: no preferred polarization axis.
+        vec2 rs;
+        vec2 rp;
+        FresnelAmplitudesBand(cosThetaI, eta[b], extinction[b], rs, rp);
+        float rsMag2 = dot(rs, rs);
+        float rpMag2 = dot(rp, rp);
+        vec2 cross_ = cmul(rs, vec2(rp.x, -rp.y)); // rs · conj(rp)
+        float A = 0.5 * (rsMag2 + rpMag2);
+        float B = 0.5 * (rsMag2 - rpMag2);
+        float C = cross_.x;
+        float S = cross_.y;
+        mat4 mm = mat4(0.0); // column-major: mm[col][row]
+        mm[0][0] = A; mm[1][0] = B;
+        mm[0][1] = B; mm[1][1] = A;
+        mm[2][2] = C; mm[3][2] = S;
+        mm[2][3] = -S; mm[3][3] = C;
+        m[b] = mm;
     }
-    sAxis /= sLen;
+}
 
-    float cosThetaI = clamp(dot(-incomingDir, normal), 0.0, 1.0);
-    vec3 rs;
-    vec3 rp;
-    FresnelReflectanceSP(cosThetaI, material.eta, material.extinction, rs, rp);
+// Mueller rotator acting on the Q,U sub-block given cos2α, sin2α.
+mat4 MuellerRotator(float c2, float s2)
+{
+    mat4 m = mat4(1.0);
+    m[1][1] = c2; m[2][1] = s2;
+    m[1][2] = -s2; m[2][2] = c2;
+    return m;
+}
 
-    // Collapse to luminance-weighted scalars for the degree of polarization.
-    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
-    float rsScalar = dot(rs, luma);
-    float rpScalar = dot(rp, luma);
-    float degree = (rsScalar - rpScalar) / max(rsScalar + rpScalar, 1.0e-4);
+// Mueller rotator that re-expresses a Stokes vector from transverse frame
+// (fromX) into frame (toX); both are perpendicular to ray direction d.
+mat4 FrameRotator(vec3 fromX, vec3 toX, vec3 d)
+{
+    vec3 fromY = cross(d, fromX);
+    float c = dot(toX, fromX);
+    float s = dot(toX, fromY);
+    return MuellerRotator(c * c - s * s, 2.0 * c * s);
+}
 
-    // Orientation of the polarization axis projected into the camera image
-    // plane, measured from the camera right axis (matches the filter angle).
-    float axisX = dot(sAxis, pc.cameraRightBounces.xyz);
-    float axisY = dot(sAxis, pc.cameraUpTanHalfFovY.xyz);
+// Add a per-band contribution Stokes vector (I,Q,U,V) for band b to the
+// payload's Stokes accumulator.
+void AccumulateStokes(inout RayPayload p, int b, vec4 contribution)
+{
+    p.radiance[b] += contribution.x;
+    p.stokesQ[b] += contribution.y;
+    p.stokesU[b] += contribution.z;
+    p.stokesV[b] += contribution.w;
+}
 
-    p.throughput.w = clamp(degree, 0.0, 1.0);
-    p.radiance.w = atan(axisY, axisX);
+// Accumulate the polarized sky into the payload's Stokes accumulator through
+// the per-band Mueller throughput. The sky source is fetched in the ray's
+// carried frame (payload.frameX) so the throughput composes correctly. Used by
+// the miss shader on the polarized path (primary ray, or sky seen in a mirror).
+void AccumulatePolarizedSky(inout RayPayload p, vec3 direction)
+{
+    RNG rng;
+    rng.state = p.state.x;
+    vec3 frameX = p.frameX.xyz;
+    int n = max(1, SkySamples());
+    float inv = pc.skyBottomExposure.w / float(n);
+    for (int i = 0; i < n; ++i)
+    {
+        Stokes s = render_sky_stokes_framed(direction, GetSunDirection(), SkyScatteringOrders(),
+                                            frameX, direction, rng);
+        for (int b = 0; b < 3; ++b)
+        {
+            vec4 src = vec4(s.I[b], s.Q[b], s.U[b], s.V[b]) * inv;
+            AccumulateStokes(p, b, p.mueller[b] * src);
+        }
+    }
+    p.state.x = rng.state;
 }
 
 Material GetInstanceMaterial(InstanceData instanceData)

@@ -185,9 +185,13 @@ struct alignas(16) SceneData
     // orders, z = Mie table angle bins, w unused. The Mie scattering matrix
     // itself rides in the binding-7 SSBO, not here.
     float skyVrtParams[4];
+    // Ozone: xyz = per-RGB Chappuis absorption coefficient, w = layer peak altitude.
+    float skyOzone[4];
+    // Ground coupling: xyz = Lambertian ground albedo, w = ozone tent half-width.
+    float skyGround[4];
 };
 
-static_assert(sizeof(SceneData) == 112, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 144, "Scene data layout must stay 16-byte aligned.");
 
 static_assert(sizeof(ModelVertex) == 32, "Model vertex layout must stay 16-byte aligned.");
 
@@ -357,6 +361,10 @@ static bool HasSkySpectralChanged(const SkySpectralConfig& left, const SkySpectr
            || left.samples != right.samples
            || left.rayleighDepolarization != right.rayleighDepolarization
            || left.scatteringOrders != right.scatteringOrders
+           || left.betaOzone != right.betaOzone
+           || left.ozonePeakAltitude != right.ozonePeakAltitude
+           || left.ozoneWidth != right.ozoneWidth
+           || left.groundAlbedo != right.groundAlbedo
            || HasMieAerosolChanged(left, right);
 }
 
@@ -543,6 +551,14 @@ private:
         sceneData.skyVrtParams[1] = static_cast<float>(m_config.skySpectral.scatteringOrders);
         sceneData.skyVrtParams[2] = static_cast<float>(m_config.skySpectral.mieTableAngleBins);
         sceneData.skyVrtParams[3] = 0.0f;
+        sceneData.skyOzone[0] = m_config.skySpectral.betaOzone[0];
+        sceneData.skyOzone[1] = m_config.skySpectral.betaOzone[1];
+        sceneData.skyOzone[2] = m_config.skySpectral.betaOzone[2];
+        sceneData.skyOzone[3] = m_config.skySpectral.ozonePeakAltitude;
+        sceneData.skyGround[0] = m_config.skySpectral.groundAlbedo[0];
+        sceneData.skyGround[1] = m_config.skySpectral.groundAlbedo[1];
+        sceneData.skyGround[2] = m_config.skySpectral.groundAlbedo[2];
+        sceneData.skyGround[3] = m_config.skySpectral.ozoneWidth;
         return sceneData;
     }
 

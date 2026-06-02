@@ -53,9 +53,29 @@ void main()
         + cameraRight * (screen.x * aspectRatio * tanHalfFovY)
         + cameraUp * (screen.y * tanHalfFovY));
 
+        bool polarized = pc.polarizer.x > 0.5;
+
         payload.radiance = vec4(0.0);
-        payload.throughput = vec4(1.0, 1.0, 1.0, 0.0);
         payload.state = uvec4(rngState, 0u, 0u, 0u);
+        if (polarized)
+        {
+            // Full-Stokes transport: identity Mueller throughput, zeroed Stokes
+            // accumulator, and a camera-image-plane reference frame (Q along the
+            // camera right axis, projected perpendicular to the ray).
+            payload.throughput = vec4(0.0);
+            payload.mueller[0] = mat4(1.0);
+            payload.mueller[1] = mat4(1.0);
+            payload.mueller[2] = mat4(1.0);
+            payload.stokesQ = vec4(0.0);
+            payload.stokesU = vec4(0.0);
+            payload.stokesV = vec4(0.0);
+            vec3 fX = cameraRight - rayDirection * dot(cameraRight, rayDirection);
+            payload.frameX = vec4(normalize(fX), 0.0);
+        }
+        else
+        {
+            payload.throughput = vec4(1.0, 1.0, 1.0, 0.0);
+        }
 
         traceRayEXT(topLevelAS,
         gl_RayFlagsOpaqueEXT,
@@ -71,33 +91,25 @@ void main()
 
         rngState = payload.state.x;
 
-        // Camera polarization filter. The analyzer is represented as a unit
-        // Stokes vector: its major-axis angle comes from polarizer.y and its
-        // ellipticity angle from polarizer.z. Linear is ellipticity 0; circular
-        // is +/-pi/4. The incoming Stokes components are reconstructed from
-        // the stored linear degree/axis plus signed circular V/I in state.z.
-        float filterTransmission = 1.0;
-        if (pc.polarizer.x > 0.5)
+        if (polarized)
         {
-            float degree = payload.throughput.w;
-            float axisAngle = payload.radiance.w;
-            float circularDegree = uintBitsToFloat(payload.state.z);
-
-            vec3 incomingStokes = vec3(
-                degree * cos(2.0 * axisAngle),
-                degree * sin(2.0 * axisAngle),
-                circularDegree);
-
-            float analyzerLinear = cos(2.0 * pc.polarizer.z);
-            vec3 analyzerStokes = vec3(
-                analyzerLinear * cos(2.0 * pc.polarizer.y),
-                analyzerLinear * sin(2.0 * pc.polarizer.y),
-                sin(2.0 * pc.polarizer.z));
-
-            filterTransmission = 0.5 * (1.0 + dot(incomingStokes, analyzerStokes));
+            // Camera filter as an ideal elliptical analyzer: a unit Stokes
+            // vector with major-axis angle polarizer.y and ellipticity angle
+            // polarizer.z (0 = linear, +/-pi/4 = circular). Applied per band to
+            // the transported Stokes vector: I_out = 0.5(I + a·(Q,U,V)).
+            float linAmp = cos(2.0 * pc.polarizer.z);
+            vec3 analyzer = vec3(linAmp * cos(2.0 * pc.polarizer.y),
+                                 linAmp * sin(2.0 * pc.polarizer.y),
+                                 sin(2.0 * pc.polarizer.z));
+            accumulatedRadiance += 0.5 * (payload.radiance.xyz
+                                          + analyzer.x * payload.stokesQ.xyz
+                                          + analyzer.y * payload.stokesU.xyz
+                                          + analyzer.z * payload.stokesV.xyz);
         }
-
-        accumulatedRadiance += payload.radiance.xyz * filterTransmission;
+        else
+        {
+            accumulatedRadiance += payload.radiance.xyz;
+        }
     }
 
     // Average across SPP, scale by the exposure stop, and tonemap into

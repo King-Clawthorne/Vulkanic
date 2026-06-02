@@ -74,11 +74,27 @@ vec3 EvalGgxBrdf(vec3 V_local, vec3 L_local, float ax, float ay, vec3 eta, vec3 
 
 void main()
 {
+    bool polarized = pc.polarizer.x > 0.5;
+
     // Look up per-instance data using the custom index baked into the
     // TLAS instance record at build time.
     InstanceData instanceData = instanceBuffer.instances[gl_InstanceCustomIndexEXT];
     Material material = GetInstanceMaterial(instanceData);
-    payload.radiance.xyz += payload.throughput.xyz * material.emission;
+
+    // Emissive contribution. Emission is unpolarized; on the polarized path it
+    // reaches the camera through the current Mueller throughput (its first
+    // column), on the scalar path through the scalar throughput.
+    if (polarized)
+    {
+        for (int b = 0; b < 3; ++b)
+        {
+            AccumulateStokes(payload, b, material.emission[b] * payload.mueller[b][0]);
+        }
+    }
+    else
+    {
+        payload.radiance.xyz += payload.throughput.xyz * material.emission;
+    }
     if (MaxComponent(material.emission) > 0.0)
     {
         return;
@@ -104,18 +120,29 @@ void main()
         normal = -normal;
     }
 
-    // On the first (camera-visible) hit, record how strongly this reflection
-    // polarizes the light so the ray-generation shader can apply the camera's
-    // polarization filter. Skipped entirely when the filter is switched off.
-    if (payload.state.y == 0u && pc.polarizer.x > 0.5)
+    // Albedo tint of this surface's reflection. On the polarized path it is a
+    // neutral per-band attenuation of the Mueller throughput (it scales every
+    // Stokes component equally, so it changes colour but not polarization).
+    if (polarized)
     {
-        RecordPolarization(payload, gl_WorldRayDirectionEXT, normal, material);
+        for (int b = 0; b < 3; ++b)
+        {
+            payload.mueller[b] *= material.albedo[b];
+        }
+        float intensityThroughput =
+            max(payload.mueller[0][0][0], max(payload.mueller[1][0][0], payload.mueller[2][0][0]));
+        if (intensityThroughput < 1.0e-6)
+        {
+            return;
+        }
     }
-
-    payload.throughput.xyz *= material.albedo;
-    if (MaxComponent(payload.throughput.xyz) < 1.0e-6)
+    else
     {
-        return;
+        payload.throughput.xyz *= material.albedo;
+        if (MaxComponent(payload.throughput.xyz) < 1.0e-6)
+        {
+            return;
+        }
     }
 
     RNG rng;
@@ -159,26 +186,69 @@ void main()
 
             if (shadowPayload.visible != 0u)
             {
-                vec3 brdf = EvalGgxBrdf(V_local, L_local, ax, ay, material.eta, material.extinction);
                 vec3 Li = SunIncidentRadiance();
                 float solidAngle = SunSolidAngle();
-                payload.radiance.xyz += payload.throughput.xyz * brdf * Li * (L_local.z * solidAngle);
+                if (polarized)
+                {
+                    // Geometric (non-Fresnel) part of the GGX BRDF; the Fresnel
+                    // becomes the reflection Mueller matrix carrying polarization.
+                    vec3 Hs = normalize(V_local + L_local);
+                    float D = GgxDistribution(ax, ay, Hs);
+                    float LambdaV = SmithLambda(ax, ay, V_local);
+                    float LambdaL = SmithLambda(ax, ay, L_local);
+                    float G = 1.0 / (1.0 + LambdaV + LambdaL);
+                    float Dg = D * G / max(4.0 * V_local.z * L_local.z, 1.0e-6);
+                    float weight = Dg * L_local.z * solidAngle;
+
+                    float cosThetaHs = clamp(dot(normalize(V + sunDirection), V), 0.0, 1.0);
+                    mat4 reflectSun[3];
+                    ReflectionMueller(cosThetaHs, material.eta, material.extinction, reflectSun);
+
+                    vec3 sAxisSun = cross(sunDirection, V);
+                    float sl = length(sAxisSun);
+                    sAxisSun = sl > 1.0e-5 ? sAxisSun / sl : payload.frameX.xyz;
+                    mat4 crot = FrameRotator(sAxisSun, payload.frameX.xyz, gl_WorldRayDirectionEXT);
+
+                    for (int b = 0; b < 3; ++b)
+                    {
+                        // Unpolarized sun (I,0,0,0) -> reflectSun first column.
+                        vec4 src = (Li[b] * weight) * reflectSun[b][0];
+                        AccumulateStokes(payload, b, payload.mueller[b] * (crot * src));
+                    }
+                }
+                else
+                {
+                    vec3 brdf = EvalGgxBrdf(V_local, L_local, ax, ay, material.eta, material.extinction);
+                    payload.radiance.xyz += payload.throughput.xyz * brdf * Li * (L_local.z * solidAngle);
+                }
             }
         }
     }
 
-    // Russian roulette after a few guaranteed bounces — survival
-    // probability is tied to the remaining throughput so dim paths die
-    // quickly while bright ones keep accumulating.
+    // Russian roulette after a few guaranteed bounces — survival probability is
+    // tied to the remaining intensity throughput (scalar throughput, or the
+    // Mueller M11 transmittance on the polarized path).
     if (payload.state.y >= 3u)
     {
-        float surviveProbability = clamp(MaxComponent(payload.throughput.xyz), 0.05, 0.95);
+        float intensity = polarized
+            ? max(payload.mueller[0][0][0], max(payload.mueller[1][0][0], payload.mueller[2][0][0]))
+            : MaxComponent(payload.throughput.xyz);
+        float surviveProbability = clamp(intensity, 0.05, 0.95);
         if (NextFloat(rng.state) > surviveProbability)
         {
             payload.state.x = rng.state;
             return;
         }
-        payload.throughput.xyz /= surviveProbability;
+        if (polarized)
+        {
+            payload.mueller[0] /= surviveProbability;
+            payload.mueller[1] /= surviveProbability;
+            payload.mueller[2] /= surviveProbability;
+        }
+        else
+        {
+            payload.throughput.xyz /= surviveProbability;
+        }
     }
 
     payload.state.y += 1u;
@@ -208,27 +278,60 @@ void main()
                                   dot(reflectedSample, bitangent),
                                   dot(reflectedSample, normal)));
 
-    if (L_local.z <= 0.0)
+    float cosThetaH = clamp(dot(H, V), 0.0, 1.0);
+
+    if (polarized)
     {
-        payload.throughput.xyz = vec3(0.0);
+        if (L_local.z <= 0.0)
+        {
+            payload.mueller[0] = mat4(0.0);
+            payload.mueller[1] = mat4(0.0);
+            payload.mueller[2] = mat4(0.0);
+        }
+        else
+        {
+            // Update the Mueller throughput by this specular reflection: rotate
+            // the carried frame into the plane of incidence, then reflect. The
+            // reflection's s-axis (perpendicular to the plane of incidence)
+            // becomes the new carried frame for the reflected ray.
+            mat4 reflectM[3];
+            ReflectionMueller(cosThetaH, material.eta, material.extinction, reflectM);
+
+            vec3 sAxis = cross(gl_WorldRayDirectionEXT, H);
+            float sl = length(sAxis);
+            sAxis = sl > 1.0e-5 ? sAxis / sl : payload.frameX.xyz;
+            mat4 crot = FrameRotator(sAxis, payload.frameX.xyz, gl_WorldRayDirectionEXT);
+
+            for (int b = 0; b < 3; ++b)
+            {
+                payload.mueller[b] = payload.mueller[b] * (crot * reflectM[b]);
+            }
+            payload.frameX = vec4(sAxis, 0.0);
+        }
     }
     else
     {
-        float cosThetaH = clamp(dot(H, V), 0.0, 1.0);
-        vec3 F = FresnelReflectance(cosThetaH, material.eta, material.extinction);
+        if (L_local.z <= 0.0)
+        {
+            payload.throughput.xyz = vec3(0.0);
+        }
+        else
+        {
+            vec3 F = FresnelReflectance(cosThetaH, material.eta, material.extinction);
 
-        float LambdaV = SmithLambda(ax, ay, V_local);
-        float LambdaL = SmithLambda(ax, ay, L_local);
-        float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
+            float LambdaV = SmithLambda(ax, ay, V_local);
+            float LambdaL = SmithLambda(ax, ay, L_local);
+            float G2_over_G1 = (1.0 + LambdaV) / (1.0 + LambdaV + LambdaL);
 
-        vec3 single_scattering = F * G2_over_G1;
+            vec3 single_scattering = F * G2_over_G1;
 
-        // Multiscatter GGX Energy Compensation (Fdez-Aguera approximation)
-        float E0 = G2_over_G1;
-        vec3 F_avg = F;
-        vec3 multi_scattering = F_avg * ((1.0 - E0) * (1.0 - E0)) / (1.0 - F_avg * (1.0 - E0));
+            // Multiscatter GGX Energy Compensation (Fdez-Aguera approximation)
+            float E0 = G2_over_G1;
+            vec3 F_avg = F;
+            vec3 multi_scattering = F_avg * ((1.0 - E0) * (1.0 - E0)) / (1.0 - F_avg * (1.0 - E0));
 
-        payload.throughput.xyz *= (single_scattering + multi_scattering);
+            payload.throughput.xyz *= (single_scattering + multi_scattering);
+        }
     }
 
     payload.state.x = rng.state;

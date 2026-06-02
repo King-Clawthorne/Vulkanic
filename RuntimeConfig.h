@@ -190,6 +190,17 @@ struct SkySpectralConfig
     uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
     // Monte Carlo multiple-scattering depth for the polarized sky integrator.
     uint32_t scatteringOrders = 3;
+
+    // ── Ozone (Chappuis-band absorption; absorbs, does not scatter) ──
+    // Per-RGB absorption coefficient and a tent-shaped layer profile.
+    std::array<float, 3> betaOzone{0.65e-6f, 1.881e-6f, 0.085e-6f};
+    float ozonePeakAltitude = 25000.0f; // metres
+    float ozoneWidth = 15000.0f;        // tent half-width (metres)
+
+    // ── Ground ↔ sky coupling ──
+    // Lambertian albedo of the planet surface used by the sky integrator to
+    // bounce sunlight back into the lower atmosphere.
+    std::array<float, 3> groundAlbedo{0.1f, 0.1f, 0.1f};
 };
 
 // True when any field that feeds the precomputed Lorenz–Mie scattering matrix

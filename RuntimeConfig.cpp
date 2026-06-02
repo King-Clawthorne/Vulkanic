@@ -617,6 +617,12 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonUint32(spectral, "MIE_TABLE_ANGLE_BINS",
                                     config.skySpectral.mieTableAngleBins);
             ParseOptionalJsonUint32(spectral, "SCATTERING_ORDERS", config.skySpectral.scatteringOrders);
+
+            // Ozone absorption layer and ground coupling.
+            ParseOptionalJsonFloat3(spectral, "OZONE_BETA", config.skySpectral.betaOzone);
+            ParseOptionalJsonNumber(spectral, "OZONE_PEAK_ALT", config.skySpectral.ozonePeakAltitude);
+            ParseOptionalJsonNumber(spectral, "OZONE_WIDTH", config.skySpectral.ozoneWidth);
+            ParseOptionalJsonFloat3(spectral, "GROUND_ALBEDO", config.skySpectral.groundAlbedo);
         }
     }
 }
@@ -881,6 +887,19 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     if (config.skySpectral.scatteringOrders == 0)
     {
         throw std::runtime_error("\"SCATTERING_ORDERS\" must be at least 1.");
+    }
+    if (HasNegativeElement(config.skySpectral.betaOzone))
+    {
+        throw std::runtime_error("\"OZONE_BETA\" values must be non-negative.");
+    }
+    if (config.skySpectral.ozoneWidth <= 0.0f)
+    {
+        throw std::runtime_error("\"OZONE_WIDTH\" must be greater than 0.");
+    }
+    if (HasNegativeElement(config.skySpectral.groundAlbedo) || config.skySpectral.groundAlbedo[0] > 1.0f
+        || config.skySpectral.groundAlbedo[1] > 1.0f || config.skySpectral.groundAlbedo[2] > 1.0f)
+    {
+        throw std::runtime_error("\"GROUND_ALBEDO\" values must be between 0 and 1.");
     }
     if (config.models.empty())
     {
