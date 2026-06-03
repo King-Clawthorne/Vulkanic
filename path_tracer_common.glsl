@@ -24,17 +24,11 @@ layout(set = 0, binding = 2) uniform SceneData
     // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
     // orders, z = Mie table angle bins, w unused.
     vec4 skyVrtParams;
-    // Ozone: xyz = per-RGB Chappuis absorption coefficient, w = layer peak altitude.
-    vec4 skyOzone;
-    // Ground coupling: xyz = Lambertian ground albedo, w = ozone tent half-width.
-    vec4 skyGround;
 } sceneData;
 
-// Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each table entry
-// spans two vec4s: entries[2*idx] = (F11, F12, F33, F34) and
-// entries[2*idx+1] = (F22, F44, 0, 0). Entries are stored band-major
-// (idx = band * angleBins + bin), bands = R,G,B, bin i ↦ theta = i/(bins-1)·π.
-// For spheres F22=F11 and F44=F33; non-spherical aerosols break those.
+// Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
+// (F11, F12, F33, F34) at one scattering angle; entries are stored band-major
+// (band * angleBins + bin), bands = R,G,B, bin i ↦ theta = i/(bins-1)·π.
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
 {
     vec4 entries[];

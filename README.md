@@ -1,9 +1,9 @@
 # Vulkanic
 
 A lightweight, purely native C++17 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie
-with ozone absorption and optional non-spherical aerosols — then views it through a runtime camera
-analyzer that switches between linear and elliptical polarization.
+renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
+then views it through a runtime camera analyzer that switches between linear and elliptical
+polarization.
 
 ---
 
@@ -33,12 +33,7 @@ The repository implements the whole stack from the OS layer up:
 
 - **Polarized vector radiative transfer** (`sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix. Everything is transported
-  as Stokes vectors with proper Mueller matrices and frame rotations. Single scattering is integrated
-  deterministically along the view ray. **Ozone** adds Chappuis-band absorption via a tent-shaped
-  layer profile.
-- **Non-spherical aerosols** — a non-sphericity parameter breaks the spherical `F22=F11` / `F44=F33`
-  scattering-matrix identities, producing a backscatter-weighted linear/circular depolarization
-  (dust, ice). `0` recovers exact Lorenz–Mie spheres.
+  as Stokes vectors with proper Mueller matrices and frame rotations (single scattering).
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   ray-generation shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
@@ -114,8 +109,7 @@ cmake --build .
 - `camera` — startup view and vertical field of view.
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
-  depolarization, aerosol (Lorenz–Mie) parameters including `AEROSOL_NONSPHERICITY`, Mie table
-  resolution, and ozone (`OZONE_*`).
+  depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
 
 Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
 

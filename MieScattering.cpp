@@ -172,31 +172,13 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
         }
         const double norm = std::max(0.5 * integral, 1e-20);
 
-        // Non-sphericity blend in [0,1]. Real non-spherical particles (dust,
-        // ice) break the spherical F22=F11 / F44=F33 identities; the departure
-        // is largest at side/back scattering. We model that phenomenologically
-        // with a backscatter-weighted reduction w(θ) = (1 - cosθ)/2, which
-        // produces a linear depolarization ratio δ = (F11-F22)/(F11+F22) that
-        // rises from 0 (forward) toward n at backscatter. n=0 recovers spheres.
-        const double n = std::clamp(params.nonSphericity, 0.0, 1.0);
-
         for (int i = 0; i < bins; ++i)
         {
             MieMatrixEntry& entry = table[static_cast<size_t>(band) * static_cast<size_t>(bins) + static_cast<size_t>(i)];
-            const double f11 = p11[static_cast<size_t>(i)] / norm;
-            const double f33 = p33[static_cast<size_t>(i)] / norm;
-            const double w = 0.5 * (1.0 - mu[static_cast<size_t>(i)]); // 0 forward → 1 back
-            entry.f11 = static_cast<float>(f11);
+            entry.f11 = static_cast<float>(p11[static_cast<size_t>(i)] / norm);
             entry.f12 = static_cast<float>(p12[static_cast<size_t>(i)] / norm);
-            entry.f33 = static_cast<float>(f33);
+            entry.f33 = static_cast<float>(p33[static_cast<size_t>(i)] / norm);
             entry.f34 = static_cast<float>(p34[static_cast<size_t>(i)] / norm);
-            // Spheres: f22=f11, f44=f33. Non-sphericity damps F22 (linear
-            // depolarization) and damps F44 about twice as fast (circular
-            // depolarization is typically stronger for irregular particles).
-            entry.f22 = static_cast<float>(f11 * (1.0 - n * w));
-            entry.f44 = static_cast<float>(f33 * (1.0 - 2.0 * n * w));
-            entry.pad0 = 0.0f;
-            entry.pad1 = 0.0f;
         }
     }
 

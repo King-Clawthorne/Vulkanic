@@ -1,15 +1,13 @@
-// sky.comp — physical-sky model included by every shader stage.
+// sky.comp — physical-sky model included by the ray-generation shader.
 //
 // Despite the .comp name this is a header-style file: the entry points are
-// render_sky_stokes() / render_sky_stokes_framed(), called from the ray-
-// generation shader for every pixel. The model is a deterministic, fully
-// polarized single-scattering Rayleigh + Lorenz–Mie atmosphere parameterized
-// by the constants in SceneData (Earth radius, scale heights, scattering
-// coefficients, sun direction, etc.), with ozone absorption folded into the
-// optical depth and non-spherical aerosols baked into the Mie matrix.
+// render_sky_stokes() / render_sky_stokes_framed(), called from
+// path_tracer.rgen for every pixel. The model is a polarized single-scattering
+// Rayleigh + Lorenz–Mie atmosphere (full Stokes transport), parameterized by
+// the constants in SceneData (Earth radius, scale heights, scattering
+// coefficients, sun direction, etc.).
 //
-// Numerical integration cost is controlled by skySampleCounts.y = view steps
-// (along the eye ray).
+// View-ray integration steps come from skySampleCounts.y (SkyViewSteps()).
 
 #ifndef SKY_COMP_INCLUDED
 #define SKY_COMP_INCLUDED
@@ -113,6 +111,11 @@ vec3 SkySunRadiance()
     return sceneData.skySunRadiance.xyz;
 }
 
+int SkySecondarySamples()
+{
+    return int(sceneData.skySampleCounts.x);
+}
+
 int SkyViewSteps()
 {
     return int(sceneData.skySampleCounts.y);
@@ -131,34 +134,6 @@ float SkyRayleighDepolarization()
 int SkyMieAngleBins()
 {
     return int(sceneData.skyVrtParams.z);
-}
-
-vec3 SkyBetaOzone()
-{
-    return sceneData.skyOzone.xyz;
-}
-
-float SkyOzonePeak()
-{
-    return sceneData.skyOzone.w;
-}
-
-float SkyOzoneWidth()
-{
-    return sceneData.skyGround.w;
-}
-
-vec3 SkyGroundAlbedo()
-{
-    return sceneData.skyGround.xyz;
-}
-
-// Tent-shaped ozone layer profile: peaks at SkyOzonePeak(), falls linearly to
-// zero at +/- SkyOzoneWidth(). Ozone absorbs (Chappuis band) but does not
-// scatter, so it only ever enters extinction / transmittance.
-float ozone_density(float altitude)
-{
-    return max(0.0, 1.0 - abs(altitude - SkyOzonePeak()) / max(SkyOzoneWidth(), 1.0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -183,9 +158,7 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
 
 // Approximate Rayleigh / Mie optical depth along a ray by summing
 // exponentially-attenuated density at num_steps midpoint samples.
-// Rayleigh / Mie / ozone optical depth (x, y, z) along a ray, summed at
-// midpoint samples. Ozone uses its tent profile rather than an exponential.
-vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
+vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
 {
     vec2 t_atmos = ray_sphere(origin, dir, SkyAtmosphereRadius());
     float t_max = max(t_atmos.y, 0.0);
@@ -194,7 +167,6 @@ vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
     vec3 pos = origin;
     float od_R = 0.0;
     float od_M = 0.0;
-    float od_O = 0.0;
 
     for (int i = 0; i < num_steps; i++)
     {
@@ -202,18 +174,17 @@ vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
         float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
         od_R += exp(-altitude / SkyScaleHeightRayleigh()) * step_size;
         od_M += exp(-altitude / SkyScaleHeightMie()) * step_size;
-        od_O += ozone_density(altitude) * step_size;
     }
-    return vec3(od_R, od_M, od_O);
+    return vec2(od_R, od_M);
 }
 
 // Spectral transmittance along (origin, dir): the per-channel fraction of light
-// that survives Rayleigh + Mie + ozone extinction. Used for sun-light
-// attenuation and inter-slab attenuation.
+// that survives Rayleigh + Mie extinction. Used for sun-light attenuation and
+// inter-slab attenuation.
 vec3 transmittance(vec3 origin, vec3 dir, int steps)
 {
-    vec3 od = optical_depth_ray(origin, dir, steps);
-    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y + SkyBetaOzone() * od.z));
+    vec2 od = optical_depth_ray(origin, dir, steps);
+    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -364,11 +335,9 @@ Mueller rayleigh_mueller(float cosTheta)
     return m;
 }
 
-// Sample the precomputed Lorenz–Mie table per band at the given scattering
-// angle, linearly interpolating between angle bins. Each entry occupies two
-// vec4s: (F11,F12,F33,F34) and (F22,F44,_,_). For spheres F22=F11 and F44=F33;
-// non-spherical aerosols (baked) break those identities, so m22/m44 are read
-// independently rather than aliased to m11/m33.
+// Sample the precomputed Lorenz–Mie table (F11,F12,F33,F34) per band at the
+// given scattering angle, linearly interpolating between angle bins. For
+// spheres F22 = F11 and F44 = F33.
 Mueller mie_mueller(float cosTheta)
 {
     int bins = max(2, SkyMieAngleBins());
@@ -382,29 +351,24 @@ Mueller mie_mueller(float cosTheta)
     vec3 f12 = vec3(0.0);
     vec3 f33 = vec3(0.0);
     vec3 f34 = vec3(0.0);
-    vec3 f22 = vec3(0.0);
-    vec3 f44 = vec3(0.0);
     for (int band = 0; band < 3; ++band)
     {
-        int idx0 = band * bins + i0;
-        int idx1 = band * bins + i1;
-        vec4 a = mix(mieMatrixBuffer.entries[2 * idx0],     mieMatrixBuffer.entries[2 * idx1],     frac);
-        vec4 b = mix(mieMatrixBuffer.entries[2 * idx0 + 1], mieMatrixBuffer.entries[2 * idx1 + 1], frac);
-        f11[band] = a.x;
-        f12[band] = a.y;
-        f33[band] = a.z;
-        f34[band] = a.w;
-        f22[band] = b.x;
-        f44[band] = b.y;
+        vec4 e0 = mieMatrixBuffer.entries[band * bins + i0];
+        vec4 e1 = mieMatrixBuffer.entries[band * bins + i1];
+        vec4 e = mix(e0, e1, frac);
+        f11[band] = e.x;
+        f12[band] = e.y;
+        f33[band] = e.z;
+        f34[band] = e.w;
     }
 
     Mueller m;
     m.m11 = f11;
     m.m12 = f12;
-    m.m22 = f22;
+    m.m22 = f11;
     m.m33 = f33;
     m.m34 = f34;
-    m.m44 = f44;
+    m.m44 = f33;
     return m;
 }
 
@@ -492,8 +456,7 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
         float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
         float rhoM = exp(-altitude / SkyScaleHeightMie());
 
-        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM
-                       + SkyBetaOzone() * ozone_density(altitude)) * step_size);
+        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM) * step_size);
         if (dot(normalize(pos), L) < -0.02)
         {
             continue;
@@ -508,10 +471,8 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
 }
 
 // Full polarized sky radiance toward viewDir, returned in the natural beam
-// frame beam_basis(-viewDir). Callers reframe into whatever Stokes frame they
-// carry. The sky is a deterministic, fully polarized single-scattering solution
-// (Rayleigh + Lorenz–Mie); ozone absorption and non-spherical aerosols are
-// folded into the optical depth and the baked Mie matrix respectively.
+// frame beam_basis(-viewDir). Single-scattering only — deterministic and
+// noise-free; the caller reframes into whatever Stokes frame it carries.
 Stokes render_sky_stokes(vec3 viewDir, vec3 L)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
@@ -523,12 +484,11 @@ Stokes render_sky_stokes(vec3 viewDir, vec3 L)
     vec3 T_sunDisk = transmittance(origin, L, 16);
     sky.I += disk * SkySunRadiance() * T_sunDisk;
 
-    // Returned in the natural beam frame beam_basis(-viewDir); the caller reframes.
     return sky;
 }
 
 // Polarized sky in a caller-specified Stokes frame (frameX, perpendicular to
-// the segment direction segDir).
+// the segment direction segDir) so the camera analyzer can read it directly.
 Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, vec3 frameX, vec3 segDir)
 {
     Stokes sky = render_sky_stokes(viewDir, L);
