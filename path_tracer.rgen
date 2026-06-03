@@ -45,6 +45,7 @@ void main()
                          sin(2.0 * pc.polarizer.z));
 
     vec3 sun = GetSunDirection();
+    int orders = SkyScatteringOrders();
 
     vec3 accumulatedRadiance = vec3(0.0);
     for (uint sampleIndex = 0; sampleIndex < samplesPerPixel; ++sampleIndex)
@@ -63,7 +64,10 @@ void main()
         // the image plane, so the analyzer angle is measured from camera-right.
         vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
 
-        Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, viewDir);
+        RNG rng;
+        rng.state = rngState;
+        Stokes sky = render_sky_stokes_framed(viewDir, sun, orders, frameX, viewDir, rng);
+        rngState = rng.state;
 
         if (polarized)
         {

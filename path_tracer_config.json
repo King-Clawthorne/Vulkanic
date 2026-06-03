@@ -43,7 +43,12 @@
       "AEROSOL_MEAN_RADIUS_UM": 0.2,
       "AEROSOL_SIGMA": 1.5,
       "AEROSOL_WAVELENGTHS_NM": [680.0, 550.0, 440.0],
-      "MIE_TABLE_ANGLE_BINS": 181
+      "MIE_TABLE_ANGLE_BINS": 181,
+      "SCATTERING_ORDERS": 3,
+      "OZONE_BETA": [0.65e-6, 1.881e-6, 0.085e-6],
+      "OZONE_PEAK_ALT": 25000.0,
+      "OZONE_WIDTH": 15000.0,
+      "GROUND_ALBEDO": [0.4, 0.2, 0.1]
     }
   }
 }
