@@ -2,6 +2,7 @@
 build/
 out/
 bin/
+cmake-build-*/
 
 # Visual Studio
 .vs/
@@ -24,11 +25,6 @@ install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
 _deps
-
-# Ninja
-*.ninja
-.ninja_deps
-.ninja_log
 
 # Compiled Binaries
 *.exe
