@@ -1,10 +1,14 @@
 # ninja log v6
-1111	1300	8021835885251266	Vulkanic.exe	7de0185107039723
-93	1111	8021835875082367	CMakeFiles/Vulkanic.dir/RuntimeConfig.cpp.obj	463381ab126227df
-108	1082	8021835875189542	CMakeFiles/Vulkanic.dir/VulkanPathTracer.cpp.obj	f0f8f583e427464b
-98	653	8021835875122376	CMakeFiles/Vulkanic.dir/MieScattering.cpp.obj	7468ab07f24e3db6
-94	176	8021639263918894	CMakeFiles/Vulkanic.dir/main.cpp.obj	ce5d3fa6a8dbf387
-13	86	8021836885869683	C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv	b1f6f115d5b824c6
-13	86	8021836885869683	path_tracer.rgen.spv	b1f6f115d5b824c6
 15	92	8021841788679095	path_tracer.rgen.spv	b1f6f115d5b824c6
 15	92	8021841788679095	C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv	b1f6f115d5b824c6
+94	176	8021639263918894	CMakeFiles/Vulkanic.dir/main.cpp.obj	ce5d3fa6a8dbf387
+98	653	8021835875122376	CMakeFiles/Vulkanic.dir/MieScattering.cpp.obj	7468ab07f24e3db6
+108	1082	8021835875189542	CMakeFiles/Vulkanic.dir/VulkanPathTracer.cpp.obj	f0f8f583e427464b
+93	1111	8021835875082367	CMakeFiles/Vulkanic.dir/RuntimeConfig.cpp.obj	463381ab126227df
+1111	1300	8021835885251266	Vulkanic.exe	7de0185107039723
+17	92	8021856585402596	path_tracer.rgen.spv	b1f6f115d5b824c6
+17	92	8021856585402596	C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv	b1f6f115d5b824c6
+97	217	8021856585515513	CMakeFiles/Vulkanic.dir/MieScattering.cpp.obj	7468ab07f24e3db6
+92	295	8021856585450532	CMakeFiles/Vulkanic.dir/RuntimeConfig.cpp.obj	463381ab126227df
+102	302	8021856585555513	CMakeFiles/Vulkanic.dir/VulkanPathTracer.cpp.obj	f0f8f583e427464b
+302	399	8021856587558837	Vulkanic.exe	7de0185107039723
