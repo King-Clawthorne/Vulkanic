@@ -1,13 +1,15 @@
-// Ray-generation shader.
+// Ray-generation shader — the entire renderer.
 //
-// One launch per output pixel. For each pixel we:
-//   1. Seed an LCG-style RNG from the pixel coords + frame number so each
-//      frame is decorrelated.
-//   2. Stratified sub-pixel jitter for samplesPerPixel rays.
-//   3. Build a primary ray from the camera's TRS basis stored in the push
-//      constants.
-//   4. Trace, accumulate the returned radiance, then tonemap and store in
-//      the output image consumed by the swapchain blit.
+// This project is a polarized-sky simulator: there is no scene geometry, so
+// each launched "ray" is just a view direction into the atmosphere. For every
+// pixel we:
+//   1. Seed an LCG-style RNG from the pixel coords + frame number.
+//   2. Take samplesPerPixel stratified sub-pixel directions through the camera.
+//   3. Evaluate the full polarized vector-radiative-transfer sky along each
+//      direction (render_sky_stokes_framed), expressed in the camera image
+//      plane so the analyzer can read it directly.
+//   4. Apply the camera polarization filter (an ideal elliptical analyzer),
+//      average, tonemap, and store into the swapchain image.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
@@ -15,12 +17,10 @@
 
 #include "path_tracer_common.glsl"
 
-layout(location = 0) rayPayloadEXT RayPayload payload;
-
 void main()
 {
-    // gl_LaunchSizeEXT is rounded up to the dispatch granularity, so
-    // discard threads outside the render target instead of writing to OOB.
+    // gl_LaunchSizeEXT is rounded up to the dispatch granularity, so discard
+    // threads outside the render target instead of writing to OOB.
     if (gl_LaunchIDEXT.x >= pc.imageSize.x || gl_LaunchIDEXT.y >= pc.imageSize.y)
     {
         return;
@@ -28,87 +28,58 @@ void main()
 
     uvec2 pixel = gl_LaunchIDEXT.xy;
     uint rngState = Hash(pixel.x + pixel.y * 9781u + uint(pc.cameraPositionFrame.w) * 6271u + 1u);
-    vec3 accumulatedRadiance = vec3(0.0);
 
-    vec3 cameraPosition = pc.cameraPositionFrame.xyz;
     vec3 cameraForward = pc.cameraForwardSamples.xyz;
     vec3 cameraRight = pc.cameraRightBounces.xyz;
     vec3 cameraUp = pc.cameraUpTanHalfFovY.xyz;
     uint samplesPerPixel = uint(pc.cameraForwardSamples.w);
     float tanHalfFovY = pc.cameraUpTanHalfFovY.w;
     float aspectRatio = pc.skyTopAspect.w;
+    bool polarized = pc.polarizer.x > 0.5;
 
+    // Elliptical analyzer as a unit Stokes vector: major-axis angle polarizer.y,
+    // ellipticity angle polarizer.z (0 = linear, +/-pi/4 = circular).
+    float linAmp = cos(2.0 * pc.polarizer.z);
+    vec3 analyzer = vec3(linAmp * cos(2.0 * pc.polarizer.y),
+                         linAmp * sin(2.0 * pc.polarizer.y),
+                         sin(2.0 * pc.polarizer.z));
+
+    vec3 sun = GetSunDirection();
+    int orders = SkyScatteringOrders();
+
+    vec3 accumulatedRadiance = vec3(0.0);
     for (uint sampleIndex = 0; sampleIndex < samplesPerPixel; ++sampleIndex)
     {
-        // Sub-pixel jitter — the RNG advance gives us decorrelated samples
-        // across both pixel and frame.
+        // Sub-pixel jitter — the RNG advance gives decorrelated samples across
+        // both pixel and frame.
         vec2 jitter = NextFloat2(rngState);
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
-        // Screen space goes [-1,1] in X and Y; flip Y to match the image
-        // coordinate convention (origin at top-left).
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
-        vec3 rayOrigin = cameraPosition;
-        vec3 rayDirection = normalize(cameraForward
-        + cameraRight * (screen.x * aspectRatio * tanHalfFovY)
-        + cameraUp * (screen.y * tanHalfFovY));
+        vec3 viewDir = normalize(cameraForward
+            + cameraRight * (screen.x * aspectRatio * tanHalfFovY)
+            + cameraUp * (screen.y * tanHalfFovY));
 
-        bool polarized = pc.polarizer.x > 0.5;
+        // Stokes reference frame: Q along the camera right axis projected into
+        // the image plane, so the analyzer angle is measured from camera-right.
+        vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
 
-        payload.radiance = vec4(0.0);
-        payload.state = uvec4(rngState, 0u, 0u, 0u);
-        if (polarized)
-        {
-            // Full-Stokes transport: identity Mueller throughput, zeroed Stokes
-            // accumulator, and a camera-image-plane reference frame (Q along the
-            // camera right axis, projected perpendicular to the ray).
-            payload.throughput = vec4(0.0);
-            payload.mueller[0] = mat4(1.0);
-            payload.mueller[1] = mat4(1.0);
-            payload.mueller[2] = mat4(1.0);
-            payload.stokesQ = vec4(0.0);
-            payload.stokesU = vec4(0.0);
-            payload.stokesV = vec4(0.0);
-            vec3 fX = cameraRight - rayDirection * dot(cameraRight, rayDirection);
-            payload.frameX = vec4(normalize(fX), 0.0);
-        }
-        else
-        {
-            payload.throughput = vec4(1.0, 1.0, 1.0, 0.0);
-        }
-
-        traceRayEXT(topLevelAS,
-        gl_RayFlagsOpaqueEXT,
-        0xFF,
-        0,
-        0,
-        0,
-        rayOrigin,
-        0.001,
-        rayDirection,
-        1e30,
-        0);
-
-        rngState = payload.state.x;
+        RNG rng;
+        rng.state = rngState;
+        Stokes sky = render_sky_stokes_framed(viewDir, sun, orders, frameX, viewDir, rng);
+        rngState = rng.state;
 
         if (polarized)
         {
-            // Camera filter as an ideal elliptical analyzer: a unit Stokes
-            // vector with major-axis angle polarizer.y and ellipticity angle
-            // polarizer.z (0 = linear, +/-pi/4 = circular). Applied per band to
-            // the transported Stokes vector: I_out = 0.5(I + a·(Q,U,V)).
-            float linAmp = cos(2.0 * pc.polarizer.z);
-            vec3 analyzer = vec3(linAmp * cos(2.0 * pc.polarizer.y),
-                                 linAmp * sin(2.0 * pc.polarizer.y),
-                                 sin(2.0 * pc.polarizer.z));
-            accumulatedRadiance += 0.5 * (payload.radiance.xyz
-                                          + analyzer.x * payload.stokesQ.xyz
-                                          + analyzer.y * payload.stokesU.xyz
-                                          + analyzer.z * payload.stokesV.xyz);
+            // Ideal elliptical analyzer, per band: I_out = 0.5 (I + a·(Q,U,V)).
+            accumulatedRadiance += 0.5 * (sky.I
+                                          + analyzer.x * sky.Q
+                                          + analyzer.y * sky.U
+                                          + analyzer.z * sky.V);
         }
         else
         {
-            accumulatedRadiance += payload.radiance.xyz;
+            accumulatedRadiance += sky.I;
         }
     }
 

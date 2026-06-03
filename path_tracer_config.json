@@ -3,8 +3,7 @@
     "width": 960,
     "height": 540,
     "frameCount": 2,
-    "samplesPerPixel": 32,
-    "maxBounces": 4
+    "samplesPerPixel": 32
   },
   "camera": {
     "initialPosition": [0.0, 2.0, -10.0],
@@ -51,40 +50,5 @@
       "OZONE_WIDTH": 15000.0,
       "GROUND_ALBEDO": [0.4, 0.2, 0.1]
     }
-  },
-  "models": {
-    "box": {
-      "file": "box.obj"
-    }
-  },
-  "materials": {
-    "chrome": {
-      "albedo": [0.8, 0.9, 1.0],
-      "emission": [0.0, 0.0, 0.0],
-      "eta": [1.5, 1.5, 1.5],
-      "extinction": [1.5, 1.5, 1.5]
-    },
-    "gold": {
-      "albedo": [1.0, 0.9, 0.8],
-      "emission": [0.0, 0.0, 0.0],
-      "eta": [0.2, 0.4, 1.5],
-      "extinction": [3.1, 2.7, 1.9]
-    }
-  },
-  "instances": [
-    {
-      "model": "box",
-      "material": "chrome",
-      "position": [-2.5, 0.0, 0.0],
-      "rotationDegrees": [20.0, 25.0, 30.0],
-      "scale": [1.0, 2.0, 1.0]
-    },
-    {
-      "model": "box",
-      "material": "gold",
-      "position": [1.5, 0.0, 0.0],
-      "rotationDegrees": [0.0, 0.0, 0.0],
-      "scale": [1.5, 1.5, 1.5]
-    }
-  ]
+  }
 }

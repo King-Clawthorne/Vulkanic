@@ -515,34 +515,6 @@ bool HasNegativeElement(const std::array<float, 3>& value)
     return value[0] < 0.0f || value[1] < 0.0f || value[2] < 0.0f;
 }
 
-// Fill a MaterialConfig from a JSON object. Every field is optional; the
-// MaterialConfig defaults model a neutral white diffuse surface.
-MaterialConfig ParseMaterialConfig(const JsonValue::Object& object)
-{
-    MaterialConfig material{};
-    ParseOptionalJsonFloat3(object, "albedo", material.albedo);
-    ParseOptionalJsonFloat3(object, "emission", material.emission);
-    ParseOptionalJsonFloat3(object, "eta", material.eta);
-    ParseOptionalJsonFloat3(object, "extinction", material.extinction);
-    return material;
-}
-
-ModelAssetConfig ParseModelAssetConfig(const JsonValue::Object& object, const std::string& context)
-{
-    ModelAssetConfig model{};
-    const JsonValue* fileValue = FindMember(object, "file");
-    if (fileValue == nullptr)
-    {
-        throw std::runtime_error(context + " must define a \"file\" entry.");
-    }
-    model.fileName = fileValue->AsString(context + " \"file\"");
-    if (model.fileName.empty())
-    {
-        throw std::runtime_error(context + " must define a non-empty \"file\".");
-    }
-    return model;
-}
-
 // Pull the global render / camera / input / sky sections off the root
 // object. Each sub-section is optional, and within a section every field
 // is optional, so partial configs are valid.
@@ -555,7 +527,6 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
         ParseOptionalJsonUint32(render, "height", config.height);
         ParseOptionalJsonUint32(render, "frameCount", config.frameCount);
         ParseOptionalJsonUint32(render, "samplesPerPixel", config.samplesPerPixel);
-        ParseOptionalJsonUint32(render, "maxBounces", config.maxBounces);
     }
 
     if (const JsonValue* cameraValue = FindMember(root, "camera"))
@@ -627,148 +598,6 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
     }
 }
 
-// Build the scene graph: materials and models are declared as named
-// dictionaries, instances are an ordered array referring to them by name.
-// The function resolves names to indices here so downstream code only ever
-// sees plain integer references.
-void ParseSceneConfig(const JsonValue::Object& root, RuntimeConfig& config)
-{
-    const JsonValue* materialsValue = FindMember(root, "materials");
-    const JsonValue* modelsValue = FindMember(root, "models");
-    const JsonValue* instancesValue = FindMember(root, "instances");
-    if (materialsValue == nullptr || modelsValue == nullptr || instancesValue == nullptr)
-    {
-        throw std::runtime_error("The config must define \"models\", \"materials\", and \"instances\".");
-    }
-
-    config.materials.clear();
-    config.models.clear();
-    config.instances.clear();
-
-    std::unordered_map<std::string, uint32_t> materialLookup;
-    const auto& materials = materialsValue->AsObject("\"materials\"");
-    if (materials.empty())
-    {
-        throw std::runtime_error("\"materials\" must define at least one material.");
-    }
-    materialLookup.reserve(materials.size());
-    for (const auto& [name, materialValue] : materials)
-    {
-        const auto& materialObject = materialValue.AsObject("Material " + Quote(name));
-        const uint32_t materialIndex = static_cast<uint32_t>(config.materials.size());
-        config.materials.push_back(ParseMaterialConfig(materialObject));
-        materialLookup.emplace(name, materialIndex);
-    }
-
-    std::unordered_map<std::string, uint32_t> modelLookup;
-    const auto& models = modelsValue->AsObject("\"models\"");
-    if (models.empty())
-    {
-        throw std::runtime_error("\"models\" must define at least one model.");
-    }
-    modelLookup.reserve(models.size());
-    for (const auto& [name, modelValue] : models)
-    {
-        const auto& modelObject = modelValue.AsObject("Model " + Quote(name));
-        const uint32_t modelIndex = static_cast<uint32_t>(config.models.size());
-        config.models.push_back(ParseModelAssetConfig(modelObject, "Model " + Quote(name)));
-        modelLookup.emplace(name, modelIndex);
-    }
-
-    const auto& instances = instancesValue->AsArray("\"instances\"");
-    if (instances.empty())
-    {
-        throw std::runtime_error("\"instances\" must contain at least one instance.");
-    }
-
-    config.instances.reserve(instances.size());
-    for (size_t instanceIndex = 0; instanceIndex < instances.size(); ++instanceIndex)
-    {
-        const std::string context = "Instance at index " + std::to_string(instanceIndex);
-        const auto& instanceObject = instances[instanceIndex].AsObject(context);
-
-        ModelInstanceConfig instance{};
-        ParseOptionalJsonVec3(instanceObject, "position", instance.position);
-        ParseOptionalJsonVec3(instanceObject, "rotationDegrees", instance.rotationDegrees);
-        ParseOptionalJsonVec3(instanceObject, "scale", instance.scale);
-
-        const JsonValue* modelRefValue = FindMember(instanceObject, "model");
-        if (modelRefValue == nullptr)
-        {
-            throw std::runtime_error(context + " must define a \"model\" reference.");
-        }
-        const std::string& modelName = modelRefValue->AsString(context + " \"model\"");
-        const auto modelIt = modelLookup.find(modelName);
-        if (modelIt == modelLookup.end())
-        {
-            throw std::runtime_error(context + " references unknown model " + Quote(modelName) + ".");
-        }
-        instance.modelIndex = modelIt->second;
-
-        const JsonValue* materialRefValue = FindMember(instanceObject, "material");
-        if (materialRefValue == nullptr)
-        {
-            throw std::runtime_error(context + " must define a \"material\" reference.");
-        }
-        const std::string& materialName = materialRefValue->AsString(context + " \"material\"");
-        const auto materialIt = materialLookup.find(materialName);
-        if (materialIt == materialLookup.end())
-        {
-            throw std::runtime_error(context + " references unknown material " + Quote(materialName) + ".");
-        }
-        instance.materialIndex = materialIt->second;
-
-        config.instances.push_back(instance);
-    }
-}
-
-void ValidateMaterial(const MaterialConfig& material)
-{
-    if (HasNegativeElement(material.albedo) || material.albedo[0] > 1.0f || material.albedo[1] > 1.0f
-        || material.albedo[2] > 1.0f)
-    {
-        throw std::runtime_error("\"albedo\" values must be between 0 and 1.");
-    }
-    if (HasNegativeElement(material.emission))
-    {
-        throw std::runtime_error("\"emission\" values must be non-negative.");
-    }
-    if (HasNegativeElement(material.eta))
-    {
-        throw std::runtime_error("\"eta\" values must be non-negative.");
-    }
-    if (HasNegativeElement(material.extinction))
-    {
-        throw std::runtime_error("\"extinction\" values must be non-negative.");
-    }
-}
-
-void ValidateModelAsset(const ModelAssetConfig& model, size_t modelIndex)
-{
-    if (model.fileName.empty())
-    {
-        throw std::runtime_error("Model at index " + std::to_string(modelIndex) + " must define a file name.");
-    }
-}
-
-void ValidateInstance(const ModelInstanceConfig& instance, size_t instanceIndex, const RuntimeConfig& config)
-{
-    if (instance.scale.x <= 0.0f || instance.scale.y <= 0.0f || instance.scale.z <= 0.0f)
-    {
-        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
-                                 + " must have positive scale values on every axis.");
-    }
-    if (instance.modelIndex >= config.models.size())
-    {
-        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
-                                 + " references a model index outside the model list.");
-    }
-    if (instance.materialIndex >= config.materials.size())
-    {
-        throw std::runtime_error("Instance at index " + std::to_string(instanceIndex)
-                                 + " references a material index outside the material list.");
-    }
-}
 } // namespace
 
 // Public entry point: parse, populate, then run an exhaustive set of
@@ -782,7 +611,6 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     const auto& root = rootValue.AsObject("Root config");
 
     ParseSections(root, config);
-    ParseSceneConfig(root, config);
 
     if (config.width == 0 || config.height == 0)
     {
@@ -795,10 +623,6 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     if (config.samplesPerPixel == 0)
     {
         throw std::runtime_error("\"samplesPerPixel\" must be greater than 0.");
-    }
-    if (config.maxBounces < 2)
-    {
-        throw std::runtime_error("\"maxBounces\" must be at least 2.");
     }
     if (Length(config.initialLookAt - config.initialPosition) <= 0.001f)
     {
@@ -901,35 +725,5 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     {
         throw std::runtime_error("\"GROUND_ALBEDO\" values must be between 0 and 1.");
     }
-    if (config.models.empty())
-    {
-        throw std::runtime_error("At least one model must be defined.");
-    }
-    if (config.materials.empty())
-    {
-        throw std::runtime_error("At least one material must be defined.");
-    }
-    if (config.instances.empty())
-    {
-        throw std::runtime_error("At least one instance must be defined.");
-    }
-    if (config.instances.size() > 0x00FFFFFFu)
-    {
-        throw std::runtime_error("Instance count exceeds the Vulkan instanceCustomIndex limit.");
-    }
-
-    for (size_t modelIndex = 0; modelIndex < config.models.size(); ++modelIndex)
-    {
-        ValidateModelAsset(config.models[modelIndex], modelIndex);
-    }
-    for (const MaterialConfig& material : config.materials)
-    {
-        ValidateMaterial(material);
-    }
-    for (size_t instanceIndex = 0; instanceIndex < config.instances.size(); ++instanceIndex)
-    {
-        ValidateInstance(config.instances[instanceIndex], instanceIndex, config);
-    }
-
     return config;
 }

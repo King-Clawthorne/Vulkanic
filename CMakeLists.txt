@@ -30,10 +30,7 @@ find_package(Vulkan REQUIRED)
 find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 
 set(RT_SHADER_SOURCES
-        path_tracer.rgen
-        path_tracer.rmiss
-        shadow.rmiss
-        path_tracer.rchit)
+        path_tracer.rgen)
 
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/path_tracer_common.glsl"
@@ -58,7 +55,6 @@ add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 
 add_executable(Vulkanic
         main.cpp
-        ObjModel.cpp
         RuntimeConfig.cpp
         MieScattering.cpp
         VulkanPathTracer.cpp)

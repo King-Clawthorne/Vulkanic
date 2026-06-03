@@ -85,74 +85,6 @@ inline Vec3 Cross(const Vec3& left, const Vec3& right)
     };
 }
 
-// Material parameters for the ray-tracing closest-hit shader.
-//
-// albedo     — diffuse reflectance in [0,1] per channel.
-// emission   — emissive radiance (non-negative; HDR allowed).
-// eta        — index of refraction per RGB channel (used by the Fresnel term).
-// extinction — absorption coefficient per RGB channel (conductor k value).
-//
-// Surfaces are always perfectly smooth (mirror); there is no roughness
-// parameter.
-struct MaterialConfig
-{
-    std::array<float, 3> albedo{1.0f, 1.0f, 1.0f};
-    std::array<float, 3> emission{0.0f, 0.0f, 0.0f};
-    std::array<float, 3> eta{1.5f, 1.5f, 1.5f};
-    std::array<float, 3> extinction{1.5f, 1.5f, 1.5f};
-};
-
-inline bool operator==(const MaterialConfig& left, const MaterialConfig& right)
-{
-    return left.albedo == right.albedo && left.emission == right.emission && left.eta == right.eta
-           && left.extinction == right.extinction;
-}
-
-inline bool operator!=(const MaterialConfig& left, const MaterialConfig& right)
-{
-    return !(left == right);
-}
-
-// One mesh asset (path to an .obj file). Resolved against the search paths
-// in ResolveModelFilePath() at load time.
-struct ModelAssetConfig
-{
-    std::string fileName = "box.obj";
-};
-
-inline bool operator==(const ModelAssetConfig& left, const ModelAssetConfig& right)
-{
-    return left.fileName == right.fileName;
-}
-
-inline bool operator!=(const ModelAssetConfig& left, const ModelAssetConfig& right)
-{
-    return !(left == right);
-}
-
-// One scene instance — references a mesh and a material by index into the
-// arrays in RuntimeConfig and supplies its own TRS transform.
-// Rotation is consumed as Euler angles in degrees (XYZ order in the loader).
-struct ModelInstanceConfig
-{
-    Vec3 position{};
-    Vec3 rotationDegrees{};
-    Vec3 scale{1.0f, 1.0f, 1.0f};
-    uint32_t modelIndex = 0;
-    uint32_t materialIndex = 0;
-};
-
-inline bool operator==(const ModelInstanceConfig& left, const ModelInstanceConfig& right)
-{
-    return left.position == right.position && left.rotationDegrees == right.rotationDegrees && left.scale == right.scale
-           && left.modelIndex == right.modelIndex && left.materialIndex == right.materialIndex;
-}
-
-inline bool operator!=(const ModelInstanceConfig& left, const ModelInstanceConfig& right)
-{
-    return !(left == right);
-}
-
 // Physical sky / atmosphere parameters fed to sky.comp. These follow the
 // Bruneton/Nishita single-scattering parameterization: Rayleigh + Mie
 // scattering against an Earth-sized sphere, plus a directional sun disk.
@@ -223,7 +155,6 @@ struct RuntimeConfig
     uint32_t height = 540;
     uint32_t frameCount = 2;
     uint32_t samplesPerPixel = 1;
-    uint32_t maxBounces = 2;
     Vec3 initialPosition{0.0f, 0.35f, -6.5f};
     Vec3 initialLookAt{0.0f, -0.1f, 3.8f};
     float fovYDegrees = 40.0f;
@@ -237,9 +168,6 @@ struct RuntimeConfig
     float skyExposure = 1.35f;
     std::array<float, 3> skyTopColor{0.55f, 0.72f, 0.95f};
     SkySpectralConfig skySpectral{};
-    std::vector<ModelAssetConfig> models{ModelAssetConfig{}};
-    std::vector<MaterialConfig> materials{MaterialConfig{}};
-    std::vector<ModelInstanceConfig> instances{ModelInstanceConfig{}};
 };
 
 // Resolve a runtime asset (config, SPIR-V blob, etc.) by checking the
