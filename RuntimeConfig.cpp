@@ -585,6 +585,8 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonNumber(spectral, "AEROSOL_SIGMA", config.skySpectral.aerosolSigma);
             ParseOptionalJsonFloat3(spectral, "AEROSOL_WAVELENGTHS_NM",
                                     config.skySpectral.aerosolWavelengthsNmRgb);
+            ParseOptionalJsonNumber(spectral, "AEROSOL_NONSPHERICITY",
+                                    config.skySpectral.aerosolNonSphericity);
             ParseOptionalJsonUint32(spectral, "MIE_TABLE_ANGLE_BINS",
                                     config.skySpectral.mieTableAngleBins);
             ParseOptionalJsonUint32(spectral, "SCATTERING_ORDERS", config.skySpectral.scatteringOrders);
@@ -703,6 +705,10 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
         || config.skySpectral.aerosolWavelengthsNmRgb[2] <= 0.0f)
     {
         throw std::runtime_error("\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
+    }
+    if (config.skySpectral.aerosolNonSphericity < 0.0f || config.skySpectral.aerosolNonSphericity > 1.0f)
+    {
+        throw std::runtime_error("\"AEROSOL_NONSPHERICITY\" must be in [0, 1].");
     }
     if (config.skySpectral.mieTableAngleBins < 2)
     {

@@ -12,13 +12,15 @@
 // (R, G, B), and sample that table in sky.comp.
 //
 // For spherical particles the 4x4 single-scattering (Mueller) matrix is block
-// structured with F22 = F11 and F44 = F33, so four elements fully describe it:
+// structured with F22 = F11 and F44 = F33:
 //   [ F11  F12   0    0  ]
-//   [ F12  F11   0    0  ]
+//   [ F12  F22   0    0  ]
 //   [  0    0   F33  F34 ]
-//   [  0    0  -F34  F33 ]
-// F11 is normalized as a phase function in the (1/4π)∫P dΩ = 1 convention
-// (i.e. ∫F11 dΩ = 4π), matching the Rayleigh phase matrix used in sky.comp.
+//   [  0    0  -F34  F44 ]
+// We bake all six independent elements so non-spherical aerosols can break the
+// F22=F11 / F44=F33 identities (the spherical case keeps them equal). F11 is
+// normalized as a phase function in the (1/4π)∫P dΩ = 1 convention (i.e.
+// ∫F11 dΩ = 4π), matching the Rayleigh phase matrix used in sky.comp.
 
 #include <cstdint>
 #include <vector>
@@ -32,17 +34,23 @@ struct MieAerosolParams
     double meanRadiusMicrometers = 0.2; // log-normal geometric mean radius r_g (µm)
     double sigma = 1.5;                 // log-normal geometric standard deviation (> 1)
     double wavelengthsNmRgb[3] = {680.0, 550.0, 440.0}; // representative R/G/B wavelengths (nm)
+    double nonSphericity = 0.0;         // [0,1] aerosol non-sphericity (0 = perfect spheres)
     int angleBins = 181;                // scattering-angle samples over [0, π] inclusive
 };
 
-// One table entry: the four independent normalized scattering-matrix elements
-// at a single scattering angle. Laid out to match a GPU vec4 (f11, f12, f33, f34).
+// One table entry: the six independent normalized scattering-matrix elements at
+// a single scattering angle, padded to two GPU vec4s. The shader reads
+// entries[2*idx] = (f11, f12, f33, f34) and entries[2*idx+1] = (f22, f44, 0, 0).
 struct MieMatrixEntry
 {
     float f11;
     float f12;
     float f33;
     float f34;
+    float f22;
+    float f44;
+    float pad0;
+    float pad1;
 };
 
 // Compute the ensemble-averaged, phase-normalized Mie scattering-matrix table.

@@ -119,6 +119,10 @@ struct SkySpectralConfig
     float aerosolMeanRadiusMicrometers = 0.2f; // log-normal geometric mean radius
     float aerosolSigma = 1.5f;                 // log-normal geometric std dev (> 1)
     std::array<float, 3> aerosolWavelengthsNmRgb{680.0f, 550.0f, 440.0f};
+    // Non-sphericity of the aerosol ensemble in [0,1]: 0 = perfect Lorenz–Mie
+    // spheres; >0 breaks the spherical F22=F11 / F44=F33 identities, producing a
+    // linear depolarization ratio that grows toward backscatter (dust/ice).
+    float aerosolNonSphericity = 0.0f;
     uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
     // Monte Carlo multiple-scattering depth for the polarized sky integrator.
     uint32_t scatteringOrders = 3;
@@ -144,6 +148,7 @@ inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectra
            || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers
            || left.aerosolSigma != right.aerosolSigma
            || left.aerosolWavelengthsNmRgb != right.aerosolWavelengthsNmRgb
+           || left.aerosolNonSphericity != right.aerosolNonSphericity
            || left.mieTableAngleBins != right.mieTableAngleBins;
 }
 

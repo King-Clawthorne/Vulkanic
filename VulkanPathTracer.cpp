@@ -490,6 +490,7 @@ private:
         params.wavelengthsNmRgb[0] = s.aerosolWavelengthsNmRgb[0];
         params.wavelengthsNmRgb[1] = s.aerosolWavelengthsNmRgb[1];
         params.wavelengthsNmRgb[2] = s.aerosolWavelengthsNmRgb[2];
+        params.nonSphericity = s.aerosolNonSphericity;
         params.angleBins = static_cast<int>(s.mieTableAngleBins);
         return params;
     }
