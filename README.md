@@ -1,9 +1,9 @@
 # Vulkanic
 
 A lightweight, purely native C++17 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as a full Stokes-vector vector-radiative-transfer problem — Rayleigh + Mie
-scattering, an ozone layer, ground coupling, and converged multiple scattering — then views it
-through a runtime camera analyzer that switches between linear and elliptical polarization.
+renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
+then views it through a runtime camera analyzer that switches between linear and elliptical
+polarization.
 
 ---
 
@@ -32,10 +32,8 @@ Build a complete, runnable real-time simulator that:
 The repository implements the whole stack from the OS layer up:
 
 - **Polarized vector radiative transfer** (`sky.comp`) — Rayleigh scattering with molecular
-  depolarization, a CPU-baked **Lorenz–Mie** aerosol scattering matrix, a Chappuis-band **ozone**
-  absorption layer, **ground ↔ sky coupling** (Lambertian reflection of direct sun *and* downwelling
-  skylight), and **converged multiple scattering** via a backward polarized Monte-Carlo random walk.
-  Everything is transported as Stokes vectors with proper Mueller matrices and frame rotations.
+  depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix. Everything is transported
+  as Stokes vectors with proper Mueller matrices and frame rotations (single scattering).
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   ray-generation shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
@@ -111,8 +109,7 @@ cmake --build .
 - `camera` — startup view and vertical field of view.
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
-  depolarization, aerosol (Lorenz–Mie) parameters, Mie table resolution, scattering orders, ozone
-  absorption + layer profile, and ground albedo.
+  depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
 
 Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
 
@@ -121,8 +118,7 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 - **Shaders (`glslc` → SPIR-V):**
   - `path_tracer.rgen` — the whole renderer: camera ray per pixel → polarized sky → analyzer →
     tonemap → image.
-  - `sky.comp` — the polarized VRT atmosphere (Rayleigh/Mie/ozone, ground coupling, converged
-    multiple scattering, Stokes machinery).
+  - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
   - `path_tracer_common.glsl` — descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, ray-tracing pipeline, Win32 window +

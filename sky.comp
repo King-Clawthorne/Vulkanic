@@ -1,16 +1,13 @@
-// sky.comp — physical-sky model included by every shader stage.
+// sky.comp — physical-sky model included by the ray-generation shader.
 //
-// Despite the .comp name this is a header-style file: the actual entry
-// point is render_sky_pixel(), called from path_tracer.rmiss for every
-// missed primary/indirect ray. The model is a single-scattering Rayleigh
-// + Mie atmosphere parameterized by the constants in SceneData (Earth
-// radius, scale heights, scattering coefficients, sun direction, etc.).
+// Despite the .comp name this is a header-style file: the entry points are
+// render_sky_stokes() / render_sky_stokes_framed(), called from
+// path_tracer.rgen for every pixel. The model is a polarized single-scattering
+// Rayleigh + Lorenz–Mie atmosphere (full Stokes transport), parameterized by
+// the constants in SceneData (Earth radius, scale heights, scattering
+// coefficients, sun direction, etc.).
 //
-// Numerical integration cost is controlled by skySampleCounts:
-//   x = secondary samples (along the sun-light path)
-//   y = view steps        (along the eye ray)
-//   z = primary samples   (per pixel sky integration)
-// These also drive the Russian-roulette / cone-sampling RNG below.
+// View-ray integration steps come from skySampleCounts.y (SkyViewSteps()).
 
 #ifndef SKY_COMP_INCLUDED
 #define SKY_COMP_INCLUDED
@@ -134,42 +131,9 @@ float SkyRayleighDepolarization()
     return sceneData.skyVrtParams.x;
 }
 
-int SkyScatteringOrders()
-{
-    return int(sceneData.skyVrtParams.y);
-}
-
 int SkyMieAngleBins()
 {
     return int(sceneData.skyVrtParams.z);
-}
-
-vec3 SkyBetaOzone()
-{
-    return sceneData.skyOzone.xyz;
-}
-
-float SkyOzonePeak()
-{
-    return sceneData.skyOzone.w;
-}
-
-float SkyOzoneWidth()
-{
-    return sceneData.skyGround.w;
-}
-
-vec3 SkyGroundAlbedo()
-{
-    return sceneData.skyGround.xyz;
-}
-
-// Tent-shaped ozone layer profile: peaks at SkyOzonePeak(), falls linearly to
-// zero at +/- SkyOzoneWidth(). Ozone absorbs (Chappuis band) but does not
-// scatter, so it only ever enters extinction / transmittance.
-float ozone_density(float altitude)
-{
-    return max(0.0, 1.0 - abs(altitude - SkyOzonePeak()) / max(SkyOzoneWidth(), 1.0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,9 +158,7 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
 
 // Approximate Rayleigh / Mie optical depth along a ray by summing
 // exponentially-attenuated density at num_steps midpoint samples.
-// Rayleigh / Mie / ozone optical depth (x, y, z) along a ray, summed at
-// midpoint samples. Ozone uses its tent profile rather than an exponential.
-vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
+vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
 {
     vec2 t_atmos = ray_sphere(origin, dir, SkyAtmosphereRadius());
     float t_max = max(t_atmos.y, 0.0);
@@ -205,7 +167,6 @@ vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
     vec3 pos = origin;
     float od_R = 0.0;
     float od_M = 0.0;
-    float od_O = 0.0;
 
     for (int i = 0; i < num_steps; i++)
     {
@@ -213,18 +174,17 @@ vec3 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
         float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
         od_R += exp(-altitude / SkyScaleHeightRayleigh()) * step_size;
         od_M += exp(-altitude / SkyScaleHeightMie()) * step_size;
-        od_O += ozone_density(altitude) * step_size;
     }
-    return vec3(od_R, od_M, od_O);
+    return vec2(od_R, od_M);
 }
 
 // Spectral transmittance along (origin, dir): the per-channel fraction of light
-// that survives Rayleigh + Mie + ozone extinction. Used for sun-light
-// attenuation and inter-slab attenuation.
+// that survives Rayleigh + Mie extinction. Used for sun-light attenuation and
+// inter-slab attenuation.
 vec3 transmittance(vec3 origin, vec3 dir, int steps)
 {
-    vec3 od = optical_depth_ray(origin, dir, steps);
-    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y + SkyBetaOzone() * od.z));
+    vec2 od = optical_depth_ray(origin, dir, steps);
+    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -496,8 +456,7 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
         float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
         float rhoM = exp(-altitude / SkyScaleHeightMie());
 
-        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM
-                       + SkyBetaOzone() * ozone_density(altitude)) * step_size);
+        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM) * step_size);
         if (dot(normalize(pos), L) < -0.02)
         {
             continue;
@@ -511,231 +470,33 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
     return result;
 }
 
-// Uniform-sphere direction sample.
-vec3 sample_sphere(inout RNG rng)
-{
-    vec2 xi = rng_next2(rng);
-    float z = 1.0 - 2.0 * xi.x;
-    float r = sqrt(max(0.0, 1.0 - z * z));
-    float phi = 2.0 * PI * xi.y;
-    return vec3(r * cos(phi), z, r * sin(phi));
-}
-
-// Cosine-weighted hemisphere sample about normal n (pdf = cosθ/π). Used to
-// gather downwelling skylight onto the Lambertian ground.
-vec3 sample_cosine_hemisphere(vec3 n, inout RNG rng)
-{
-    vec2 xi = rng_next2(rng);
-    float r = sqrt(xi.x);
-    float phi = 2.0 * PI * xi.y;
-    float z = sqrt(max(0.0, 1.0 - xi.x));
-    vec3 t;
-    vec3 b;
-    sky_build_basis(n, t, b);
-    return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
-}
-
-// Converged multiple scattering (orders >= 2) via a backward polarized random
-// walk. Each path is sun -> x[n-1] -> ... -> x[1] -> x[0] -> observer, with
-// x[0] sampled on the view ray and the deeper vertices sampled on the sphere.
-// Sun next-event estimation is applied at every vertex EXCEPT x[0] (order 1 is
-// the deterministic single_scatter term, added separately), so each path
-// contributes scattering orders 2..n. Raising SCATTERING_ORDERS lengthens the
-// walk toward convergence (capped at MAX_ORDERS); distances and directions are
-// sampled uniformly, with transmittance + 1/pdf folded into the path weights.
-Stokes multi_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int maxOrders, inout RNG rng)
-{
-    const int MAX_ORDERS = 8;
-    int walks = max(1, SkySecondarySamples());
-    Stokes total = stokes_zero();
-
-    for (int wlk = 0; wlk < walks; ++wlk)
-    {
-        vec2 ta = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
-        if (ta.y < 0.0)
-        {
-            continue;
-        }
-        float tStart = max(ta.x, 0.0);
-        float tMax = ta.y - tStart;
-        if (tMax <= 0.0)
-        {
-            continue;
-        }
-
-        int n = clamp(maxOrders, 2, MAX_ORDERS);
-        vec3 pos[MAX_ORDERS];
-        vec3 toPrev[MAX_ORDERS];
-        vec3 fromDeep[MAX_ORDERS];
-        float rR[MAX_ORDERS];
-        float rM[MAX_ORDERS];
-        vec3 segW[MAX_ORDERS];        // transmittance * distance-pdf for segment x[k] -> x[k+1]
-        bool isGround[MAX_ORDERS];    // terminal Lambertian ground vertex?
-        vec3 groundRad[MAX_ORDERS];   // unpolarized reflected radiance at a ground vertex
-        isGround[0] = false;
-
-        // First vertex on the view ray (distance sampled uniformly).
-        float t0 = tStart + rng_next(rng) * tMax;
-        pos[0] = origin + viewDir * t0;
-        toPrev[0] = -viewDir;
-        vec3 firstMid = origin + viewDir * (0.5 * (tStart + t0));
-        float fAlt = max(length(firstMid) - SkyEarthRadius(), 0.0);
-        vec3 firstWeight = exp(-(SkyBetaR() * exp(-fAlt / SkyScaleHeightRayleigh())
-                                 + SkyBetaM() * exp(-fAlt / SkyScaleHeightMie())
-                                 + SkyBetaOzone() * ozone_density(fAlt)) * t0) * tMax;
-
-        // Extend the walk by sampling directions + distances. A segment that
-        // strikes the ground sphere terminates the walk at a Lambertian ground
-        // vertex (handled in the backward pass).
-        vec3 cur = pos[0];
-        for (int k = 1; k < n; ++k)
-        {
-            vec3 omega = sample_sphere(rng); // x[k-1] -> x[k]
-            float sMax = max(ray_sphere(cur, omega, SkyAtmosphereRadius()).y, 0.0);
-            if (sMax <= 1.0e-3)
-            {
-                n = k;
-                break;
-            }
-
-            // Does this direction hit the ground before leaving the atmosphere?
-            vec2 tGround = ray_sphere(cur, omega, SkyEarthRadius());
-            bool hitsGround = tGround.x > 1.0e-3 && tGround.x < sMax;
-            float sDist = hitsGround ? tGround.x : rng_next(rng) * sMax;
-
-            pos[k] = cur + omega * sDist;
-            fromDeep[k - 1] = -omega;
-            toPrev[k] = -omega;
-            isGround[k] = hitsGround;
-
-            vec3 mid = cur + omega * (0.5 * sDist);
-            float aAlt = max(length(mid) - SkyEarthRadius(), 0.0);
-            // Ground hits are a deterministic distance, so they carry no 1/pdf
-            // factor; air scatter distances are sampled uniformly over sMax.
-            float distWeight = hitsGround ? 1.0 : sMax;
-            segW[k - 1] = exp(-(SkyBetaR() * exp(-aAlt / SkyScaleHeightRayleigh())
-                               + SkyBetaM() * exp(-aAlt / SkyScaleHeightMie())
-                               + SkyBetaOzone() * ozone_density(aAlt)) * sDist) * distWeight;
-
-            if (hitsGround)
-            {
-                // Lambertian reflection (unpolarized) of both direct sunlight
-                // and downwelling skylight.
-                vec3 ng = normalize(pos[k]);
-                float ndotl = max(dot(ng, L), 0.0);
-                vec3 reflected = SkyGroundAlbedo() / PI * ndotl * SkySunRadiance() * transmittance(pos[k], L, 8);
-
-                // Skylight: one cosine-weighted hemisphere sample. With
-                // pdf = cosθ/π the (albedo/π)·L·cosθ/pdf estimator collapses to
-                // albedo·L_sky. Single-scattered sky keeps it cheap.
-                vec3 skyDir = sample_cosine_hemisphere(ng, rng);
-                Stokes skyIn = single_scatter_stokes(pos[k], skyDir, L, max(2, SkyViewSteps() / 2));
-                reflected += SkyGroundAlbedo() * skyIn.I;
-
-                groundRad[k] = reflected;
-                n = k + 1;
-                break;
-            }
-            cur = pos[k];
-        }
-
-        for (int k = 0; k < n; ++k)
-        {
-            float alt = max(length(pos[k]) - SkyEarthRadius(), 0.0);
-            rR[k] = exp(-alt / SkyScaleHeightRayleigh());
-            rM[k] = exp(-alt / SkyScaleHeightMie());
-        }
-
-        // Backward accumulate the Stokes radiance traveling toward the observer.
-        Stokes S = stokes_zero();
-        for (int k = n - 1; k >= 0; --k)
-        {
-            vec3 dirOut = toPrev[k];
-
-            // A ground vertex is a terminal unpolarized Lambertian emitter.
-            if (isGround[k])
-            {
-                Stokes g = stokes_zero();
-                g.I = groundRad[k];
-                S = g;
-                continue;
-            }
-
-            Stokes contrib = stokes_zero();
-            if (k < n - 1)
-            {
-                contrib = scatter_stokes(stokes_scale(S, segW[k]), fromDeep[k], dirOut, rR[k], rM[k]);
-            }
-            if (k > 0 && dot(normalize(pos[k]), L) >= -0.02)
-            {
-                Stokes sun0 = stokes_zero();
-                sun0.I = vec3(1.0);
-                Stokes sj = scatter_stokes(sun0, -L, dirOut, rR[k], rM[k]);
-                contrib = stokes_add(contrib, stokes_scale(sj, SkySunRadiance() * transmittance(pos[k], L, 8)));
-            }
-            S = contrib;
-        }
-
-        total = stokes_add(total, stokes_scale(S, firstWeight));
-    }
-
-    return stokes_scale(total, vec3(1.0 / float(walks)));
-}
-
 // Full polarized sky radiance toward viewDir, returned in the natural beam
-// frame beam_basis(-viewDir). Callers reframe into whatever Stokes frame they
-// carry (the camera image plane for the primary ray, or a reflected ray's
-// frame for sky-in-a-mirror). Single scattering is deterministic; multiple
-// scattering (SCATTERING_ORDERS >= 2) is a converged, fully polarized Monte
-// Carlo random walk.
-Stokes render_sky_stokes(vec3 viewDir, vec3 L, int maxOrders, inout RNG rng)
+// frame beam_basis(-viewDir). Single-scattering only — deterministic and
+// noise-free; the caller reframes into whatever Stokes frame it carries.
+Stokes render_sky_stokes(vec3 viewDir, vec3 L)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
-    int orders = max(1, maxOrders);
 
     Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps());
-
-    if (orders >= 2)
-    {
-        sky = stokes_add(sky, multi_scatter_stokes(origin, viewDir, L, orders, rng));
-    }
 
     // Direct sun disk (unpolarized).
     float disk = sun_disk(viewDir, L);
     vec3 T_sunDisk = transmittance(origin, L, 16);
     sky.I += disk * SkySunRadiance() * T_sunDisk;
 
-    // Returned in the natural beam frame beam_basis(-viewDir); the caller reframes.
     return sky;
 }
 
 // Polarized sky in a caller-specified Stokes frame (frameX, perpendicular to
-// the segment direction segDir). Used by the polarized surface transport so
-// the sky source shares the ray's carried frame before the Mueller throughput
-// is applied.
-Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, int maxOrders, vec3 frameX, vec3 segDir, inout RNG rng)
+// the segment direction segDir) so the camera analyzer can read it directly.
+Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, vec3 frameX, vec3 segDir)
 {
-    Stokes sky = render_sky_stokes(viewDir, L, maxOrders, rng);
+    Stokes sky = render_sky_stokes(viewDir, L);
     vec3 na;
     vec3 nb;
     beam_basis(-viewDir, na, nb);
     vec3 frameY = cross(segDir, frameX);
     return stokes_reframe(sky, na, nb, frameX, frameY);
-}
-
-// Public entry point used by the path tracer: averages SkySamples independent
-// polarized evaluations and returns the intensity (used for image-based
-// lighting on indirect bounces). The primary ray calls render_sky_stokes
-// directly so it can also read the polarization.
-vec3 render_sky_pixel(vec3 V, vec3 L, inout RNG rng)
-{
-    // Indirect bounces only need intensity; single scattering keeps them cheap.
-    vec3 accum = vec3(0.0);
-    for (int i = 0; i < SkySamples(); i++)
-    {
-        accum += render_sky_stokes(V, L, 1, rng).I;
-    }
-    return accum / float(SkySamples());
 }
 
 #endif

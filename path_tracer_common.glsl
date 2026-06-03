@@ -24,10 +24,6 @@ layout(set = 0, binding = 2) uniform SceneData
     // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
     // orders, z = Mie table angle bins, w unused.
     vec4 skyVrtParams;
-    // Ozone: xyz = per-RGB Chappuis absorption coefficient, w = layer peak altitude.
-    vec4 skyOzone;
-    // Ground coupling: xyz = Lambertian ground albedo, w = ozone tent half-width.
-    vec4 skyGround;
 } sceneData;
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
