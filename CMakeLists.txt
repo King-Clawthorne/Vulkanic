@@ -29,15 +29,15 @@ endif()
 find_package(Vulkan REQUIRED)
 find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 
-set(RT_SHADER_SOURCES
-        path_tracer.rgen)
+set(SHADER_SOURCES
+        path_tracer.comp)
 
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/path_tracer_common.glsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/sky.comp")
 
 set(SHADER_SPV_OUTPUTS)
-foreach(SHADER_SOURCE IN LISTS RT_SHADER_SOURCES)
+foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
     set(SHADER_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}")
     set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SOURCE}.spv")
 

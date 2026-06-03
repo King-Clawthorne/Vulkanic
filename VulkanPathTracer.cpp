@@ -2,23 +2,23 @@
 //
 // File layout (search the SECTION banners below):
 //   * helpers          — small utilities (error wrappers, math types,
-//                        descriptor / SBT / acceleration-structure structs).
+//                        buffer/descriptor structs).
 //   * window procedure — Win32 input plumbing for the camera controls.
 //   * Vulkan app       — the VulkanApp class: device setup, swapchain,
-//                        scene upload, BLAS/TLAS build, ray-tracing
-//                        pipeline + SBT, sky compute pass, the render loop,
-//                        and teardown.
+//                        scene/Mie buffer upload, compute pipeline, the
+//                        render loop, and teardown.
 //
-// High-level flow when RunVulkanPathTracer() is called:
-//   1. Read path_tracer_config.json + load OBJ assets.
+// This is a polarized-sky simulator with no scene geometry: a single compute
+// shader evaluates the sky analytically per pixel. High-level flow when
+// RunVulkanPathTracer() is called:
+//   1. Read path_tracer_config.json.
 //   2. Create a Win32 window, Vulkan instance, surface, device, queues.
-//   3. Build per-frame resources: storage image, descriptor sets, swapchain.
-//   4. Upload geometry/material/instance buffers and build BLAS + TLAS.
-//   5. Compile the sky compute shader and the ray-tracing pipeline; build
-//      the shader binding table for raygen / miss / hit groups.
-//   6. Drive the message loop: each frame integrates camera input, runs
-//      the sky compute pass, dispatches the ray-tracing pipeline into the
-//      storage image, and blits to the swapchain.
+//   3. Upload the sky uniform buffer and bake the Lorenz–Mie SSBO.
+//   4. Create the swapchain (storage-image capable), descriptor sets, and the
+//      compute pipeline from path_tracer.comp.
+//   5. Drive the message loop: each frame integrates camera input and
+//      dispatches the compute shader, which writes the swapchain image
+//      directly and is then presented.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -113,19 +113,6 @@ static std::vector<char> LoadBinaryFile(const wchar_t* fileName)
     return data;
 }
 
-// Round 'value' up to the next multiple of 'alignment'. Assumes
-// alignment is a power of two; used heavily when packing the shader
-// binding table where each group must start on a device-reported
-// alignment boundary.
-static VkDeviceSize AlignUp(VkDeviceSize value, VkDeviceSize alignment)
-{
-    if (alignment == 0)
-    {
-        return value;
-    }
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
 // Indices of the queue families this app needs. Optional because they're
 // discovered one at a time during physical-device selection.
 struct QueueFamilyIndices
@@ -157,15 +144,7 @@ struct BufferAllocation
     VkDeviceSize size = 0;
 };
 
-// An acceleration structure handle plus the device buffer that backs it.
-// Used for both BLAS (per-mesh) and TLAS (scene-wide) instances.
-struct AccelerationStructureAllocation
-{
-    VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
-    BufferAllocation buffer;
-};
-
-// Sky / scene uniforms uploaded to the ray-tracing pipeline.
+// Sky / scene uniforms uploaded to the compute pipeline.
 //
 // Each vec4 packs multiple scalars together to keep the std140 layout
 // compact and to match the shader-side struct one-for-one. The static
@@ -354,14 +333,13 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPA
 //
 // VulkanApp owns every Vulkan handle the renderer needs and drives the
 // frame loop. The constructor walks through Vulkan setup top-to-bottom:
-// instance + surface + device, swapchain, command pools, the storage
-// image the path tracer writes into, descriptor sets, scene resources
-// (vertex/index/material/instance/sky buffers), BLAS/TLAS builds, and
-// finally the ray-tracing pipeline plus its shader-binding table.
+// instance + surface + device, command pools, the sky uniform buffer and
+// baked Lorenz–Mie SSBO, swapchain, descriptor sets, and finally the
+// compute pipeline.
 //
-// Render() runs once per frame: poll the camera, push fresh uniforms,
-// dispatch the sky compute shader, dispatch the ray-tracing pipeline,
-// blit the storage image into the acquired swapchain image, and present.
+// Render() runs once per frame: poll the camera, push fresh uniforms, and
+// dispatch the compute shader, which writes the acquired swapchain image
+// directly; the image is then presented.
 // All resources are released in the destructor in reverse construction
 // order so partial-init failure paths (which throw mid-construction)
 // still tear down cleanly via RAII member destructors where possible.
@@ -394,13 +372,12 @@ public:
         CreateSurface();
         PickPhysicalDevice();
         CreateLogicalDevice();
-        // Command pool is created before ray tracing scene setup because AS builds use one-time command buffers.
+        // Command pool is created before scene setup because the Mie SSBO upload uses one-time command buffers.
         CreateCommandPool();
-        CreateRayTracingScene();
+        CreateSceneResources();
         CreateSwapchain();
         CreateDescriptorSetLayout();
         CreatePipeline();
-        CreateShaderBindingTables();
         CreateDescriptorSets();
         CreateCommandBuffers();
         CreateSyncObjects();
@@ -701,11 +678,6 @@ private:
         });
     }
 
-    Vec3 GetCameraPlanarForward() const
-    {
-        return {std::sin(m_cameraYaw), 0.0f, std::cos(m_cameraYaw)};
-    }
-
     // Consume accumulated mouse-delta input and rotate the camera. Pitch
     // is clamped to ±maxPitchDegrees so the camera never goes upside
     // down and the yaw axis remains world-up.
@@ -746,9 +718,9 @@ private:
         m_cameraPitch = std::clamp(m_cameraPitch - mouseDeltaY * m_config.mouseSensitivity, -maxPitch, maxPitch);
     }
 
-    // Integrate WASD/arrow input over deltaSeconds, applying the move
-    // speed (or fast move speed when shift is held). Movement is in the
-    // camera's local frame so strafing always matches the screen.
+    // Integrate look input over deltaSeconds: mouse-look, arrow-key look, and
+    // the R reset. The sky is directional, so the camera only rotates — there
+    // is no positional movement.
     void UpdateCamera(double deltaSeconds)
     {
         const float deltaTime = static_cast<float>(std::min(deltaSeconds, 0.1));
@@ -834,40 +806,6 @@ private:
             m_cameraPitch -= m_config.keyLookSpeed * deltaTime;
         }
         m_cameraPitch = std::clamp(m_cameraPitch, -maxPitch, maxPitch);
-
-        Vec3 movement{};
-        const Vec3 planarForward = GetCameraPlanarForward();
-        const Vec3 planarRight = Normalize(Cross({0.0f, 1.0f, 0.0f}, planarForward));
-        if (IsKeyDown('W'))
-        {
-            movement += planarForward;
-        }
-        if (IsKeyDown('S'))
-        {
-            movement += planarForward * -1.0f;
-        }
-        if (IsKeyDown('D'))
-        {
-            movement += planarRight;
-        }
-        if (IsKeyDown('A'))
-        {
-            movement += planarRight * -1.0f;
-        }
-        if (IsKeyDown('E') || IsKeyDown(VK_SPACE))
-        {
-            movement += {0.0f, 1.0f, 0.0f};
-        }
-        if (IsKeyDown('Q') || IsKeyDown(VK_CONTROL))
-        {
-            movement += {0.0f, -1.0f, 0.0f};
-        }
-
-        if (Length(movement) > 0.0f)
-        {
-            const float moveSpeed = IsKeyDown(VK_SHIFT) ? m_config.fastMoveSpeed : m_config.moveSpeed;
-            m_cameraPosition += Normalize(movement) * (moveSpeed * deltaTime);
-        }
     }
 
     // Register the window class and create the main render window at
@@ -915,7 +853,7 @@ private:
         UpdateWindow(m_window);
         std::printf("[Config] Edit %s and save to hot-reload tuning.\n", m_configPath.string().c_str());
         std::puts("[Config] width, height, and frameCount are loaded from JSON at startup.");
-        std::puts("[Controls] Hold RMB to look. Move with WASD, rise/fall with Q/E or Ctrl/Space, Shift to boost, R to reset.");
+        std::puts("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
         std::puts("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
         std::puts("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
     }
@@ -1018,18 +956,6 @@ private:
         return support;
     }
 
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR GetRayTracingPipelineProperties(VkPhysicalDevice device) const
-    {
-        VkPhysicalDeviceRayTracingPipelinePropertiesKHR properties{};
-        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-
-        VkPhysicalDeviceProperties2 properties2{};
-        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        properties2.pNext = &properties;
-        vkGetPhysicalDeviceProperties2(device, &properties2);
-        return properties;
-    }
-
     bool IsDeviceSuitable(VkPhysicalDevice device)
     {
         const auto queueFamilies = FindQueueFamilies(device);
@@ -1043,73 +969,18 @@ private:
         std::vector<VkExtensionProperties> extensions(extensionCount);
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
 
+        // Compute-only renderer: a presentable swapchain is the only hard
+        // requirement (compute itself is core Vulkan).
         bool hasSwapchain = false;
-        bool hasAccelerationStructure = false;
-        bool hasRayTracingPipeline = false;
-        bool hasDeferredHostOperations = false;
-        bool hasBufferDeviceAddress = false;
-        bool hasShaderNonSemanticInfo = false;
         for (const auto& extension : extensions)
         {
             if (std::strcmp(extension.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
             {
                 hasSwapchain = true;
-            }
-            if (std::strcmp(extension.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
-            {
-                hasAccelerationStructure = true;
-            }
-            if (std::strcmp(extension.extensionName, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0)
-            {
-                hasRayTracingPipeline = true;
-            }
-            if (std::strcmp(extension.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0)
-            {
-                hasDeferredHostOperations = true;
-            }
-            if (std::strcmp(extension.extensionName, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0)
-            {
-                hasBufferDeviceAddress = true;
-            }
-            if (std::strcmp(extension.extensionName, VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME) == 0)
-            {
-                hasShaderNonSemanticInfo = true;
-            }
-            if (hasSwapchain && hasAccelerationStructure && hasRayTracingPipeline && hasDeferredHostOperations
-                && hasBufferDeviceAddress && hasShaderNonSemanticInfo)
-            {
                 break;
             }
         }
-        const bool hasRequiredExtensions = hasSwapchain && hasAccelerationStructure && hasRayTracingPipeline
-                                           && hasDeferredHostOperations && hasBufferDeviceAddress && hasShaderNonSemanticInfo;
-        if (!hasRequiredExtensions)
-        {
-            return false;
-        }
-
-        VkPhysicalDeviceFeatures2 features2{};
-        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
-        bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
-        accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
-        rayTracingPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-        features2.pNext = &bufferDeviceAddressFeatures;
-        bufferDeviceAddressFeatures.pNext = &accelerationStructureFeatures;
-        accelerationStructureFeatures.pNext = &rayTracingPipelineFeatures;
-        vkGetPhysicalDeviceFeatures2(device, &features2);
-
-        if (bufferDeviceAddressFeatures.bufferDeviceAddress != VK_TRUE
-            || accelerationStructureFeatures.accelerationStructure != VK_TRUE
-            || rayTracingPipelineFeatures.rayTracingPipeline != VK_TRUE)
-        {
-            return false;
-        }
-
-        const auto rayTracingProperties = GetRayTracingPipelineProperties(device);
-        if (rayTracingProperties.shaderGroupHandleSize == 0)
+        if (!hasSwapchain)
         {
             return false;
         }
@@ -1123,9 +994,8 @@ private:
         return (swapchainSupport.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     }
 
-    // Iterate adapters and select the first one that supports the
-    // required ray-tracing extensions, queue families, and swapchain
-    // configuration. Throws if no adapter qualifies.
+    // Iterate adapters and select the first one that supports the required
+    // queue families and a storage-image swapchain. Throws if none qualifies.
     void PickPhysicalDevice()
     {
         uint32_t deviceCount = 0;
@@ -1146,7 +1016,6 @@ private:
             {
                 m_physicalDevice = device;
                 m_queueFamilies = FindQueueFamilies(device);
-                m_rayTracingPipelineProperties = GetRayTracingPipelineProperties(device);
                 break;
             }
         }
@@ -1157,8 +1026,7 @@ private:
         }
     }
 
-    // Create the VkDevice with the required ray-tracing / acceleration-
-    // structure / buffer-device-address feature chain enabled, plus the
+    // Create the VkDevice (swapchain extension only) and fetch the
     // graphics+present queue handles.
     void CreateLogicalDevice()
     {
@@ -1188,33 +1056,16 @@ private:
             queueInfos.push_back(queueInfo);
         }
 
-        const std::array<const char*, 6> deviceExtensions = {
+        // Compute-only renderer: a swapchain is the only device extension we
+        // need. (Shader non-semantic info keeps debugPrintfEXT working under the
+        // -g shader build.)
+        const std::array<const char*, 2> deviceExtensions = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-            VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-            VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
             VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
         };
 
-        VkPhysicalDeviceFeatures2 deviceFeatures{};
-        deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        VkPhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
-        bufferDeviceAddressFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-        bufferDeviceAddressFeatures.bufferDeviceAddress = VK_TRUE;
-        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
-        accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-        accelerationStructureFeatures.accelerationStructure = VK_TRUE;
-        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
-        rayTracingPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-        rayTracingPipelineFeatures.rayTracingPipeline = VK_TRUE;
-        deviceFeatures.pNext = &bufferDeviceAddressFeatures;
-        bufferDeviceAddressFeatures.pNext = &accelerationStructureFeatures;
-        accelerationStructureFeatures.pNext = &rayTracingPipelineFeatures;
-
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        createInfo.pNext = &deviceFeatures;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
         createInfo.pQueueCreateInfos = queueInfos.data();
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
@@ -1225,37 +1076,6 @@ private:
 
         vkGetDeviceQueue(m_device, m_queueFamilies.graphicsFamily.value(), 0, &m_graphicsQueue);
         vkGetDeviceQueue(m_device, m_queueFamilies.presentFamily.value(), 0, &m_presentQueue);
-
-        m_vkGetBufferDeviceAddressKHR = reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
-            vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
-        m_vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
-            vkGetDeviceProcAddr(m_device, "vkCreateAccelerationStructureKHR"));
-        m_vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
-            vkGetDeviceProcAddr(m_device, "vkDestroyAccelerationStructureKHR"));
-        m_vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
-            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureBuildSizesKHR"));
-        m_vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
-            vkGetDeviceProcAddr(m_device, "vkCmdBuildAccelerationStructuresKHR"));
-        m_vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
-            vkGetDeviceProcAddr(m_device, "vkGetAccelerationStructureDeviceAddressKHR"));
-        m_vkCreateRayTracingPipelinesKHR = reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
-            vkGetDeviceProcAddr(m_device, "vkCreateRayTracingPipelinesKHR"));
-        m_vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
-            vkGetDeviceProcAddr(m_device, "vkGetRayTracingShaderGroupHandlesKHR"));
-        m_vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(
-            vkGetDeviceProcAddr(m_device, "vkCmdTraceRaysKHR"));
-
-        if (m_vkGetBufferDeviceAddressKHR == nullptr || m_vkCreateAccelerationStructureKHR == nullptr
-            || m_vkDestroyAccelerationStructureKHR == nullptr
-            || m_vkGetAccelerationStructureBuildSizesKHR == nullptr
-            || m_vkCmdBuildAccelerationStructuresKHR == nullptr
-            || m_vkGetAccelerationStructureDeviceAddressKHR == nullptr
-            || m_vkCreateRayTracingPipelinesKHR == nullptr
-            || m_vkGetRayTracingShaderGroupHandlesKHR == nullptr
-            || m_vkCmdTraceRaysKHR == nullptr)
-        {
-            throw std::runtime_error("Missing required Vulkan ray tracing extension entry points.");
-        }
     }
 
     uint32_t FindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties) const
@@ -1329,14 +1149,6 @@ private:
         allocation.size = 0;
     }
 
-    VkDeviceAddress GetBufferDeviceAddress(VkBuffer buffer) const
-    {
-        VkBufferDeviceAddressInfo addressInfo{};
-        addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-        addressInfo.buffer = buffer;
-        return m_vkGetBufferDeviceAddressKHR(m_device, &addressInfo);
-    }
-
     VkCommandBuffer BeginSingleTimeCommands() const
     {
         VkCommandBufferAllocateInfo allocInfo{};
@@ -1389,7 +1201,7 @@ private:
 
     // Allocate the scene UBO + Mie SSBO and upload the sky parameters. There
     // is no geometry / acceleration structure in this sky-only renderer.
-    void CreateRayTracingScene()
+    void CreateSceneResources()
     {
         if (m_commandPool == VK_NULL_HANDLE)
         {
@@ -1434,11 +1246,10 @@ private:
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 
-    // Create (or recreate after a resize) the swapchain, its image
-    // views, and the storage image the path tracer writes into. The
-    // storage image is a separate VkImage rather than the swapchain
-    // image so we can use whatever color format the GPU prefers for
-    // ray-tracing output and blit into the presentation format.
+    // Create (or recreate after a resize) the swapchain and its image
+    // views. The swapchain images are created with VK_IMAGE_USAGE_STORAGE_BIT
+    // and written directly by the compute shader (no separate offscreen image
+    // or blit), so the surface format must support storage usage.
     void CreateSwapchain()
     {
         const auto support = QuerySwapchainSupport(m_physicalDevice);
@@ -1515,9 +1326,9 @@ private:
         }
     }
 
-    // Define the descriptor-set layout shared by the ray-tracing and
-    // sky-compute pipelines: TLAS, storage image, vertex/index buffers,
-    // material/instance SSBOs, sky cube, and the scene UBO.
+    // Define the descriptor-set layout used by the compute pipeline: the
+    // output storage image (binding 0), the sky parameter UBO (binding 2),
+    // and the baked Lorenz–Mie SSBO (binding 7).
     void CreateDescriptorSetLayout()
     {
         // Output image (binding 0), sky parameter UBO (binding 2), and the
@@ -1528,19 +1339,19 @@ private:
         binding.binding = 0;
         binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutBinding sceneBinding{};
         sceneBinding.binding = 2;
         sceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sceneBinding.descriptorCount = 1;
-        sceneBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        sceneBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutBinding mieBinding{};
         mieBinding.binding = 7;
         mieBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         mieBinding.descriptorCount = 1;
-        mieBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        mieBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
             binding,
@@ -1569,54 +1380,22 @@ private:
         return shaderModule;
     }
 
-    BufferAllocation CreateShaderBindingTableBuffer(const void* data, VkDeviceSize size) const
-    {
-        BufferAllocation allocation = CreateBuffer(size,
-                                                   VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
-                                                       | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                                   true);
-        UploadToBuffer(allocation, data, static_cast<size_t>(size));
-        return allocation;
-    }
-
-    // Compile the raygen / miss / closest-hit shader modules from their
-    // SPIR-V blobs and assemble the VkPipeline for the ray-tracing
-    // pipeline (and the separate compute pipeline used for sky.comp).
+    // Compile the compute shader module from its SPIR-V blob and assemble the
+    // VkPipeline. Sky-only renderer: a single compute shader evaluates the sky
+    // analytically per pixel and writes the swapchain storage image directly.
     void CreatePipeline()
     {
-        // Sky-only renderer: one ray-generation shader, no miss/hit groups
-        // (rays are never traced; the raygen evaluates the sky analytically).
-        const auto raygenBytecode = LoadBinaryFile(L"path_tracer.rgen.spv");
-        VkShaderModule raygenModule = CreateShaderModule(raygenBytecode);
+        const auto computeBytecode = LoadBinaryFile(L"path_tracer.comp.spv");
+        VkShaderModule computeModule = CreateShaderModule(computeBytecode);
 
-        const std::array<VkPipelineShaderStageCreateInfo, 1> shaderStages = {{
-            {
-                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                nullptr,
-                0,
-                VK_SHADER_STAGE_RAYGEN_BIT_KHR,
-                raygenModule,
-                "main",
-                nullptr,
-            },
-        }};
-
-        const std::array<VkRayTracingShaderGroupCreateInfoKHR, 1> shaderGroups = {{
-            {
-                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
-                nullptr,
-                VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
-                0,
-                VK_SHADER_UNUSED_KHR,
-                VK_SHADER_UNUSED_KHR,
-                VK_SHADER_UNUSED_KHR,
-                nullptr,
-            },
-        }};
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = computeModule;
+        stageInfo.pName = "main";
 
         VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         pushRange.offset = 0;
         pushRange.size = sizeof(PushConstants);
 
@@ -1629,53 +1408,19 @@ private:
         ThrowVk(vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout),
                 "Failed to create pipeline layout");
 
-        VkRayTracingPipelineCreateInfoKHR pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
-        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        pipelineInfo.pStages = shaderStages.data();
-        pipelineInfo.groupCount = static_cast<uint32_t>(shaderGroups.size());
-        pipelineInfo.pGroups = shaderGroups.data();
-        pipelineInfo.maxPipelineRayRecursionDepth = m_rayTracingPipelineProperties.maxRayRecursionDepth;
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = stageInfo;
         pipelineInfo.layout = m_pipelineLayout;
-        ThrowVk(m_vkCreateRayTracingPipelinesKHR(m_device,
-                                                 VK_NULL_HANDLE,
-                                                 VK_NULL_HANDLE,
-                                                 1,
-                                                 &pipelineInfo,
-                                                 nullptr,
-                                                 &m_rayTracingPipeline),
-                "Failed to create ray tracing pipeline");
+        ThrowVk(vkCreateComputePipelines(m_device,
+                                         VK_NULL_HANDLE,
+                                         1,
+                                         &pipelineInfo,
+                                         nullptr,
+                                         &m_computePipeline),
+                "Failed to create compute pipeline");
 
-        vkDestroyShaderModule(m_device, raygenModule, nullptr);
-    }
-
-    // Build the shader-binding-table for the single ray-generation group.
-    // There are no miss/hit/callable groups in this sky-only renderer.
-    void CreateShaderBindingTables()
-    {
-        constexpr uint32_t kShaderGroupCount = 1;
-
-        const uint32_t handleSize = m_rayTracingPipelineProperties.shaderGroupHandleSize;
-        const VkDeviceSize handleSizeAligned =
-            AlignUp(handleSize, m_rayTracingPipelineProperties.shaderGroupHandleAlignment);
-        const VkDeviceSize recordSize =
-            AlignUp(handleSizeAligned, m_rayTracingPipelineProperties.shaderGroupBaseAlignment);
-
-        std::vector<uint8_t> shaderGroupHandles(static_cast<size_t>(handleSize) * kShaderGroupCount);
-        ThrowVk(m_vkGetRayTracingShaderGroupHandlesKHR(m_device,
-                                                       m_rayTracingPipeline,
-                                                       0,
-                                                       kShaderGroupCount,
-                                                       shaderGroupHandles.size(),
-                                                       shaderGroupHandles.data()),
-                "Failed to fetch ray tracing shader group handles");
-
-        std::vector<uint8_t> record(static_cast<size_t>(recordSize), 0);
-        std::memcpy(record.data(), shaderGroupHandles.data(), handleSize);
-        m_raygenShaderBindingTable = CreateShaderBindingTableBuffer(record.data(), recordSize);
-        m_raygenShaderBindingTableRegion.deviceAddress = GetBufferDeviceAddress(m_raygenShaderBindingTable.buffer);
-        m_raygenShaderBindingTableRegion.stride = recordSize;
-        m_raygenShaderBindingTableRegion.size = recordSize;
+        vkDestroyShaderModule(m_device, computeModule, nullptr);
     }
 
     // Allocate the descriptor pool and one descriptor set per layout
@@ -1813,11 +1558,11 @@ private:
     }
 
     // Record one frame's worth of work into commandBuffer:
-    //   1. Compute pass that fills the sky cube.
-    //   2. Image barrier transitioning the storage image to GENERAL.
-    //   3. vkCmdTraceRaysKHR dispatch.
-    //   4. Barriers + blit copying the storage image into the
-    //      acquired swapchain image at imageIndex.
+    //   1. Barrier transitioning the acquired swapchain image to GENERAL.
+    //   2. Bind the compute pipeline + descriptors, push constants.
+    //   3. vkCmdDispatch over an 8x8-tiled grid; the shader writes the
+    //      swapchain image directly as a storage image.
+    //   4. Barrier transitioning the swapchain image to PRESENT_SRC.
     void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
     {
         VkCommandBufferBeginInfo beginInfo{};
@@ -1839,7 +1584,7 @@ private:
 
         vkCmdPipelineBarrier(commandBuffer,
                              VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0,
                              0,
                              nullptr,
@@ -1849,9 +1594,9 @@ private:
                              &toGeneral);
 
         const PushConstants pushConstants = BuildPushConstants();
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rayTracingPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
         vkCmdBindDescriptorSets(commandBuffer,
-                                VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
                                 m_pipelineLayout,
                                 0,
                                 1,
@@ -1860,19 +1605,16 @@ private:
                                 nullptr);
         vkCmdPushConstants(commandBuffer,
                            m_pipelineLayout,
-                           VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                           VK_SHADER_STAGE_COMPUTE_BIT,
                            0,
                            sizeof(PushConstants),
                            &pushConstants);
-        const VkStridedDeviceAddressRegionKHR emptyRegion{};
-        m_vkCmdTraceRaysKHR(commandBuffer,
-                            &m_raygenShaderBindingTableRegion,
-                            &emptyRegion,
-                            &emptyRegion,
-                            &emptyRegion,
-                            m_swapchainExtent.width,
-                            m_swapchainExtent.height,
-                            1);
+        // 8x8 workgroups, matching the compute shader's local size; round up so
+        // the whole render target is covered (the shader discards the overhang).
+        constexpr uint32_t kTile = 8;
+        const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
+        const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
+        vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
 
         VkImageMemoryBarrier toPresent = toGeneral;
         toPresent.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -1881,7 +1623,7 @@ private:
         toPresent.dstAccessMask = 0;
 
         vkCmdPipelineBarrier(commandBuffer,
-                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                              0,
                              0,
@@ -1919,7 +1661,7 @@ private:
         ThrowVk(vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0), "Failed to reset command buffer");
         RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
 
-        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.waitSemaphoreCount = 1;
@@ -2034,11 +1776,10 @@ private:
         }
         if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
         if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
-        if (m_rayTracingPipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_rayTracingPipeline, nullptr);
+        if (m_computePipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_computePipeline, nullptr);
         if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
         if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
         DestroySceneBuffers();
-        DestroyBuffer(m_raygenShaderBindingTable);
         for (VkImageView view : m_swapchainImageViews)
         {
             if (view != VK_NULL_HANDLE) vkDestroyImageView(m_device, view, nullptr);
@@ -2076,15 +1817,12 @@ private:
 
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_rayTracingPipeline = VK_NULL_HANDLE;
+    VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> m_descriptorSets;
 
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_mieScatteringBuffer{};
-    BufferAllocation m_raygenShaderBindingTable{};
-    VkStridedDeviceAddressRegionKHR m_raygenShaderBindingTableRegion{};
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rayTracingPipelineProperties{};
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> m_commandBuffers;
@@ -2112,16 +1850,6 @@ private:
     bool m_polarizerElliptical = false;
     bool m_polarizerModeKeyDown = false;
     float m_polarizerEllipticityRadians = kPi * 0.125f;
-
-    PFN_vkGetBufferDeviceAddressKHR m_vkGetBufferDeviceAddressKHR = nullptr;
-    PFN_vkCreateAccelerationStructureKHR m_vkCreateAccelerationStructureKHR = nullptr;
-    PFN_vkDestroyAccelerationStructureKHR m_vkDestroyAccelerationStructureKHR = nullptr;
-    PFN_vkGetAccelerationStructureBuildSizesKHR m_vkGetAccelerationStructureBuildSizesKHR = nullptr;
-    PFN_vkCmdBuildAccelerationStructuresKHR m_vkCmdBuildAccelerationStructuresKHR = nullptr;
-    PFN_vkGetAccelerationStructureDeviceAddressKHR m_vkGetAccelerationStructureDeviceAddressKHR = nullptr;
-    PFN_vkCreateRayTracingPipelinesKHR m_vkCreateRayTracingPipelinesKHR = nullptr;
-    PFN_vkGetRayTracingShaderGroupHandlesKHR m_vkGetRayTracingShaderGroupHandlesKHR = nullptr;
-    PFN_vkCmdTraceRaysKHR m_vkCmdTraceRaysKHR = nullptr;
 };
 
 // Public C-style entry point exported by VulkanPathTracer.h. Constructs a

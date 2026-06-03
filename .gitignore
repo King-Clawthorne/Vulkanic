@@ -25,6 +25,11 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 
+# Ninja
+*.ninja
+.ninja_deps
+.ninja_log
+
 # Compiled Binaries
 *.exe
 *.dll

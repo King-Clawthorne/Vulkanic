@@ -21,7 +21,7 @@ analyzer responds to it.
 
 Build a complete, runnable real-time simulator that:
 
-- Targets the raw Vulkan 1.2 ray-tracing pipeline on Windows.
+- Targets a raw Vulkan compute pipeline on Windows.
 - Has **zero** third-party wrappers — no GLFW, no GLM, no TinyObjLoader, no nlohmann::json.
 - Carries the full Stokes vector (I, Q, U, V) through the atmosphere, not just scalar RGB radiance.
 - Lets the user aim the camera around the sky dome and switch between linear and elliptical analyzer
@@ -35,16 +35,17 @@ The repository implements the whole stack from the OS layer up:
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix. Everything is transported
   as Stokes vectors with proper Mueller matrices and frame rotations (single scattering).
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
-  ray-generation shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
+  compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
 - **From-scratch numerics** — a hand-written Lorenz–Mie solver (`MieScattering.cpp`) bakes the
   scattering-matrix table at startup; a hand-written JSON parser (`RuntimeConfig.cpp`) loads the
   tunable parameters.
 - **Hot config reload** — `path_tracer_config.json` is polled each frame; sky/aerosol edits apply
   live (aerosol changes rebuild the Mie table).
-- **Hardware ray-tracing pipeline** — the renderer keeps the `VK_KHR_ray_tracing_pipeline` and runs
-  a single ray-generation shader that evaluates the sky analytically per pixel (there is no scene
-  geometry, so no BLAS/TLAS, hit, or miss shaders).
+- **Compute pipeline** — the renderer is a single compute shader, dispatched over an 8×8-tiled
+  grid, that evaluates the sky analytically per pixel and writes the swapchain image directly as a
+  storage image (no scene geometry, no acceleration structures, no graphics pipeline or blit). This
+  keeps the hardware requirement to plain Vulkan compute rather than RT-capable GPUs.
 
 ### Result
 
@@ -61,7 +62,8 @@ A compact repository whose only job is to render the polarized sky and let you s
 ## System Requirements
 
 - **OS:** Windows 10 / 11 (uses `VK_USE_PLATFORM_WIN32_KHR`).
-- **GPU:** Vulkan 1.2+ with hardware ray tracing (e.g. NVIDIA RTX or AMD RX 6000 series).
+- **GPU:** any Vulkan 1.2+ GPU with a compute queue and a storage-image-capable swapchain (no
+  hardware ray tracing required).
 - **Vulkan SDK:** installed and exposed via the `VULKAN_SDK` environment variable.
 - **Compiler:** any C++17 toolchain — MSVC via Visual Studio is the tested path.
 - **CMake:** 3.20 or newer.
@@ -99,7 +101,7 @@ cmake --build .
 - In linear mode, `[` / `]` rotate the analyzer axis.
 - In elliptical mode, `[` / `]` sweep ellipticity from left-circular through linear to right-circular.
 
-(WASD/Q/E movement still works but the sky is directional, so position has no visible effect.)
+(The sky is directional, so the camera only rotates — there is no positional movement.)
 
 ## Runtime Configuration
 
@@ -116,12 +118,12 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 ## Project Structure
 
 - **Shaders (`glslc` → SPIR-V):**
-  - `path_tracer.rgen` — the whole renderer: camera ray per pixel → polarized sky → analyzer →
-    tonemap → image.
+  - `path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
+    tonemap → image (compute, 8×8 workgroups).
   - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
   - `path_tracer_common.glsl` — descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
-  - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, ray-tracing pipeline, Win32 window +
+  - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
     message loop.
   - `MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
   - `RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.

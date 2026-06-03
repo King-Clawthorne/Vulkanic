@@ -44,7 +44,7 @@ cmake_ninja_workdir = C$:\Users\cohen\Vulkanic\cmake-build-ninja\
 #############################################
 # Utility command for vulkan_shader
 
-build vulkan_shader: phony CMakeFiles\vulkan_shader path_tracer.rgen.spv
+build vulkan_shader: phony CMakeFiles\vulkan_shader path_tracer.comp.spv
 
 # =============================================================================
 # Object build statements for EXECUTABLE target Vulkanic
@@ -109,7 +109,7 @@ build Vulkanic.exe: CXX_EXECUTABLE_LINKER__Vulkanic_Release CMakeFiles\Vulkanic.
   LINK_FLAGS = /machine:x64 /INCREMENTAL:NO /subsystem:console
   LINK_LIBRARIES = C:\VulkanSDK\1.4.321.1\Lib\vulkan-1.lib  kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib
   OBJECT_DIR = CMakeFiles\Vulkanic.dir
-  POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\cohen\Vulkanic\cmake-build-ninja && "C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv"
+  POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\cohen\Vulkanic\cmake-build-ninja && "C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.comp.spv C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.comp.spv"
   PRE_LINK = cd .
   TARGET_COMPILE_PDB = CMakeFiles\Vulkanic.dir\
   TARGET_FILE = Vulkanic.exe
@@ -144,15 +144,15 @@ build rebuild_cache: phony CMakeFiles\rebuild_cache.util
 #############################################
 # Phony custom command for CMakeFiles\vulkan_shader
 
-build CMakeFiles\vulkan_shader | ${cmake_ninja_workdir}CMakeFiles\vulkan_shader: phony path_tracer.rgen.spv
+build CMakeFiles\vulkan_shader | ${cmake_ninja_workdir}CMakeFiles\vulkan_shader: phony path_tracer.comp.spv
 
 
 #############################################
-# Custom command for path_tracer.rgen.spv
+# Custom command for path_tracer.comp.spv
 
-build path_tracer.rgen.spv | ${cmake_ninja_workdir}path_tracer.rgen.spv: CUSTOM_COMMAND C$:\Users\cohen\Vulkanic\path_tracer.rgen C$:\Users\cohen\Vulkanic\path_tracer_common.glsl C$:\Users\cohen\Vulkanic\sky.comp
-  COMMAND = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\cohen\Vulkanic\cmake-build-ninja && C:\VulkanSDK\1.4.321.1\Bin\glslc.exe --target-env=vulkan1.2 -g -O0 -I C:/Users/cohen/Vulkanic -o C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.rgen.spv C:/Users/cohen/Vulkanic/path_tracer.rgen"
-  DESC = Generating path_tracer.rgen.spv
+build path_tracer.comp.spv | ${cmake_ninja_workdir}path_tracer.comp.spv: CUSTOM_COMMAND C$:\Users\cohen\Vulkanic\path_tracer.comp C$:\Users\cohen\Vulkanic\path_tracer_common.glsl C$:\Users\cohen\Vulkanic\sky.comp
+  COMMAND = C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\cohen\Vulkanic\cmake-build-ninja && C:\VulkanSDK\1.4.321.1\Bin\glslc.exe --target-env=vulkan1.2 -g -O0 -I C:/Users/cohen/Vulkanic -o C:/Users/cohen/Vulkanic/cmake-build-ninja/path_tracer.comp.spv C:/Users/cohen/Vulkanic/path_tracer.comp"
+  DESC = Generating path_tracer.comp.spv
   restat = 1
 
 # =============================================================================

@@ -2,7 +2,7 @@
 //
 // Despite the .comp name this is a header-style file: the entry points are
 // render_sky_stokes() / render_sky_stokes_framed(), called from
-// path_tracer.rgen for every pixel. The model is a polarized single-scattering
+// path_tracer.comp for every pixel. The model is a polarized single-scattering
 // Rayleigh + Lorenz–Mie atmosphere (full Stokes transport), parameterized by
 // the constants in SceneData (Earth radius, scale heights, scattering
 // coefficients, sun direction, etc.).

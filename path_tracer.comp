@@ -1,7 +1,7 @@
-// Ray-generation shader — the entire renderer.
+// Compute shader — the entire renderer.
 //
 // This project is a polarized-sky simulator: there is no scene geometry, so
-// each launched "ray" is just a view direction into the atmosphere. For every
+// each invocation is just a view direction into the atmosphere. For every
 // pixel we:
 //   1. Seed an LCG-style RNG from the pixel coords + frame number.
 //   2. Take samplesPerPixel stratified sub-pixel directions through the camera.
@@ -13,20 +13,23 @@
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
-#extension GL_EXT_ray_tracing : require
 
 #include "path_tracer_common.glsl"
 
+// 8x8 tiles; the dispatch rounds the grid up, so out-of-range invocations are
+// discarded by the bounds check below.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
 void main()
 {
-    // gl_LaunchSizeEXT is rounded up to the dispatch granularity, so discard
-    // threads outside the render target instead of writing to OOB.
-    if (gl_LaunchIDEXT.x >= pc.imageSize.x || gl_LaunchIDEXT.y >= pc.imageSize.y)
+    // The dispatch is rounded up to the workgroup size, so discard invocations
+    // outside the render target instead of writing out of bounds.
+    if (gl_GlobalInvocationID.x >= pc.imageSize.x || gl_GlobalInvocationID.y >= pc.imageSize.y)
     {
         return;
     }
 
-    uvec2 pixel = gl_LaunchIDEXT.xy;
+    uvec2 pixel = gl_GlobalInvocationID.xy;
     uint rngState = Hash(pixel.x + pixel.y * 9781u + uint(pc.cameraPositionFrame.w) * 6271u + 1u);
 
     vec3 cameraForward = pc.cameraForwardSamples.xyz;

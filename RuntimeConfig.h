@@ -145,8 +145,6 @@ struct RuntimeConfig
     Vec3 initialPosition{0.0f, 0.35f, -6.5f};
     Vec3 initialLookAt{0.0f, -0.1f, 3.8f};
     float fovYDegrees = 40.0f;
-    float moveSpeed = 4.0f;
-    float fastMoveSpeed = 10.0f;
     float mouseSensitivity = 0.0035f;
     float keyLookSpeed = 1.8f;
     float polarizerRotateSpeed = 6.3f;

@@ -541,8 +541,6 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
     if (const JsonValue* inputValue = FindMember(root, "input"))
     {
         const auto& input = inputValue->AsObject("\"input\"");
-        ParseOptionalJsonNumber(input, "moveSpeed", config.moveSpeed);
-        ParseOptionalJsonNumber(input, "fastMoveSpeed", config.fastMoveSpeed);
         ParseOptionalJsonNumber(input, "mouseSensitivity", config.mouseSensitivity);
         ParseOptionalJsonNumber(input, "keyLookSpeed", config.keyLookSpeed);
         ParseOptionalJsonNumber(input, "polarizerRotateSpeed", config.polarizerRotateSpeed);
@@ -624,10 +622,6 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     if (config.fovYDegrees <= 1.0f || config.fovYDegrees >= 179.0f)
     {
         throw std::runtime_error("\"fovYDegrees\" must be between 1 and 179.");
-    }
-    if (config.moveSpeed < 0.0f || config.fastMoveSpeed < 0.0f)
-    {
-        throw std::runtime_error("\"moveSpeed\" and \"fastMoveSpeed\" must be non-negative.");
     }
     if (config.mouseSensitivity < 0.0f || config.keyLookSpeed < 0.0f || config.polarizerRotateSpeed < 0.0f)
     {

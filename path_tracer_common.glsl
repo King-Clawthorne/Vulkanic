@@ -1,6 +1,6 @@
 // path_tracer_common.glsl — shared shader header.
 //
-// Included by path_tracer.rgen and (via #include) by sky.comp. This is a
+// Included by path_tracer.comp and (via #include) by sky.comp. This is a
 // polarized-sky simulator with no scene geometry, so the header is small:
 //   * Descriptor bindings: the output image, the scene UBO (sky parameters),
 //     and the precomputed Lorenz–Mie scattering-matrix SSBO.

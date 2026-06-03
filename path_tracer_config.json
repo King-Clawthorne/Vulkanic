@@ -12,8 +12,6 @@
     "maxPitchDegrees": 89.0
   },
   "input": {
-    "moveSpeed": 4.0,
-    "fastMoveSpeed": 10.0,
     "mouseSensitivity": 0.0035,
     "keyLookSpeed": 1.8,
     "polarizerRotateSpeed": 1.5
