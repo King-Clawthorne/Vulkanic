@@ -148,9 +148,8 @@ struct BufferAllocation
 //
 // Each vec4 packs multiple scalars together to keep the std140 layout
 // compact and to match the shader-side struct one-for-one. The static
-// assertion below pins the size at 96 bytes so any future field reshuffle
-// that breaks alignment fails to compile rather than corrupting the GPU
-// view of the data.
+// assertion below pins the size so any future field reshuffle that breaks
+// alignment fails to compile rather than corrupting the GPU view of the data.
 struct alignas(16) SceneData
 {
     float skyBetaRayleighBetaM[4];
@@ -159,13 +158,23 @@ struct alignas(16) SceneData
     float skySunRadiance[4];
     float skySunDirection[4];
     uint32_t skySampleCounts[4];
-    // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
-    // orders, z = Mie table angle bins, w unused. The Mie scattering matrix
-    // itself rides in the binding-7 SSBO, not here.
+    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
+    // z = Mie table angle bins, w = ozone layer Gaussian width (m). The Mie
+    // scattering matrix itself rides in the binding-7 SSBO, not here.
     float skyVrtParams[4];
+    // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
+    // RGB band (1/m), w = layer center altitude (m).
+    float skyOzoneBeta[4];
+    // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
+    // refraction strength (1 = standard atmosphere, 0 = off).
+    float skySunLimbRefraction[4];
+    // Aerosol extras: x = stratospheric background peak extinction (1/m),
+    // y = background layer center altitude (m), z = layer Gaussian width (m),
+    // w = aerosol single-scattering albedo.
+    float skyMieBackground[4];
 };
 
-static_assert(sizeof(SceneData) == 112, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 160, "Scene data layout must stay 16-byte aligned.");
 
 // 3x3 row-major matrix used only for camera basis math.
 struct Mat3
@@ -284,6 +293,15 @@ static bool HasSkySpectralChanged(const SkySpectralConfig& left, const SkySpectr
            || left.sunRadiance != right.sunRadiance
            || left.sunRadius != right.sunRadius
            || left.sunAa != right.sunAa
+           || left.betaOzone != right.betaOzone
+           || left.ozoneCenterAltitude != right.ozoneCenterAltitude
+           || left.ozoneLayerWidth != right.ozoneLayerWidth
+           || left.sunLimbDarkening != right.sunLimbDarkening
+           || left.refractionStrength != right.refractionStrength
+           || left.mieBackgroundBeta != right.mieBackgroundBeta
+           || left.mieBackgroundCenter != right.mieBackgroundCenter
+           || left.mieBackgroundWidth != right.mieBackgroundWidth
+           || left.mieSingleScatterAlbedo != right.mieSingleScatterAlbedo
            || left.secondarySamples != right.secondarySamples
            || left.viewSteps != right.viewSteps
            || left.samples != right.samples
@@ -398,31 +416,44 @@ private:
 
     SceneData BuildSceneData() const
     {
+        const SkySpectralConfig& s = m_config.skySpectral;
         SceneData sceneData{};
-        sceneData.skyBetaRayleighBetaM[0] = m_config.skySpectral.betaRayleigh[0];
-        sceneData.skyBetaRayleighBetaM[1] = m_config.skySpectral.betaRayleigh[1];
-        sceneData.skyBetaRayleighBetaM[2] = m_config.skySpectral.betaRayleigh[2];
-        sceneData.skyBetaRayleighBetaM[3] = m_config.skySpectral.betaMie;
-        sceneData.skyMieEarthAtmosScaleHr[0] = m_config.skySpectral.mieG;
-        sceneData.skyMieEarthAtmosScaleHr[1] = m_config.skySpectral.earthRadius;
-        sceneData.skyMieEarthAtmosScaleHr[2] = m_config.skySpectral.atmosphereRadius;
-        sceneData.skyMieEarthAtmosScaleHr[3] = m_config.skySpectral.scaleHeightRayleigh;
-        sceneData.skyScaleHmSunRadiusAa[0] = m_config.skySpectral.scaleHeightMie;
-        sceneData.skyScaleHmSunRadiusAa[1] = m_config.skySpectral.sunRadius;
-        sceneData.skyScaleHmSunRadiusAa[2] = m_config.skySpectral.sunAa;
-        sceneData.skySunRadiance[0] = m_config.skySpectral.sunRadiance[0];
-        sceneData.skySunRadiance[1] = m_config.skySpectral.sunRadiance[1];
-        sceneData.skySunRadiance[2] = m_config.skySpectral.sunRadiance[2];
-        sceneData.skySunDirection[0] = m_config.skySpectral.sunDirection[0];
-        sceneData.skySunDirection[1] = m_config.skySpectral.sunDirection[1];
-        sceneData.skySunDirection[2] = m_config.skySpectral.sunDirection[2];
-        sceneData.skySampleCounts[0] = m_config.skySpectral.secondarySamples;
-        sceneData.skySampleCounts[1] = m_config.skySpectral.viewSteps;
-        sceneData.skySampleCounts[2] = m_config.skySpectral.samples;
-        sceneData.skyVrtParams[0] = m_config.skySpectral.rayleighDepolarization;
-        sceneData.skyVrtParams[1] = 0.0f; // (was scattering orders; multiple scattering removed)
-        sceneData.skyVrtParams[2] = static_cast<float>(m_config.skySpectral.mieTableAngleBins);
-        sceneData.skyVrtParams[3] = 0.0f;
+        sceneData.skyBetaRayleighBetaM[0] = s.betaRayleigh[0];
+        sceneData.skyBetaRayleighBetaM[1] = s.betaRayleigh[1];
+        sceneData.skyBetaRayleighBetaM[2] = s.betaRayleigh[2];
+        sceneData.skyBetaRayleighBetaM[3] = s.betaMie;
+        sceneData.skyMieEarthAtmosScaleHr[0] = s.mieG;
+        sceneData.skyMieEarthAtmosScaleHr[1] = s.earthRadius;
+        sceneData.skyMieEarthAtmosScaleHr[2] = s.atmosphereRadius;
+        sceneData.skyMieEarthAtmosScaleHr[3] = s.scaleHeightRayleigh;
+        sceneData.skyScaleHmSunRadiusAa[0] = s.scaleHeightMie;
+        sceneData.skyScaleHmSunRadiusAa[1] = s.sunRadius;
+        sceneData.skyScaleHmSunRadiusAa[2] = s.sunAa;
+        sceneData.skySunRadiance[0] = s.sunRadiance[0];
+        sceneData.skySunRadiance[1] = s.sunRadiance[1];
+        sceneData.skySunRadiance[2] = s.sunRadiance[2];
+        sceneData.skySunDirection[0] = s.sunDirection[0];
+        sceneData.skySunDirection[1] = s.sunDirection[1];
+        sceneData.skySunDirection[2] = s.sunDirection[2];
+        sceneData.skySampleCounts[0] = s.secondarySamples;
+        sceneData.skySampleCounts[1] = s.viewSteps;
+        sceneData.skySampleCounts[2] = s.samples;
+        sceneData.skyVrtParams[0] = s.rayleighDepolarization;
+        sceneData.skyVrtParams[1] = 0.0f;
+        sceneData.skyVrtParams[2] = static_cast<float>(s.mieTableAngleBins);
+        sceneData.skyVrtParams[3] = s.ozoneLayerWidth;
+        sceneData.skyOzoneBeta[0] = s.betaOzone[0];
+        sceneData.skyOzoneBeta[1] = s.betaOzone[1];
+        sceneData.skyOzoneBeta[2] = s.betaOzone[2];
+        sceneData.skyOzoneBeta[3] = s.ozoneCenterAltitude;
+        sceneData.skySunLimbRefraction[0] = s.sunLimbDarkening[0];
+        sceneData.skySunLimbRefraction[1] = s.sunLimbDarkening[1];
+        sceneData.skySunLimbRefraction[2] = s.sunLimbDarkening[2];
+        sceneData.skySunLimbRefraction[3] = s.refractionStrength;
+        sceneData.skyMieBackground[0] = s.mieBackgroundBeta;
+        sceneData.skyMieBackground[1] = s.mieBackgroundCenter;
+        sceneData.skyMieBackground[2] = s.mieBackgroundWidth;
+        sceneData.skyMieBackground[3] = s.mieSingleScatterAlbedo;
         return sceneData;
     }
 
@@ -1842,8 +1873,9 @@ private:
 
     // Camera polarization filter. P toggles it on/off; C switches between a
     // linear analyzer and an elliptical one. In linear mode [ and ] rotate the
-    // major axis (measured in the camera image plane from the right axis); in
-    // elliptical mode [ and ] adjust ellipticity (-45..+45 degrees).
+    // major axis (measured in the image plane from camera-right, positive
+    // toward camera-down on screen — counterclockwise facing the incoming
+    // beam); in elliptical mode [ and ] adjust ellipticity (-45..+45 degrees).
     bool m_polarizerEnabled = false;
     float m_polarizerAngleRadians = 0.0f;
     bool m_polarizerToggleKeyDown = false;

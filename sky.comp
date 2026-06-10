@@ -3,9 +3,9 @@
 // Despite the .comp name this is a header-style file: the entry points are
 // render_sky_stokes() / render_sky_stokes_framed(), called from
 // path_tracer.comp for every pixel. The model is a polarized single-scattering
-// Rayleigh + Lorenz–Mie atmosphere (full Stokes transport), parameterized by
-// the constants in SceneData (Earth radius, scale heights, scattering
-// coefficients, sun direction, etc.).
+// Rayleigh + Lorenz–Mie atmosphere (full Stokes transport) with ozone
+// Chappuis-band absorption, parameterized by the constants in SceneData
+// (Earth radius, scale heights, scattering coefficients, sun direction, etc.).
 //
 // View-ray integration steps come from skySampleCounts.y (SkyViewSteps()).
 
@@ -136,6 +136,80 @@ int SkyMieAngleBins()
     return int(sceneData.skyVrtParams.z);
 }
 
+// Ozone Chappuis-band absorption (no scattering): peak coefficient per band,
+// layer center altitude, and Gaussian half-width, all SI.
+vec3 SkyBetaO3()
+{
+    return sceneData.skyOzoneBeta.xyz;
+}
+
+float SkyOzoneCenter()
+{
+    return sceneData.skyOzoneBeta.w;
+}
+
+float SkyOzoneWidth()
+{
+    return sceneData.skyVrtParams.w;
+}
+
+// Normalized ozone density: a Gaussian layer peaking at 1 around
+// SkyOzoneCenter (~25 km). Chappuis absorption peaks in the green/orange, so
+// this is what keeps the zenith blue at twilight — Rayleigh alone barely
+// filters 550–650 nm along the long horizontal sun paths and the sky would
+// drift yellow-green at low sun.
+float ozone_density(float altitude)
+{
+    float x = (altitude - SkyOzoneCenter()) / SkyOzoneWidth();
+    return exp(-x * x);
+}
+
+// Sun limb-darkening coefficient u per RGB band: I(mu)/I(0) = 1 - u(1 - mu).
+vec3 SkySunLimbDarkening()
+{
+    return sceneData.skySunLimbRefraction.xyz;
+}
+
+// Atmospheric refraction strength: 1 = standard conditions, 0 = disabled.
+float SkyRefraction()
+{
+    return sceneData.skySunLimbRefraction.w;
+}
+
+// Stratospheric background aerosol layer (Gaussian) and the aerosol
+// single-scattering albedo (scattered fraction of Mie extinction; < 1 models
+// absorbing aerosols such as smoke or dust).
+float SkyMieBgBeta()
+{
+    return sceneData.skyMieBackground.x;
+}
+
+float SkyMieBgCenter()
+{
+    return sceneData.skyMieBackground.y;
+}
+
+float SkyMieBgWidth()
+{
+    return sceneData.skyMieBackground.z;
+}
+
+float SkyMieAlbedo()
+{
+    return sceneData.skyMieBackground.w;
+}
+
+// Aerosol extinction coefficient at altitude (1/m): the boundary-layer haze
+// (exponential, BETA_M / SCALE_H_M) plus a thin Gaussian stratospheric
+// background layer (Junge layer, ~20 km). Both modes share the precomputed
+// Mie phase matrix; only their density profiles differ.
+float mie_extinction(float altitude)
+{
+    float x = (altitude - SkyMieBgCenter()) / SkyMieBgWidth();
+    return SkyBetaM() * exp(-altitude / SkyScaleHeightMie())
+           + SkyMieBgBeta() * exp(-x * x);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ATMOSPHERE INTERSECTION
 // ═══════════════════════════════════════════════════════════════════════════
@@ -152,39 +226,42 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
     return vec2(-b - sq, -b + sq);
 }
 
+// True when the sun at direction L is geometrically occluded by the planet as
+// seen from pos. An exact ray-sphere umbra test: this is what shapes the
+// twilight arch and the Belt of Venus (the old dot(up, L) cutoff carved the
+// shadow boundary in the wrong place and with no curvature).
+bool earth_shadow(vec3 pos, vec3 L)
+{
+    vec2 t_earth = ray_sphere(pos, L, SkyEarthRadius());
+    return t_earth.x > 0.0;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // OPTICAL DEPTH INTEGRALS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Approximate Rayleigh / Mie optical depth along a ray by summing
-// exponentially-attenuated density at num_steps midpoint samples.
-vec2 optical_depth_ray(vec3 origin, vec3 dir, int num_steps)
+// Spectral transmittance along (origin, dir): the per-channel fraction of
+// light that survives Rayleigh + Mie extinction plus ozone absorption,
+// accumulated as an optical depth at num_steps midpoint samples. Used for
+// sun-light attenuation and inter-slab attenuation.
+vec3 transmittance(vec3 origin, vec3 dir, int num_steps)
 {
     vec2 t_atmos = ray_sphere(origin, dir, SkyAtmosphereRadius());
     float t_max = max(t_atmos.y, 0.0);
 
     float step_size = t_max / float(num_steps);
     vec3 pos = origin;
-    float od_R = 0.0;
-    float od_M = 0.0;
+    vec3 tau = vec3(0.0);
 
     for (int i = 0; i < num_steps; i++)
     {
         pos += dir * step_size;
         float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
-        od_R += exp(-altitude / SkyScaleHeightRayleigh()) * step_size;
-        od_M += exp(-altitude / SkyScaleHeightMie()) * step_size;
+        tau += (SkyBetaR() * exp(-altitude / SkyScaleHeightRayleigh())
+                + mie_extinction(altitude)
+                + SkyBetaO3() * ozone_density(altitude)) * step_size;
     }
-    return vec2(od_R, od_M);
-}
-
-// Spectral transmittance along (origin, dir): the per-channel fraction of light
-// that survives Rayleigh + Mie extinction. Used for sun-light attenuation and
-// inter-slab attenuation.
-vec3 transmittance(vec3 origin, vec3 dir, int steps)
-{
-    vec2 od = optical_depth_ray(origin, dir, steps);
-    return exp(-(SkyBetaR() * od.x + SkyBetaM() * od.y));
+    return exp(-tau);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -204,14 +281,26 @@ float phase_mie(float cos_theta)
     return (1.0 - g2) / (4.0 * PI * denom);
 }
 
-// Sun-disk visibility factor [0,1] with a thin softened limb (SkySunAa)
-// to keep the disk anti-aliased without supersampling.
-float sun_disk(vec3 V, vec3 L)
+// Sun-disk radiance factor per band: anti-aliased visibility (thin softened
+// limb, SkySunAa) times limb darkening I(mu)/I(0) = 1 - u(1 - mu), where mu
+// is the cosine of the heliocentric angle (u per band from the Hestroffer &
+// Magnan 1998 fits). Normalized by the disk average (1 - u/3) so SUN_RADIANCE
+// keeps meaning the disk-averaged radiance and the in-scatter terms that use
+// it as the sun's strength stay consistent.
+vec3 sun_disk(vec3 V, vec3 L)
 {
     float mu = dot(normalize(V), normalize(L));
     float inner = cos(SkySunRadius() - SkySunAa());
     float outer = cos(SkySunRadius() + SkySunAa());
-    return smoothstep(outer, inner, mu);
+    float vis = smoothstep(outer, inner, mu);
+    if (vis <= 0.0)
+    {
+        return vec3(0.0);
+    }
+    float r = clamp(acos(clamp(mu, -1.0, 1.0)) / SkySunRadius(), 0.0, 1.0);
+    float muDisk = sqrt(max(0.0, 1.0 - r * r));
+    vec3 u = SkySunLimbDarkening();
+    return vis * (vec3(1.0) - u * (1.0 - muDisk)) / (vec3(1.0) - u / 3.0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -220,11 +309,8 @@ float sun_disk(vec3 V, vec3 L)
 //
 // The sky radiance is solved as a Stokes-vector (I, Q, U, V) transfer problem
 // rather than a scalar one. Single scattering is integrated deterministically
-// along the view ray; multiple scattering is estimated by Monte Carlo to 2nd
-// order with full polarization (the order that produces the neutral points and
-// pulls the peak degree of polarization down to a realistic value). Rayleigh
-// uses an analytic depolarized scattering matrix; aerosols use the precomputed
-// Lorenz–Mie matrix in mieMatrixBuffer.
+// along the view ray. Rayleigh uses an analytic depolarized scattering matrix;
+// aerosols use the precomputed Lorenz–Mie matrix in mieMatrixBuffer.
 
 // Stokes vector carried per RGB band. Q is the linear component along the
 // frame's reference axis, U the 45° component, V the circular component.
@@ -373,14 +459,17 @@ Mueller mie_mueller(float cosTheta)
 }
 
 // Volume scattering matrix at a point: (1/4π)(β_R ρ_R · Rayleigh +
-// β_M ρ_M · Mie), so m11 plays the role of the phase function in the
-// in-scatter integral. Elements are per band.
-Mueller volume_scatter_mueller(float cosTheta, float rhoR, float rhoM)
+// σ_M · albedo · Mie), so m11 plays the role of the phase function in the
+// in-scatter integral. Elements are per band. mieExt is the local Mie
+// extinction coefficient; the single-scattering albedo removes the absorbed
+// fraction, which only ever leaves the in-scatter term — extinction keeps
+// the full coefficient.
+Mueller volume_scatter_mueller(float cosTheta, float rhoR, float mieExt)
 {
     Mueller r = rayleigh_mueller(cosTheta);
     Mueller a = mie_mueller(cosTheta);
     vec3 wR = SkyBetaR() * rhoR;
-    vec3 wM = vec3(SkyBetaM() * rhoM);
+    vec3 wM = vec3(mieExt * SkyMieAlbedo());
     float inv4pi = 1.0 / (4.0 * PI);
 
     Mueller c;
@@ -396,10 +485,10 @@ Mueller volume_scatter_mueller(float cosTheta, float rhoR, float rhoM)
 // Scatter an incoming Stokes beam (propagating along din, expressed in its own
 // meridian frame) into outgoing direction dout, returning the result in dout's
 // meridian frame. Handles the meridian→scattering-plane→meridian rotations.
-Stokes scatter_stokes(Stokes sIn, vec3 din, vec3 dout, float rhoR, float rhoM)
+Stokes scatter_stokes(Stokes sIn, vec3 din, vec3 dout, float rhoR, float mieExt)
 {
     float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
-    Mueller m = volume_scatter_mueller(cosTheta, rhoR, rhoM);
+    Mueller m = volume_scatter_mueller(cosTheta, rhoR, mieExt);
 
     vec3 ain;
     vec3 bin;
@@ -412,9 +501,18 @@ Stokes scatter_stokes(Stokes sIn, vec3 din, vec3 dout, float rhoR, float rhoM)
     float pl = length(p);
     if (pl < 1.0e-6)
     {
-        // Forward/back scatter: scattering plane is undefined and p12 ≈ 0, so
-        // polarization is negligible — apply the matrix in the incoming frame.
-        return mueller_apply(m, sIn);
+        // Forward/back scatter: scattering plane is undefined and m12 ≈ 0, so
+        // apply the matrix in the incoming frame. For backscatter dout ≈ -din,
+        // and beam_basis(-din) keeps the a-axis but flips b relative to
+        // beam_basis(din), so U and V change sign in the outgoing frame
+        // (m33, m44 ≠ 0 at θ = π even though m12 = 0).
+        Stokes r = mueller_apply(m, sIn);
+        if (cosTheta < 0.0)
+        {
+            r.U = -r.U;
+            r.V = -r.V;
+        }
+        return r;
     }
     p /= pl;
     vec3 sInAxis = cross(p, din);   // in-plane, ⊥ din (parallel reference)
@@ -454,20 +552,58 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
         vec3 pos = origin + viewDir * t;
         float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
         float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
-        float rhoM = exp(-altitude / SkyScaleHeightMie());
+        float extM = mie_extinction(altitude);
+        float rhoO3 = ozone_density(altitude);
 
-        T_cam *= exp(-(SkyBetaR() * rhoR + SkyBetaM() * rhoM) * step_size);
-        if (dot(normalize(pos), L) < -0.02)
+        // Ozone contributes to extinction only — it absorbs without
+        // scattering, so it never appears in the in-scatter Mueller weights.
+        // Mie uses its full extinction here; the absorbed share is dropped
+        // from the in-scatter weights via the single-scattering albedo.
+        T_cam *= exp(-(SkyBetaR() * rhoR + extM + SkyBetaO3() * rhoO3) * step_size);
+
+        // Direct sunlight scattered once, when the point is outside the
+        // planet's umbra (exact ray-sphere test — at twilight only the high
+        // atmosphere is lit, which is the twilight arch).
+        if (!earth_shadow(pos, L))
         {
-            continue;
+            vec3 T_sun = transmittance(pos, L, 8);
+            Stokes scattered = scatter_stokes(sSun, din, dout, rhoR, extM);
+            vec3 w = SkySunRadiance() * T_cam * T_sun * step_size;
+            result = stokes_add(result, stokes_scale(scattered, w));
         }
-        vec3 T_sun = transmittance(pos, L, 8);
-
-        Stokes scattered = scatter_stokes(sSun, din, dout, rhoR, rhoM);
-        vec3 w = SkySunRadiance() * T_cam * T_sun * step_size;
-        result = stokes_add(result, stokes_scale(scattered, w));
     }
     return result;
+}
+
+// Astronomical refraction for a standard atmosphere, in arcminutes.
+// Sæmundsson's formula takes the APPARENT altitude, Bennett's the TRUE
+// altitude (degrees); the two are inverse-consistent fits. Clamped below -1°
+// where the fits break down — refraction saturates near the horizon anyway.
+float refraction_apparent_arcmin(float hDeg)
+{
+    float h = clamp(hDeg, -1.0, 90.0);
+    return 1.02 / tan(radians(h + 10.3 / (h + 5.11)));
+}
+
+float refraction_true_arcmin(float hDeg)
+{
+    float h = clamp(hDeg, -1.0, 90.0);
+    return 1.0 / tan(radians(h + 7.31 / (h + 4.4)));
+}
+
+// Rotate dir within its vertical plane so its elevation above the horizon
+// changes by deltaRad (positive = toward the zenith).
+vec3 change_elevation(vec3 dir, vec3 up, float deltaRad)
+{
+    float s = clamp(dot(dir, up), -1.0, 1.0);
+    vec3 horiz = dir - up * s;
+    float hl = length(horiz);
+    if (hl < 1.0e-6)
+    {
+        return dir; // refraction vanishes at the zenith/nadir anyway
+    }
+    float h = atan(s, hl) + deltaRad;
+    return normalize(horiz * (cos(h) / hl) + up * sin(h));
 }
 
 // Full polarized sky radiance toward viewDir, returned in the natural beam
@@ -476,12 +612,36 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
 Stokes render_sky_stokes(vec3 viewDir, vec3 L)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    float refr = SkyRefraction();
 
-    Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps());
+    // Sunlight bends around the limb, so illuminate the atmosphere with the
+    // sun lifted by Bennett refraction at its true elevation. First-order
+    // approximation: the lift is evaluated once at the observer and the
+    // in-atmosphere path curvature itself is ignored.
+    vec3 Llight = L;
+    if (refr > 0.0)
+    {
+        float hSun = degrees(asin(clamp(dot(L, up), -1.0, 1.0)));
+        Llight = change_elevation(L, up, refr * radians(refraction_true_arcmin(hSun) / 60.0));
+    }
 
-    // Direct sun disk (unpolarized).
-    float disk = sun_disk(viewDir, L);
-    vec3 T_sunDisk = transmittance(origin, L, 16);
+    Stokes sky = single_scatter_stokes(origin, viewDir, Llight, SkyViewSteps());
+
+    // Direct sun disk (unpolarized, limb-darkened). The disk is found by
+    // bending the apparent view ray down to its true direction (Sæmundsson)
+    // and testing against the TRUE sun; because the bend grows toward the
+    // horizon this lifts the disk and flattens it vertically, like the real
+    // setting sun. Keeping the true L here avoids double-counting the lift
+    // already applied to Llight.
+    vec3 viewTrue = viewDir;
+    if (refr > 0.0)
+    {
+        float hView = degrees(asin(clamp(dot(viewDir, up), -1.0, 1.0)));
+        viewTrue = change_elevation(viewDir, up, -refr * radians(refraction_apparent_arcmin(hView) / 60.0));
+    }
+    vec3 disk = sun_disk(viewTrue, L);
+    vec3 T_sunDisk = transmittance(origin, Llight, 16);
     sky.I += disk * SkySunRadiance() * T_sunDisk;
 
     return sky;
@@ -489,6 +649,9 @@ Stokes render_sky_stokes(vec3 viewDir, vec3 L)
 
 // Polarized sky in a caller-specified Stokes frame (frameX, perpendicular to
 // the segment direction segDir) so the camera analyzer can read it directly.
+// segDir must be the beam's propagation direction (-viewDir for camera rays):
+// stokes_reframe only handles pure rotations, so (frameX, frameY, segDir) has
+// to be right-handed about the same axis as beam_basis(-viewDir).
 Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, vec3 frameX, vec3 segDir)
 {
     Stokes sky = render_sky_stokes(viewDir, L);

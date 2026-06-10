@@ -62,11 +62,17 @@ void main()
             + cameraRight * (screen.x * aspectRatio * tanHalfFovY)
             + cameraUp * (screen.y * tanHalfFovY));
 
-        // Stokes reference frame: Q along the camera right axis projected into
-        // the image plane, so the analyzer angle is measured from camera-right.
+        // Stokes reference frame: Q along the camera right axis projected
+        // transverse to the beam. The beam propagates along -viewDir, and
+        // (frameX, frameY, propagation) must be right-handed to match
+        // beam_basis(-viewDir) — passing +viewDir would turn the reframe into
+        // a reflection, mirroring the AoP and flipping circular handedness.
+        // Resulting convention: polarizer.y is measured from camera-right,
+        // positive toward camera-down in the image (counterclockwise for an
+        // observer facing the incoming beam).
         vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
 
-        Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, viewDir);
+        Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir);
 
         if (polarized)
         {

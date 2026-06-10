@@ -21,9 +21,19 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 skySunRadiance;
     vec4 skySunDirection;
     uvec4 skySampleCounts;
-    // Vector radiative transfer: x = Rayleigh depolarization, y = scattering
-    // orders, z = Mie table angle bins, w unused.
+    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
+    // z = Mie table angle bins, w = ozone layer Gaussian width (m).
     vec4 skyVrtParams;
+    // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
+    // RGB band (1/m), w = layer center altitude (m).
+    vec4 skyOzoneBeta;
+    // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
+    // refraction strength (1 = standard atmosphere, 0 = off).
+    vec4 skySunLimbRefraction;
+    // Aerosol extras: x = stratospheric background peak extinction (1/m),
+    // y = background layer center altitude (m), z = layer Gaussian width (m),
+    // w = aerosol single-scattering albedo.
+    vec4 skyMieBackground;
 } sceneData;
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
