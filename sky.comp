@@ -226,14 +226,32 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius)
     return vec2(-b - sq, -b + sq);
 }
 
-// True when the sun at direction L is geometrically occluded by the planet as
-// seen from pos. An exact ray-sphere umbra test: this is what shapes the
-// twilight arch and the Belt of Venus (the old dot(up, L) cutoff carved the
-// shadow boundary in the wrong place and with no curvature).
-bool earth_shadow(vec3 pos, vec3 L)
+// Fraction of the sun disk visible above the planet's limb as seen from pos
+// (0 = full umbra, 1 = fully lit). The disk has angular radius SkySunRadius();
+// the planet subtends a cone of half-angle asin(R/r) around the direction to
+// its center, so the signed elevation of the disk center above that limb,
+// in disk radii, selects a circular-segment area. This penumbra softens the
+// terminator that shapes the twilight arch and the Belt of Venus — a binary
+// ray-sphere test cuts it unphysically sharp, since the real sun is ~0.5°
+// wide and takes minutes to slide behind the limb.
+float sun_visibility(vec3 pos, vec3 L)
 {
-    vec2 t_earth = ray_sphere(pos, L, SkyEarthRadius());
-    return t_earth.x > 0.0;
+    float r = length(pos);
+    vec3 toCenter = -pos / r;
+    float gamma = acos(clamp(dot(toCenter, L), -1.0, 1.0));
+    float alpha = asin(clamp(SkyEarthRadius() / r, 0.0, 1.0));
+    float h = (gamma - alpha) / SkySunRadius();
+    if (h >= 1.0)
+    {
+        return 1.0;
+    }
+    if (h <= -1.0)
+    {
+        return 0.0;
+    }
+    // Visible area of a unit disk whose center sits h radii above a straight
+    // edge (the limb's curvature is negligible at sun-disk scale).
+    return (acos(-h) + h * sqrt(1.0 - h * h)) / PI;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -561,14 +579,16 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps)
         // from the in-scatter weights via the single-scattering albedo.
         T_cam *= exp(-(SkyBetaR() * rhoR + extM + SkyBetaO3() * rhoO3) * step_size);
 
-        // Direct sunlight scattered once, when the point is outside the
-        // planet's umbra (exact ray-sphere test — at twilight only the high
-        // atmosphere is lit, which is the twilight arch).
-        if (!earth_shadow(pos, L))
+        // Direct sunlight scattered once, weighted by the visible fraction of
+        // the sun disk above the planet's limb (at twilight only the high
+        // atmosphere is lit, which is the twilight arch; the fractional
+        // visibility gives the terminator its physical penumbra).
+        float sunVis = sun_visibility(pos, L);
+        if (sunVis > 0.0)
         {
             vec3 T_sun = transmittance(pos, L, 8);
             Stokes scattered = scatter_stokes(sSun, din, dout, rhoR, extM);
-            vec3 w = SkySunRadiance() * T_cam * T_sun * step_size;
+            vec3 w = SkySunRadiance() * (sunVis * step_size) * T_cam * T_sun;
             result = stokes_add(result, stokes_scale(scattered, w));
         }
     }

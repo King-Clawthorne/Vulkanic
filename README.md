@@ -34,6 +34,11 @@ The repository implements the whole stack from the OS layer up:
 - **Polarized vector radiative transfer** (`sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix. Everything is transported
   as Stokes vectors with proper Mueller matrices and frame rotations (single scattering).
+- **Physical sky details** — ozone Chappuis-band absorption in a Gaussian layer (keeps the twilight
+  zenith blue), per-band solar limb darkening, atmospheric refraction near the horizon (sun lifted
+  and flattened), a stratospheric background (Junge) aerosol layer, an aerosol single-scattering
+  albedo, and a penumbral earth-shadow test that softens the twilight arch / Belt of Venus by the
+  visible fraction of the sun disk above the planet's limb.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
@@ -111,7 +116,17 @@ cmake --build .
 - `camera` — startup view and vertical field of view.
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
-  depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
+  depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution, plus:
+  - `BETA_O3` / `OZONE_CENTER` / `OZONE_WIDTH` — ozone Chappuis absorption (peak per-band
+    coefficients in 1/m, Gaussian layer center and width in metres; defaults ≈ 300 Dobson units).
+  - `SUN_LIMB_DARKENING` — per-band limb-darkening coefficient `u` in `I(mu)/I(0) = 1 - u(1 - mu)`.
+  - `REFRACTION` — atmospheric refraction strength (1 = standard conditions, 0 = off).
+  - `MIE_BG_BETA` / `MIE_BG_CENTER` / `MIE_BG_WIDTH` — stratospheric background aerosol layer
+    (peak extinction in 1/m, Gaussian center/width in metres); raise the beta for volcanic
+    "purple light".
+  - `MIE_ALBEDO` — aerosol single-scattering albedo (1 = conservative; smoke ~0.90, dust ~0.95).
+  - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` and `Samples` are currently
+    unused (reserved for multiple scattering).
 
 Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
 
