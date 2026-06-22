@@ -1,9 +1,9 @@
 # Vulkanic
 
 A lightweight, purely native C++20 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
-then views it through a runtime camera analyzer that switches between linear and elliptical
-polarization.
+renders the daytime sky as a full Stokes-vector single-scattering problem — molecular (Rayleigh)
+scattering with ozone absorption — then views it through a runtime camera analyzer that switches
+between linear and elliptical polarization.
 
 ---
 
@@ -33,21 +33,18 @@ Build a complete, runnable real-time simulator that:
 The repository implements the whole stack from the OS layer up:
 
 - **Polarized vector radiative transfer** (`sky.comp`) — Rayleigh scattering with molecular
-  depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix. Everything is transported
-  as Stokes vectors with proper Mueller matrices and frame rotations (single scattering).
+  depolarization, transported as Stokes vectors with proper Mueller matrices and frame rotations
+  (single scattering).
 - **Physical sky details** — ozone Chappuis-band absorption in a Gaussian layer (keeps the twilight
   zenith blue), per-band solar limb darkening, atmospheric refraction near the horizon (sun lifted
-  and flattened), a stratospheric background (Junge) aerosol layer, an aerosol single-scattering
-  albedo, and a penumbral earth-shadow test that softens the twilight arch / Belt of Venus by the
-  visible fraction of the sun disk above the planet's limb.
+  and flattened), and a penumbral earth-shadow test that softens the twilight arch / Belt of Venus
+  by the visible fraction of the sun disk above the planet's limb.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
-- **From-scratch numerics** — a hand-written Lorenz–Mie solver (`MieScattering.cpp`) bakes the
-  scattering-matrix table at startup; a hand-written JSON parser (`RuntimeConfig.cpp`) loads the
-  tunable parameters.
-- **Hot config reload** — `path_tracer_config.json` is polled each frame; sky/aerosol edits apply
-  live (aerosol changes rebuild the Mie table).
+- **From-scratch numerics** — a hand-written JSON parser (`RuntimeConfig.cpp`) loads the tunable
+  parameters.
+- **Hot config reload** — `path_tracer_config.json` is polled each frame; sky edits apply live.
 - **Compute pipeline** — the renderer is a single compute shader, dispatched over an 8×8-tiled
   grid, that evaluates the sky analytically per pixel and writes the swapchain image directly as a
   storage image (no scene geometry, no acceleration structures, no graphics pipeline or blit). This
@@ -119,16 +116,12 @@ cmake --build .
 - `render` — resolution, swapchain frame count, samples per pixel.
 - `camera` — startup view and vertical field of view.
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
-- `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
-  depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution, plus:
+- `sky.spectralConstants` — the atmospheric model: Rayleigh coefficients, sun, and Rayleigh
+  depolarization, plus:
   - `BETA_O3` / `OZONE_CENTER` / `OZONE_WIDTH` — ozone Chappuis absorption (peak per-band
     coefficients in 1/m, Gaussian layer center and width in metres; defaults ≈ 300 Dobson units).
   - `SUN_LIMB_DARKENING` — per-band limb-darkening coefficient `u` in `I(mu)/I(0) = 1 - u(1 - mu)`.
   - `REFRACTION` — atmospheric refraction strength (1 = standard conditions, 0 = off).
-  - `MIE_BG_BETA` / `MIE_BG_CENTER` / `MIE_BG_WIDTH` — stratospheric background aerosol layer
-    (peak extinction in 1/m, Gaussian center/width in metres); raise the beta for volcanic
-    "purple light".
-  - `MIE_ALBEDO` — aerosol single-scattering albedo (1 = conservative; smoke ~0.90, dust ~0.95).
   - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` and `Samples` are currently
     unused (reserved for multiple scattering).
 
@@ -139,7 +132,7 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 - **Shaders (`glslc` → SPIR-V):**
   - `path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
     tonemap → swapchain storage image (compute, 8×8 workgroups).
-  - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh + ozone, Stokes machinery).
   - `path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
@@ -147,7 +140,6 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
   - `CameraController.h` / `.cpp` — the look-only camera and polarization-analyzer state, plus the
     raw Win32 keyboard/mouse input that drives them; the renderer reads the resulting camera basis
     and analyzer parameters when building push constants.
-  - `MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
   - `RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
   - `VmaUsage.cpp` — single translation unit that hosts the VMA implementation.
   - `main.cpp` — entry point.

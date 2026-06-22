@@ -68,7 +68,6 @@ add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 add_executable(Vulkanic
         main.cpp
         RuntimeConfig.cpp
-        MieScattering.cpp
         CameraController.cpp
         VmaUsage.cpp
         VulkanPathTracer.cpp)

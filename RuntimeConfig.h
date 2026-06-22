@@ -82,8 +82,8 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 }
 
 // Physical sky / atmosphere parameters fed to sky.comp. These follow the
-// Bruneton/Nishita single-scattering parameterization: Rayleigh + Mie
-// scattering against an Earth-sized sphere, plus a directional sun disk.
+// Bruneton/Nishita single-scattering parameterization: Rayleigh scattering
+// against an Earth-sized sphere, plus a directional sun disk.
 //
 // Units are SI (metres) for the radii and scale heights; scattering
 // coefficients are 1/m. viewSteps / samples control numerical integration
@@ -91,12 +91,9 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 struct SkySpectralConfig
 {
     std::array<float, 3> betaRayleigh{3.8e-6f, 13.5e-6f, 33.1e-6f};
-    float betaMie = 21e-6f;
-    float mieG = 0.76f;
     float earthRadius = 6360e3f;
     float atmosphereRadius = 6420e3f;
     float scaleHeightRayleigh = 7994.0f;
-    float scaleHeightMie = 1200.0f;
     std::array<float, 3> sunRadiance{20.0f, 18.0f, 14.5f};
     std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
     float sunRadius = 0.1f;
@@ -115,16 +112,6 @@ struct SkySpectralConfig
     // Atmospheric refraction strength: 1 = standard conditions (sun lifted
     // ~0.57 deg and flattened at the horizon), 0 = disabled.
     float refractionStrength = 1.0f;
-    // Stratospheric background (Junge) aerosol layer: Gaussian profile with
-    // peak extinction (1/m), center altitude and width in metres. Shares the
-    // boundary-layer mode's phase matrix. Defaults give a background optical
-    // depth of ~0.004; raise the beta x10-100 for volcanic "purple light".
-    float mieBackgroundBeta = 4.0e-7f;
-    float mieBackgroundCenter = 20000.0f;
-    float mieBackgroundWidth = 5000.0f;
-    // Aerosol single-scattering albedo: BETA_M is extinction, and only this
-    // fraction of it scatters (1 = conservative; smoke ~0.90, dust ~0.95).
-    float mieSingleScatterAlbedo = 0.95f;
     // viewSteps = primary view-ray march steps; secondarySamples and samples
     // are currently unused (reserved for multiple scattering).
     uint32_t secondarySamples = 1;
@@ -135,31 +122,12 @@ struct SkySpectralConfig
     // Rayleigh molecular depolarization factor (air ≈ 0.0279). Caps the
     // single-scatter degree of polarization below the ideal 1.0.
     float rayleighDepolarization = 0.0279f;
-    // Aerosol model for the precomputed Lorenz–Mie scattering matrix.
-    float aerosolRefractiveIndexReal = 1.33f;
-    float aerosolRefractiveIndexImag = 0.0f;
-    float aerosolMeanRadiusMicrometers = 0.2f; // log-normal geometric mean radius
-    float aerosolSigma = 1.5f;                 // log-normal geometric std dev (> 1)
-    std::array<float, 3> aerosolWavelengthsNmRgb{680.0f, 550.0f, 440.0f};
-    uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
 
     // C++20 member-wise equality: true only when every spectral field matches.
     // Drives the "did the sky change?" check that decides whether to re-upload
-    // the scene UBO (and, via HasMieAerosolChanged, rebuild the Mie table).
+    // the scene UBO.
     [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
-
-// True when any field that feeds the precomputed Lorenz–Mie scattering matrix
-// changes — the table is sun-independent, so it only needs rebuilding here.
-inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectralConfig& right)
-{
-    return left.aerosolRefractiveIndexReal != right.aerosolRefractiveIndexReal
-           || left.aerosolRefractiveIndexImag != right.aerosolRefractiveIndexImag
-           || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers
-           || left.aerosolSigma != right.aerosolSigma
-           || left.aerosolWavelengthsNmRgb != right.aerosolWavelengthsNmRgb
-           || left.mieTableAngleBins != right.mieTableAngleBins;
-}
 
 // Top-level configuration loaded from path_tracer_config.json. All fields
 // have defaults so a missing config still produces a valid scene.

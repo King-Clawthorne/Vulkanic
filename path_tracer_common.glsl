@@ -2,8 +2,7 @@
 //
 // Included by path_tracer.comp and (via #include) by sky.comp. This is a
 // polarized-sky simulator with no scene geometry, so the header is small:
-//   * Descriptor bindings: the output image, the scene UBO (sky parameters),
-//     and the precomputed Lorenz–Mie scattering-matrix SSBO.
+//   * Descriptor bindings: the output image and the scene UBO (sky parameters).
 //   * The push-constant block (camera basis, exposure, polarization filter).
 //   * The RNG (Wang hash + LCG), the sun direction, and ACES tonemapping.
 // The bindings here MUST match the descriptor-set layout built in
@@ -15,14 +14,17 @@
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 2) uniform SceneData
 {
-    vec4 skyBetaRayleighBetaM;
-    vec4 skyMieEarthAtmosScaleHr;
-    vec4 skyScaleHmSunRadiusAa;
+    // xyz = Rayleigh scattering coefficient per RGB band (1/m), w = Rayleigh
+    // scale height (m).
+    vec4 skyBetaRayleighScaleHr;
+    // x = Earth radius, y = atmosphere radius, z = sun angular radius, w = sun
+    // anti-alias width.
+    vec4 skyEarthAtmosSun;
     vec4 skySunRadiance;
     vec4 skySunDirection;
     uvec4 skySampleCounts;
-    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
-    // z = Mie table angle bins, w = ozone layer Gaussian width (m).
+    // Vector radiative transfer: x = Rayleigh depolarization, y = ozone layer
+    // Gaussian width (m), z/w unused.
     vec4 skyVrtParams;
     // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
     // RGB band (1/m), w = layer center altitude (m).
@@ -30,19 +32,7 @@ layout(set = 0, binding = 2) uniform SceneData
     // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
     // refraction strength (1 = standard atmosphere, 0 = off).
     vec4 skySunLimbRefraction;
-    // Aerosol extras: x = stratospheric background peak extinction (1/m),
-    // y = background layer center altitude (m), z = layer Gaussian width (m),
-    // w = aerosol single-scattering albedo.
-    vec4 skyMieBackground;
 } sceneData;
-
-// Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
-// (F11, F12, F33, F34) at one scattering angle; entries are stored band-major
-// (band * angleBins + bin), bands = R,G,B, bin i ↦ theta = i/(bins-1)·π.
-layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
-{
-    vec4 entries[];
-} mieMatrixBuffer;
 
 layout(push_constant) uniform PushConstants
 {

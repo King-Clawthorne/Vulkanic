@@ -5,7 +5,7 @@
 //                        buffer/descriptor structs).
 //   * window procedure — Win32 input plumbing for the camera controls.
 //   * Vulkan app       — the VulkanApp class: device setup, swapchain,
-//                        scene/Mie buffer upload, compute pipeline, the
+//                        scene buffer upload, compute pipeline, the
 //                        render loop, and teardown.
 //
 // This is a polarized-sky simulator with no scene geometry: a single compute
@@ -13,7 +13,7 @@
 // RunVulkanPathTracer() is called:
 //   1. Read path_tracer_config.json.
 //   2. Create a Win32 window, Vulkan instance, surface, device, queues.
-//   3. Upload the sky uniform buffer and bake the Lorenz–Mie SSBO.
+//   3. Upload the sky uniform buffer.
 //   4. Create the swapchain (storage-image capable), descriptor sets, and the
 //      compute pipeline from path_tracer.comp.
 //   5. Drive the message loop: each frame integrates camera input and
@@ -27,7 +27,6 @@
 #include "VulkanPathTracer.h"
 
 #include "CameraController.h"
-#include "MieScattering.h"
 #include "RuntimeConfig.h"
 
 #include <windows.h>
@@ -149,15 +148,17 @@ struct BufferAllocation
 // alignment fails to compile rather than corrupting the GPU view of the data.
 struct alignas(16) SceneData
 {
-    float skyBetaRayleighBetaM[4];
-    float skyMieEarthAtmosScaleHr[4];
-    float skyScaleHmSunRadiusAa[4];
+    // xyz = Rayleigh scattering coefficient per RGB band (1/m), w = Rayleigh
+    // scale height (m).
+    float skyBetaRayleighScaleHr[4];
+    // x = Earth radius, y = atmosphere radius, z = sun angular radius, w = sun
+    // anti-alias width (all SI / radians).
+    float skyEarthAtmosSun[4];
     float skySunRadiance[4];
     float skySunDirection[4];
     uint32_t skySampleCounts[4];
-    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
-    // z = Mie table angle bins, w = ozone layer Gaussian width (m). The Mie
-    // scattering matrix itself rides in the binding-7 SSBO, not here.
+    // Vector radiative transfer: x = Rayleigh depolarization, y = ozone layer
+    // Gaussian width (m), z/w unused.
     float skyVrtParams[4];
     // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
     // RGB band (1/m), w = layer center altitude (m).
@@ -165,13 +166,9 @@ struct alignas(16) SceneData
     // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
     // refraction strength (1 = standard atmosphere, 0 = off).
     float skySunLimbRefraction[4];
-    // Aerosol extras: x = stratospheric background peak extinction (1/m),
-    // y = background layer center altitude (m), z = layer Gaussian width (m),
-    // w = aerosol single-scattering albedo.
-    float skyMieBackground[4];
 };
 
-static_assert(sizeof(SceneData) == 160, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 128, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -234,9 +231,8 @@ static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPA
 //
 // VulkanApp owns every Vulkan handle the renderer needs and drives the
 // frame loop. The constructor walks through Vulkan setup top-to-bottom:
-// instance + surface + device, command pools, the sky uniform buffer and
-// baked Lorenz–Mie SSBO, swapchain, descriptor sets, and finally the
-// compute pipeline.
+// instance + surface + device, command pools, the sky uniform buffer,
+// swapchain, descriptor sets, and finally the compute pipeline.
 //
 // Render() runs once per frame: poll the camera, push fresh uniforms, and
 // dispatch the compute shader, which writes the acquired swapchain image
@@ -308,64 +304,26 @@ private:
     {
         const SkySpectralConfig& s = m_config.skySpectral;
         SceneData sceneData{};
-        PackVec4(sceneData.skyBetaRayleighBetaM, s.betaRayleigh, s.betaMie);
-        PackVec4(sceneData.skyMieEarthAtmosScaleHr,
-                 std::array<float, 3>{s.mieG, s.earthRadius, s.atmosphereRadius}, s.scaleHeightRayleigh);
-        PackVec4(sceneData.skyScaleHmSunRadiusAa,
-                 std::array<float, 3>{s.scaleHeightMie, s.sunRadius, s.sunAa}, 0.0f);
+        PackVec4(sceneData.skyBetaRayleighScaleHr, s.betaRayleigh, s.scaleHeightRayleigh);
+        PackVec4(sceneData.skyEarthAtmosSun,
+                 std::array<float, 3>{s.earthRadius, s.atmosphereRadius, s.sunRadius}, s.sunAa);
         PackVec4(sceneData.skySunRadiance, s.sunRadiance, 0.0f);
         PackVec4(sceneData.skySunDirection, s.sunDirection, 0.0f);
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;
         sceneData.skySampleCounts[2] = s.samples;
         PackVec4(sceneData.skyVrtParams,
-                 std::array<float, 3>{s.rayleighDepolarization, 0.0f, static_cast<float>(s.mieTableAngleBins)},
-                 s.ozoneLayerWidth);
+                 std::array<float, 3>{s.rayleighDepolarization, s.ozoneLayerWidth, 0.0f}, 0.0f);
         PackVec4(sceneData.skyOzoneBeta, s.betaOzone, s.ozoneCenterAltitude);
         PackVec4(sceneData.skySunLimbRefraction, s.sunLimbDarkening, s.refractionStrength);
-        PackVec4(sceneData.skyMieBackground,
-                 std::array<float, 3>{s.mieBackgroundBeta, s.mieBackgroundCenter, s.mieBackgroundWidth},
-                 s.mieSingleScatterAlbedo);
         return sceneData;
     }
 
-    // Allocate the scene uniform buffer (sky parameters) and the Lorenz–Mie
-    // scattering-matrix SSBO consumed by the ray-generation shader.
+    // Allocate the scene uniform buffer (sky parameters) consumed by the
+    // ray-generation shader.
     void CreateSceneBuffers()
     {
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        CreateMieScatteringBuffer();
-    }
-
-    // Translate the aerosol fields of the live config into the Mie precompute
-    // parameters.
-    MieAerosolParams BuildMieAerosolParams() const
-    {
-        const SkySpectralConfig& s = m_config.skySpectral;
-        MieAerosolParams params{};
-        params.refractiveIndexReal = s.aerosolRefractiveIndexReal;
-        params.refractiveIndexImag = s.aerosolRefractiveIndexImag;
-        params.meanRadiusMicrometers = s.aerosolMeanRadiusMicrometers;
-        params.sigma = s.aerosolSigma;
-        params.wavelengthsNmRgb[0] = s.aerosolWavelengthsNmRgb[0];
-        params.wavelengthsNmRgb[1] = s.aerosolWavelengthsNmRgb[1];
-        params.wavelengthsNmRgb[2] = s.aerosolWavelengthsNmRgb[2];
-        params.angleBins = static_cast<int>(s.mieTableAngleBins);
-        return params;
-    }
-
-    // Bake the Lorenz–Mie scattering matrix on the CPU and stage it into the
-    // binding-7 SSBO sampled by the polarized sky integrator. The table is
-    // immutable for the buffer's lifetime, so it is uploaded here rather than
-    // through UploadSceneDataFromConfig.
-    void CreateMieScatteringBuffer()
-    {
-        const MieAerosolParams params = BuildMieAerosolParams();
-        const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(params);
-        const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
-        m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
-        std::printf("[Sky] Baked Lorenz-Mie scattering matrix: %d angle bins x 3 bands.\n", params.angleBins);
     }
 
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
@@ -373,7 +331,6 @@ private:
     void DestroySceneBuffers()
     {
         DestroyBuffer(m_sceneDataBuffer);
-        DestroyBuffer(m_mieScatteringBuffer);
     }
 
     // Pack the current RuntimeConfig.skySpectral into a SceneData record and
@@ -384,8 +341,8 @@ private:
         UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span{&sceneData, 1}));
     }
 
-    // Bind the live resources (output image, scene UBO, Mie SSBO) into the
-    // descriptor sets.
+    // Bind the live resources (output image, scene UBO) into the descriptor
+    // sets.
     void UpdateDescriptorSetContents()
     {
         if (m_descriptorSets.empty())
@@ -397,20 +354,17 @@ private:
         {
             const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[i], vk::ImageLayout::eGeneral};
             const vk::DescriptorBufferInfo sceneDataInfo{m_sceneDataBuffer.buffer, 0, m_sceneDataBuffer.size};
-            const vk::DescriptorBufferInfo mieDataInfo{m_mieScatteringBuffer.buffer, 0, m_mieScatteringBuffer.size};
 
             vk::WriteDescriptorSet imageWrite{*m_descriptorSets[i], 0, 0, vk::DescriptorType::eStorageImage, imageInfo};
             vk::WriteDescriptorSet sceneWrite{*m_descriptorSets[i], 2, 0, vk::DescriptorType::eUniformBuffer, {}, sceneDataInfo};
-            vk::WriteDescriptorSet mieWrite{*m_descriptorSets[i], 7, 0, vk::DescriptorType::eStorageBuffer, {}, mieDataInfo};
 
-            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite}, nullptr);
+            m_device.updateDescriptorSets({imageWrite, sceneWrite}, nullptr);
         }
     }
 
-    // Re-apply the current m_config's sky parameters to live GPU resources.
-    // Rebuilds the Mie scattering table when the aerosol model changed, then
-    // re-uploads the scene UBO.
-    void RefreshSceneFromConfig(bool rebuildMieTable)
+    // Re-apply the current m_config's sky parameters to live GPU resources by
+    // re-uploading the scene UBO.
+    void RefreshSceneFromConfig()
     {
         if (m_sceneDataBuffer.buffer == VK_NULL_HANDLE)
         {
@@ -418,21 +372,14 @@ private:
         }
 
         m_device.waitIdle();
-        if (rebuildMieTable)
-        {
-            DestroyBuffer(m_mieScatteringBuffer);
-            CreateMieScatteringBuffer();
-            UpdateDescriptorSetContents();
-        }
         UploadSceneDataFromConfig();
     }
 
     // Diff the incoming config against the current one and apply the cheapest
-    // valid refresh (camera reset, Mie rebuild, sky UBO re-upload).
+    // valid refresh (camera reset, sky UBO re-upload).
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
         const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
-        const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
 
         if (!m_configPath.empty() && !resetCameraState)
         {
@@ -454,7 +401,7 @@ private:
 
         if (skySpectralChanged)
         {
-            RefreshSceneFromConfig(mieAerosolChanged);
+            RefreshSceneFromConfig();
         }
     }
 
@@ -668,7 +615,7 @@ private:
 
     // Allocate a host-visible, persistently mapped buffer through VMA. Every
     // buffer in this renderer is a small CPU-written upload target (the scene
-    // UBO and the baked Mie SSBO), so the allocation strategy is shared.
+    // UBO), so the allocation strategy is shared.
     BufferAllocation CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage) const
     {
         BufferAllocation allocation{};
@@ -721,8 +668,8 @@ private:
                 "Failed to flush buffer allocation");
     }
 
-    // Allocate the scene UBO + Mie SSBO and upload the sky parameters. There
-    // is no geometry / acceleration structure in this sky-only renderer.
+    // Allocate the scene UBO and upload the sky parameters. There is no
+    // geometry / acceleration structure in this sky-only renderer.
     void CreateSceneResources()
     {
         CreateSceneBuffers();
@@ -772,20 +719,18 @@ private:
     }
 
     // Define the descriptor-set layout used by the compute pipeline: the
-    // output storage image (binding 0), the sky parameter UBO (binding 2),
-    // and the baked Lorenz–Mie SSBO (binding 7).
+    // output storage image (binding 0) and the sky parameter UBO (binding 2).
     void CreateDescriptorSetLayout()
     {
-        // Output image (binding 0), sky parameter UBO (binding 2), and the
-        // Lorenz–Mie scattering-matrix SSBO (binding 7) — all read/written by
-        // the ray-generation shader. The binding numbers keep their original
-        // values (gaps are legal) so the shared sky header is untouched.
+        // Output image (binding 0) and sky parameter UBO (binding 2), both
+        // read/written by the ray-generation shader. The binding numbers keep
+        // their original values (the gap is legal) so the shared sky header is
+        // untouched.
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 3> bindings = {
+        const std::array<vk::DescriptorSetLayoutBinding, 2> bindings = {
             vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
             vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
-            vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
         };
 
         vk::DescriptorSetLayoutCreateInfo createInfo{};
@@ -832,10 +777,9 @@ private:
     {
         using enum vk::DescriptorType;
         const uint32_t count = static_cast<uint32_t>(m_swapchainImageViews.size());
-        const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
+        const std::array<vk::DescriptorPoolSize, 2> poolSizes = {
             vk::DescriptorPoolSize{eStorageImage, count},
             vk::DescriptorPoolSize{eUniformBuffer, count},
-            vk::DescriptorPoolSize{eStorageBuffer, count},
         };
 
         vk::DescriptorPoolCreateInfo poolInfo{};
@@ -1100,7 +1044,6 @@ private:
     // (before the raii members, while the device is still alive).
     VmaAllocator m_allocator = VK_NULL_HANDLE;
     BufferAllocation m_sceneDataBuffer{};
-    BufferAllocation m_mieScatteringBuffer{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Format m_swapchainFormat = vk::Format::eUndefined;
