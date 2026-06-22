@@ -3,7 +3,7 @@
     "width": 960,
     "height": 540,
     "frameCount": 2,
-    "samplesPerPixel": 32
+    "samplesPerPixel": 1
   },
   "camera": {
     "initialPosition": [0.0, 2.0, -10.0],
