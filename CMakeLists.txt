@@ -34,7 +34,11 @@ FetchContent_Declare(
         vk_bootstrap
         GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
         GIT_TAG v1.3.302)
-FetchContent_MakeAvailable(vk_bootstrap)
+FetchContent_Declare(
+        vma
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG v3.1.0)
+FetchContent_MakeAvailable(vk_bootstrap vma)
 
 set(SHADER_SOURCES
         path_tracer.comp)
@@ -64,9 +68,10 @@ add_executable(Vulkanic
         main.cpp
         RuntimeConfig.cpp
         MieScattering.cpp
+        VmaUsage.cpp
         VulkanPathTracer.cpp)
 add_dependencies(Vulkanic vulkan_shader)
-target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap)
+target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator)
 
 foreach(SHADER_OUTPUT IN LISTS SHADER_SPV_OUTPUTS)
     get_filename_component(SHADER_FILE_NAME "${SHADER_OUTPUT}" NAME)

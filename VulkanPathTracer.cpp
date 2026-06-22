@@ -30,9 +30,10 @@
 #include "RuntimeConfig.h"
 
 #include <windows.h>
-#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_raii.hpp>
 
 #include <VkBootstrap.h>
+#include <vk_mem_alloc.h>
 
 #include <algorithm>
 #include <array>
@@ -128,12 +129,14 @@ struct QueueFamilyIndices
     }
 };
 
-// Generic GPU buffer + its backing memory. Owned together so destruction
-// is just a matched pair of vk*Free / vkDestroyBuffer calls.
+// Generic GPU buffer + its VMA allocation. The allocation is created
+// persistently mapped, so `mapped` points at host-visible memory for the
+// buffer's lifetime and uploads are a plain memcpy + flush.
 struct BufferAllocation
 {
     VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    void* mapped = nullptr;
     VkDeviceSize size = 0;
 };
 
@@ -367,9 +370,26 @@ public:
     // executable by ResolveRuntimeFilePath().
     static constexpr const wchar_t* CONFIG_FILE_NAME = L"path_tracer_config.json";
 
+    // RAII member destructors release every Vulkan handle in reverse
+    // declaration order. The only manual teardown is the VMA allocator and its
+    // buffers, which must be released here (in the destructor body, before any
+    // raii member is destroyed) while the device is still alive.
     ~VulkanPathTracer()
     {
-        Cleanup();
+        if (*m_device)
+        {
+            m_device.waitIdle();
+        }
+        DestroySceneBuffers();
+        if (m_allocator != VK_NULL_HANDLE)
+        {
+            vmaDestroyAllocator(m_allocator);
+            m_allocator = VK_NULL_HANDLE;
+        }
+        if (m_window != nullptr)
+        {
+            DestroyWindow(m_window);
+        }
     }
 
     // Top-level driver: load config → init Vulkan → render until the
@@ -383,7 +403,7 @@ public:
         CreateSurface();
         PickPhysicalDevice();
         CreateLogicalDevice();
-        // Command pool is created before scene setup because the Mie SSBO upload uses one-time command buffers.
+        CreateAllocator();
         CreateCommandPool();
         CreateSceneResources();
         CreateSwapchain();
@@ -393,7 +413,7 @@ public:
         CreateCommandBuffers();
         CreateSyncObjects();
         MessageLoop();
-        vkDeviceWaitIdle(m_device);
+        m_device.waitIdle();
     }
 
 private:
@@ -454,10 +474,7 @@ private:
     // scattering-matrix SSBO consumed by the ray-generation shader.
     void CreateSceneBuffers()
     {
-        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                         false);
+        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
         CreateMieScatteringBuffer();
     }
 
@@ -487,10 +504,7 @@ private:
         const MieAerosolParams params = BuildMieAerosolParams();
         const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(params);
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
-        m_mieScatteringBuffer = CreateBuffer(size,
-                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                             false);
+        m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         UploadToBuffer(m_mieScatteringBuffer, table.data(), table.size() * sizeof(MieMatrixEntry));
         std::printf("[Sky] Baked Lorenz-Mie scattering matrix: %d angle bins x 3 bands.\n", params.angleBins);
     }
@@ -522,50 +536,15 @@ private:
 
         for (size_t i = 0; i < m_descriptorSets.size(); ++i)
         {
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageView = m_swapchainImageViews[i];
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[i], vk::ImageLayout::eGeneral};
+            const vk::DescriptorBufferInfo sceneDataInfo{m_sceneDataBuffer.buffer, 0, m_sceneDataBuffer.size};
+            const vk::DescriptorBufferInfo mieDataInfo{m_mieScatteringBuffer.buffer, 0, m_mieScatteringBuffer.size};
 
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = m_descriptorSets[i];
-            write.dstBinding = 0;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            write.pImageInfo = &imageInfo;
+            vk::WriteDescriptorSet imageWrite{*m_descriptorSets[i], 0, 0, vk::DescriptorType::eStorageImage, imageInfo};
+            vk::WriteDescriptorSet sceneWrite{*m_descriptorSets[i], 2, 0, vk::DescriptorType::eUniformBuffer, {}, sceneDataInfo};
+            vk::WriteDescriptorSet mieWrite{*m_descriptorSets[i], 7, 0, vk::DescriptorType::eStorageBuffer, {}, mieDataInfo};
 
-            VkDescriptorBufferInfo sceneDataInfo{};
-            sceneDataInfo.buffer = m_sceneDataBuffer.buffer;
-            sceneDataInfo.offset = 0;
-            sceneDataInfo.range = m_sceneDataBuffer.size;
-
-            VkWriteDescriptorSet sceneWrite{};
-            sceneWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            sceneWrite.dstSet = m_descriptorSets[i];
-            sceneWrite.dstBinding = 2;
-            sceneWrite.descriptorCount = 1;
-            sceneWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            sceneWrite.pBufferInfo = &sceneDataInfo;
-
-            VkDescriptorBufferInfo mieDataInfo{};
-            mieDataInfo.buffer = m_mieScatteringBuffer.buffer;
-            mieDataInfo.offset = 0;
-            mieDataInfo.range = m_mieScatteringBuffer.size;
-
-            VkWriteDescriptorSet mieWrite{};
-            mieWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            mieWrite.dstSet = m_descriptorSets[i];
-            mieWrite.dstBinding = 7;
-            mieWrite.descriptorCount = 1;
-            mieWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            mieWrite.pBufferInfo = &mieDataInfo;
-
-            const std::array<VkWriteDescriptorSet, 3> writes = {
-                write,
-                sceneWrite,
-                mieWrite,
-            };
-            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite}, nullptr);
         }
     }
 
@@ -579,7 +558,7 @@ private:
             return;
         }
 
-        ThrowVk(vkDeviceWaitIdle(m_device), "Failed to wait for device idle during config reload");
+        m_device.waitIdle();
         if (rebuildMieTable)
         {
             DestroyBuffer(m_mieScatteringBuffer);
@@ -899,19 +878,16 @@ private:
         }
 
         m_vkbInstance = instanceResult.value();
-        m_instance = m_vkbInstance.instance;
+        m_instance = vk::raii::Instance(m_context, m_vkbInstance.instance);
     }
 
-    // Create the Win32 VkSurfaceKHR linking the HWND to the Vulkan
-    // instance.
+    // Create the Win32 surface linking the HWND to the Vulkan instance.
     void CreateSurface()
     {
-        VkWin32SurfaceCreateInfoKHR createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        vk::Win32SurfaceCreateInfoKHR createInfo{};
         createInfo.hinstance = GetModuleHandleW(nullptr);
         createInfo.hwnd = m_window;
-        ThrowVk(vkCreateWin32SurfaceKHR(m_instance, &createInfo, nullptr, &m_surface),
-                "Failed to create Win32 surface");
+        m_surface = m_instance.createWin32SurfaceKHR(createInfo);
     }
 
     // Select a physical device via vk-bootstrap. vkb requires a presentable
@@ -921,7 +897,7 @@ private:
     void PickPhysicalDevice()
     {
         auto deviceResult = vkb::PhysicalDeviceSelector{m_vkbInstance}
-                                .set_surface(m_surface)
+                                .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
                                 .set_minimum_version(1, 2)
                                 .add_required_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME)
                                 .require_present()
@@ -932,11 +908,10 @@ private:
         }
 
         m_vkbPhysicalDevice = deviceResult.value();
-        m_physicalDevice = m_vkbPhysicalDevice.physical_device;
+        m_physicalDevice = vk::raii::PhysicalDevice(m_instance, m_vkbPhysicalDevice.physical_device);
 
-        VkSurfaceCapabilitiesKHR capabilities{};
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &capabilities);
-        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) == 0)
+        const vk::SurfaceCapabilitiesKHR capabilities = m_physicalDevice.getSurfaceCapabilitiesKHR(*m_surface);
+        if (!(capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage))
         {
             throw std::runtime_error("Selected GPU does not support storage-image swapchains for this app.");
         }
@@ -954,39 +929,35 @@ private:
         }
 
         m_vkbDevice = deviceResult.value();
-        m_device = m_vkbDevice.device;
+        m_device = vk::raii::Device(m_physicalDevice, m_vkbDevice.device);
 
-        auto graphicsQueue = m_vkbDevice.get_queue(vkb::QueueType::graphics);
-        auto presentQueue = m_vkbDevice.get_queue(vkb::QueueType::present);
-        if (!graphicsQueue || !presentQueue)
+        auto graphicsFamily = m_vkbDevice.get_queue_index(vkb::QueueType::graphics);
+        auto presentFamily = m_vkbDevice.get_queue_index(vkb::QueueType::present);
+        if (!graphicsFamily || !presentFamily)
         {
-            throw std::runtime_error("Failed to retrieve graphics/present queues.");
+            throw std::runtime_error("Failed to retrieve graphics/present queue families.");
         }
-        m_graphicsQueue = graphicsQueue.value();
-        m_presentQueue = presentQueue.value();
-        m_queueFamilies.graphicsFamily = m_vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
-        m_queueFamilies.presentFamily = m_vkbDevice.get_queue_index(vkb::QueueType::present).value();
+        m_queueFamilies.graphicsFamily = graphicsFamily.value();
+        m_queueFamilies.presentFamily = presentFamily.value();
+        m_graphicsQueue = m_device.getQueue(graphicsFamily.value(), 0);
+        m_presentQueue = m_device.getQueue(presentFamily.value(), 0);
     }
 
-    uint32_t FindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties) const
+    // Create the VMA allocator that backs every device buffer allocation.
+    void CreateAllocator()
     {
-        VkPhysicalDeviceMemoryProperties memoryProperties{};
-        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
-        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
-        {
-            if ((typeBits & (1u << i)) != 0
-                && (memoryProperties.memoryTypes[i].propertyFlags & properties) == properties)
-            {
-                return i;
-            }
-        }
-        throw std::runtime_error("Failed to find suitable Vulkan memory type.");
+        VmaAllocatorCreateInfo allocatorInfo{};
+        allocatorInfo.instance = static_cast<VkInstance>(*m_instance);
+        allocatorInfo.physicalDevice = static_cast<VkPhysicalDevice>(*m_physicalDevice);
+        allocatorInfo.device = static_cast<VkDevice>(*m_device);
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+        ThrowVk(vmaCreateAllocator(&allocatorInfo, &m_allocator), "Failed to create VMA allocator");
     }
 
-    BufferAllocation CreateBuffer(VkDeviceSize size,
-                                  VkBufferUsageFlags usage,
-                                  VkMemoryPropertyFlags properties,
-                                  bool enableDeviceAddress) const
+    // Allocate a host-visible, persistently mapped buffer through VMA. Every
+    // buffer in this renderer is a small CPU-written upload target (the scene
+    // UBO and the baked Mie SSBO), so the allocation strategy is shared.
+    BufferAllocation CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage) const
     {
         BufferAllocation allocation{};
         allocation.size = size;
@@ -996,108 +967,49 @@ private:
         bufferInfo.size = size;
         bufferInfo.usage = usage;
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ThrowVk(vkCreateBuffer(m_device, &bufferInfo, nullptr, &allocation.buffer), "Failed to create buffer");
 
-        VkMemoryRequirements memoryRequirements{};
-        vkGetBufferMemoryRequirements(m_device, allocation.buffer, &memoryRequirements);
+        VmaAllocationCreateInfo allocCreateInfo{};
+        allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                                | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-        VkMemoryAllocateFlagsInfo flagsInfo{};
-        flagsInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-        if (enableDeviceAddress)
-        {
-            flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = FindMemoryType(memoryRequirements.memoryTypeBits, properties);
-        if (enableDeviceAddress)
-        {
-            allocateInfo.pNext = &flagsInfo;
-        }
-
-        ThrowVk(vkAllocateMemory(m_device, &allocateInfo, nullptr, &allocation.memory), "Failed to allocate buffer memory");
-        ThrowVk(vkBindBufferMemory(m_device, allocation.buffer, allocation.memory, 0), "Failed to bind buffer memory");
+        VmaAllocationInfo info{};
+        ThrowVk(vmaCreateBuffer(m_allocator, &bufferInfo, &allocCreateInfo, &allocation.buffer, &allocation.allocation, &info),
+                "Failed to create buffer");
+        allocation.mapped = info.pMappedData;
         return allocation;
     }
 
-    // Free both the VkBuffer and its backing VkDeviceMemory and zero out
-    // the allocation so it can be safely re-used or destroyed twice.
+    // Destroy the VkBuffer and free its VMA allocation, zeroing the handle so
+    // the struct can be safely re-used or destroyed twice.
     void DestroyBuffer(BufferAllocation& allocation)
     {
         if (allocation.buffer != VK_NULL_HANDLE)
         {
-            vkDestroyBuffer(m_device, allocation.buffer, nullptr);
+            vmaDestroyBuffer(m_allocator, allocation.buffer, allocation.allocation);
             allocation.buffer = VK_NULL_HANDLE;
+            allocation.allocation = VK_NULL_HANDLE;
         }
-        if (allocation.memory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(m_device, allocation.memory, nullptr);
-            allocation.memory = VK_NULL_HANDLE;
-        }
+        allocation.mapped = nullptr;
         allocation.size = 0;
     }
 
-    VkCommandBuffer BeginSingleTimeCommands() const
-    {
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = m_commandPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-
-        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        ThrowVk(vkAllocateCommandBuffers(m_device, &allocInfo, &commandBuffer),
-                "Failed to allocate one-time command buffer");
-
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        ThrowVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "Failed to begin one-time command buffer");
-        return commandBuffer;
-    }
-
-    // Submit a one-shot command buffer to the graphics queue, wait for
-    // it to finish, and free it. Used for setup work (transfers, BLAS
-    // builds) where stalling is acceptable.
-    void EndSingleTimeCommands(VkCommandBuffer commandBuffer) const
-    {
-        ThrowVk(vkEndCommandBuffer(commandBuffer), "Failed to end one-time command buffer");
-
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        ThrowVk(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE),
-                "Failed to submit one-time command buffer");
-        ThrowVk(vkQueueWaitIdle(m_graphicsQueue), "Failed to wait for one-time command submission");
-        vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
-    }
-
-    // Stage host data into a device-local buffer via a temporary
-    // host-visible staging buffer + a copy on the graphics queue.
+    // Copy host data into the buffer's persistently mapped allocation, then
+    // flush so the write is visible to the GPU even on non-coherent memory.
     void UploadToBuffer(const BufferAllocation& allocation, const void* data, size_t dataSize) const
     {
         if (dataSize > static_cast<size_t>(allocation.size))
         {
             throw std::runtime_error("Upload exceeds destination buffer size.");
         }
-        void* mapped = nullptr;
-        ThrowVk(vkMapMemory(m_device, allocation.memory, 0, allocation.size, 0, &mapped), "Failed to map buffer memory");
-        std::memcpy(mapped, data, dataSize);
-        vkUnmapMemory(m_device, allocation.memory);
+        std::memcpy(allocation.mapped, data, dataSize);
+        ThrowVk(vmaFlushAllocation(m_allocator, allocation.allocation, 0, dataSize), "Failed to flush buffer allocation");
     }
 
     // Allocate the scene UBO + Mie SSBO and upload the sky parameters. There
     // is no geometry / acceleration structure in this sky-only renderer.
     void CreateSceneResources()
     {
-        if (m_commandPool == VK_NULL_HANDLE)
-        {
-            throw std::runtime_error("Command pool must be created before scene setup.");
-        }
-
         CreateSceneBuffers();
         UploadSceneDataFromConfig();
     }
@@ -1123,19 +1035,25 @@ private:
         }
 
         vkb::Swapchain swapchain = swapchainResult.value();
-        m_swapchain = swapchain.swapchain;
-        m_swapchainFormat = swapchain.image_format;
+        m_swapchain = vk::raii::SwapchainKHR(m_device, swapchain.swapchain);
+        m_swapchainFormat = static_cast<vk::Format>(swapchain.image_format);
         m_swapchainExtent = swapchain.extent;
 
-        auto images = swapchain.get_images();
-        auto imageViews = swapchain.get_image_views();
-        if (!images || !imageViews)
+        // Wrap the swapchain images and build a 2D color image view per image.
+        m_swapchainImages.clear();
+        m_swapchainImageViews.clear();
+        for (VkImage image : m_swapchain.getImages())
         {
-            throw std::runtime_error("Failed to retrieve swapchain images/views.");
+            m_swapchainImages.emplace_back(image);
+
+            vk::ImageViewCreateInfo viewInfo{};
+            viewInfo.image = image;
+            viewInfo.viewType = vk::ImageViewType::e2D;
+            viewInfo.format = m_swapchainFormat;
+            viewInfo.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            m_swapchainImageViews.emplace_back(m_device, viewInfo);
         }
-        m_swapchainImages = images.value();
-        m_swapchainImageViews = imageViews.value();
-        m_swapchainLayouts.assign(m_swapchainImages.size(), VK_IMAGE_LAYOUT_UNDEFINED);
+        m_swapchainLayouts.assign(m_swapchainImages.size(), vk::ImageLayout::eUndefined);
     }
 
     // Define the descriptor-set layout used by the compute pipeline: the
@@ -1147,92 +1065,48 @@ private:
         // Lorenz–Mie scattering-matrix SSBO (binding 7) — all read/written by
         // the ray-generation shader. The binding numbers keep their original
         // values (gaps are legal) so the shared sky header is untouched.
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-        VkDescriptorSetLayoutBinding sceneBinding{};
-        sceneBinding.binding = 2;
-        sceneBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        sceneBinding.descriptorCount = 1;
-        sceneBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-        VkDescriptorSetLayoutBinding mieBinding{};
-        mieBinding.binding = 7;
-        mieBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        mieBinding.descriptorCount = 1;
-        mieBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
-            binding,
-            sceneBinding,
-            mieBinding,
+        constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
+        const std::array<vk::DescriptorSetLayoutBinding, 3> bindings = {
+            vk::DescriptorSetLayoutBinding{0, vk::DescriptorType::eStorageImage, 1, compute},
+            vk::DescriptorSetLayoutBinding{2, vk::DescriptorType::eUniformBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{7, vk::DescriptorType::eStorageBuffer, 1, compute},
         };
 
-        VkDescriptorSetLayoutCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        createInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        createInfo.pBindings = bindings.data();
-        ThrowVk(vkCreateDescriptorSetLayout(m_device, &createInfo, nullptr, &m_descriptorSetLayout),
-                "Failed to create descriptor set layout");
+        vk::DescriptorSetLayoutCreateInfo createInfo{};
+        createInfo.setBindings(bindings);
+        m_descriptorSetLayout = vk::raii::DescriptorSetLayout(m_device, createInfo);
     }
 
-    VkShaderModule CreateShaderModule(const std::vector<char>& bytecode)
+    vk::raii::ShaderModule CreateShaderModule(const std::vector<char>& bytecode)
     {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        vk::ShaderModuleCreateInfo createInfo{};
         createInfo.codeSize = bytecode.size();
         createInfo.pCode = reinterpret_cast<const uint32_t*>(bytecode.data());
-
-        VkShaderModule shaderModule = VK_NULL_HANDLE;
-        ThrowVk(vkCreateShaderModule(m_device, &createInfo, nullptr, &shaderModule),
-                "Failed to create shader module");
-        return shaderModule;
+        return vk::raii::ShaderModule(m_device, createInfo);
     }
 
     // Compile the compute shader module from its SPIR-V blob and assemble the
-    // VkPipeline. Sky-only renderer: a single compute shader evaluates the sky
+    // pipeline. Sky-only renderer: a single compute shader evaluates the sky
     // analytically per pixel and writes the swapchain storage image directly.
     void CreatePipeline()
     {
-        const auto computeBytecode = LoadBinaryFile(L"path_tracer.comp.spv");
-        VkShaderModule computeModule = CreateShaderModule(computeBytecode);
+        const vk::raii::ShaderModule computeModule = CreateShaderModule(LoadBinaryFile(L"path_tracer.comp.spv"));
 
-        VkPipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = computeModule;
+        vk::PipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.stage = vk::ShaderStageFlagBits::eCompute;
+        stageInfo.module = *computeModule;
         stageInfo.pName = "main";
 
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(PushConstants);
+        const vk::PushConstantRange pushRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants)};
+        vk::PipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.setSetLayouts(*m_descriptorSetLayout);
+        layoutInfo.setPushConstantRanges(pushRange);
+        m_pipelineLayout = vk::raii::PipelineLayout(m_device, layoutInfo);
 
-        VkPipelineLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        layoutInfo.setLayoutCount = 1;
-        layoutInfo.pSetLayouts = &m_descriptorSetLayout;
-        layoutInfo.pushConstantRangeCount = 1;
-        layoutInfo.pPushConstantRanges = &pushRange;
-        ThrowVk(vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout),
-                "Failed to create pipeline layout");
-
-        VkComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        vk::ComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = m_pipelineLayout;
-        ThrowVk(vkCreateComputePipelines(m_device,
-                                         VK_NULL_HANDLE,
-                                         1,
-                                         &pipelineInfo,
-                                         nullptr,
-                                         &m_computePipeline),
-                "Failed to create compute pipeline");
-
-        vkDestroyShaderModule(m_device, computeModule, nullptr);
+        pipelineInfo.layout = *m_pipelineLayout;
+        m_computePipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
     }
 
     // Allocate the descriptor pool and one descriptor set per layout
@@ -1240,88 +1114,59 @@ private:
     // because they depend on scene resources that are created later.
     void CreateDescriptorSets()
     {
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        poolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size());
-        VkDescriptorPoolSize scenePoolSize{};
-        scenePoolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        scenePoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size());
-        VkDescriptorPoolSize storageBufferPoolSize{};
-        storageBufferPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        storageBufferPoolSize.descriptorCount = static_cast<uint32_t>(m_swapchainImageViews.size());
-        const std::array<VkDescriptorPoolSize, 3> poolSizes = {
-            poolSize,
-            scenePoolSize,
-            storageBufferPoolSize,
+        const uint32_t count = static_cast<uint32_t>(m_swapchainImageViews.size());
+        const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
+            vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, count},
+            vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, count},
+            vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, count},
         };
 
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.maxSets = static_cast<uint32_t>(m_swapchainImageViews.size());
-        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolInfo.pPoolSizes = poolSizes.data();
-        ThrowVk(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool),
-                "Failed to create descriptor pool");
+        vk::DescriptorPoolCreateInfo poolInfo{};
+        poolInfo.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+        poolInfo.maxSets = count;
+        poolInfo.setPoolSizes(poolSizes);
+        m_descriptorPool = vk::raii::DescriptorPool(m_device, poolInfo);
 
-        std::vector<VkDescriptorSetLayout> layouts(m_swapchainImageViews.size(), m_descriptorSetLayout);
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = m_descriptorPool;
-        allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
-        allocInfo.pSetLayouts = layouts.data();
+        const std::vector<vk::DescriptorSetLayout> layouts(count, *m_descriptorSetLayout);
+        vk::DescriptorSetAllocateInfo allocInfo{};
+        allocInfo.descriptorPool = *m_descriptorPool;
+        allocInfo.setSetLayouts(layouts);
 
-        m_descriptorSets.resize(layouts.size());
-        ThrowVk(vkAllocateDescriptorSets(m_device, &allocInfo, m_descriptorSets.data()),
-                "Failed to allocate descriptor sets");
+        m_descriptorSets = vk::raii::DescriptorSets(m_device, allocInfo);
         UpdateDescriptorSetContents();
     }
 
-    // Create the graphics-queue command pool used for both per-frame
-    // command buffers and one-shot setup commands.
+    // Create the graphics-queue command pool used for the per-frame command
+    // buffers.
     void CreateCommandPool()
     {
-        VkCommandPoolCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        createInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        createInfo.queueFamilyIndex = m_queueFamilies.graphicsFamily.value();
-        ThrowVk(vkCreateCommandPool(m_device, &createInfo, nullptr, &m_commandPool),
-                "Failed to create command pool");
+        vk::CommandPoolCreateInfo createInfo{vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                                             m_queueFamilies.graphicsFamily.value()};
+        m_commandPool = vk::raii::CommandPool(m_device, createInfo);
     }
 
     // Allocate one primary command buffer per frame in flight.
     void CreateCommandBuffers()
     {
-        m_commandBuffers.resize(m_config.frameCount);
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = m_commandPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = static_cast<uint32_t>(m_commandBuffers.size());
-        ThrowVk(vkAllocateCommandBuffers(m_device, &allocInfo, m_commandBuffers.data()),
-                "Failed to allocate command buffers");
+        vk::CommandBufferAllocateInfo allocInfo{*m_commandPool, vk::CommandBufferLevel::ePrimary, m_config.frameCount};
+        m_commandBuffers = vk::raii::CommandBuffers(m_device, allocInfo);
     }
 
     // Allocate the per-frame semaphores (image-available, render-
     // finished) and fences that gate command-buffer reuse.
     void CreateSyncObjects()
     {
-        m_frames.resize(m_config.frameCount);
+        const vk::FenceCreateInfo fenceInfo{vk::FenceCreateFlagBits::eSignaled};
 
-        VkSemaphoreCreateInfo semaphoreInfo{};
-        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-        for (auto& frame : m_frames)
+        m_frames.clear();
+        for (uint32_t i = 0; i < m_config.frameCount; ++i)
         {
-            ThrowVk(vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &frame.imageAvailable),
-                    "Failed to create image-available semaphore");
-            ThrowVk(vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &frame.renderFinished),
-                    "Failed to create render-finished semaphore");
-            ThrowVk(vkCreateFence(m_device, &fenceInfo, nullptr, &frame.inFlight),
-                    "Failed to create frame fence");
+            FrameResources frame{
+                m_device.createSemaphore({}),
+                m_device.createSemaphore({}),
+                m_device.createFence(fenceInfo),
+            };
+            m_frames.push_back(std::move(frame));
         }
     }
 
@@ -1375,78 +1220,55 @@ private:
     //   3. vkCmdDispatch over an 8x8-tiled grid; the shader writes the
     //      swapchain image directly as a storage image.
     //   4. Barrier transitioning the swapchain image to PRESENT_SRC.
-    void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
+    void RecordCommandBuffer(const vk::raii::CommandBuffer& commandBuffer, uint32_t imageIndex)
     {
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        ThrowVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "Failed to begin command buffer");
+        commandBuffer.begin({});
 
-        VkImageMemoryBarrier toGeneral{};
-        toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        const vk::ImageSubresourceRange colorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        vk::ImageMemoryBarrier toGeneral{};
         toGeneral.oldLayout = m_swapchainLayouts[imageIndex];
-        toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toGeneral.newLayout = vk::ImageLayout::eGeneral;
         toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toGeneral.image = m_swapchainImages[imageIndex];
-        toGeneral.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        toGeneral.subresourceRange.levelCount = 1;
-        toGeneral.subresourceRange.layerCount = 1;
-        toGeneral.srcAccessMask = 0;
-        toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        toGeneral.subresourceRange = colorRange;
+        toGeneral.srcAccessMask = {};
+        toGeneral.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
 
-        vkCmdPipelineBarrier(commandBuffer,
-                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0,
-                             0,
-                             nullptr,
-                             0,
-                             nullptr,
-                             1,
-                             &toGeneral);
+        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+                                      vk::PipelineStageFlagBits::eComputeShader,
+                                      {}, nullptr, nullptr, toGeneral);
 
         const PushConstants pushConstants = BuildPushConstants();
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
-        vkCmdBindDescriptorSets(commandBuffer,
-                                VK_PIPELINE_BIND_POINT_COMPUTE,
-                                m_pipelineLayout,
-                                0,
-                                1,
-                                &m_descriptorSets[imageIndex],
-                                0,
-                                nullptr);
-        vkCmdPushConstants(commandBuffer,
-                           m_pipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT,
-                           0,
-                           sizeof(PushConstants),
-                           &pushConstants);
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
+        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
+                                         *m_pipelineLayout,
+                                         0,
+                                         *m_descriptorSets[imageIndex],
+                                         nullptr);
+        commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout,
+                                                   vk::ShaderStageFlagBits::eCompute,
+                                                   0,
+                                                   pushConstants);
         // 8x8 workgroups, matching the compute shader's local size; round up so
         // the whole render target is covered (the shader discards the overhang).
         constexpr uint32_t kTile = 8;
         const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
-        vkCmdDispatch(commandBuffer, groupsX, groupsY, 1);
+        commandBuffer.dispatch(groupsX, groupsY, 1);
 
-        VkImageMemoryBarrier toPresent = toGeneral;
-        toPresent.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        toPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        toPresent.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        toPresent.dstAccessMask = 0;
+        vk::ImageMemoryBarrier toPresent = toGeneral;
+        toPresent.oldLayout = vk::ImageLayout::eGeneral;
+        toPresent.newLayout = vk::ImageLayout::ePresentSrcKHR;
+        toPresent.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+        toPresent.dstAccessMask = {};
 
-        vkCmdPipelineBarrier(commandBuffer,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                             0,
-                             0,
-                             nullptr,
-                             0,
-                             nullptr,
-                             1,
-                             &toPresent);
+        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                      vk::PipelineStageFlagBits::eBottomOfPipe,
+                                      {}, nullptr, nullptr, toPresent);
 
-        ThrowVk(vkEndCommandBuffer(commandBuffer), "Failed to end command buffer");
-        m_swapchainLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        commandBuffer.end();
+        m_swapchainLayouts[imageIndex] = vk::ImageLayout::ePresentSrcKHR;
     }
 
     // Wait for the current in-flight slot, acquire a swapchain image,
@@ -1455,47 +1277,37 @@ private:
     void RenderFrame()
     {
         FrameResources& frame = m_frames[m_currentFrame];
-        ThrowVk(vkWaitForFences(m_device, 1, &frame.inFlight, VK_TRUE, UINT64_MAX), "Failed to wait for fence");
-
-        uint32_t imageIndex = 0;
-        const VkResult acquire = vkAcquireNextImageKHR(m_device,
-                                                       m_swapchain,
-                                                       UINT64_MAX,
-                                                       frame.imageAvailable,
-                                                       VK_NULL_HANDLE,
-                                                       &imageIndex);
-        if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR)
+        while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
         {
-            ThrowVk(acquire, "Failed to acquire swapchain image");
         }
 
-        ThrowVk(vkResetFences(m_device, 1, &frame.inFlight), "Failed to reset fence");
-        ThrowVk(vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0), "Failed to reset command buffer");
-        RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
-
-        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &frame.imageAvailable;
-        submitInfo.pWaitDstStageMask = &waitStage;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &m_commandBuffers[m_currentFrame];
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &frame.renderFinished;
-        ThrowVk(vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, frame.inFlight), "Failed to submit command buffer");
-
-        VkPresentInfoKHR presentInfo{};
-        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &frame.renderFinished;
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = &m_swapchain;
-        presentInfo.pImageIndices = &imageIndex;
-        const VkResult present = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-        if (present != VK_SUCCESS && present != VK_SUBOPTIMAL_KHR)
+        const auto [acquireResult, imageIndex] = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable);
+        if (acquireResult != vk::Result::eSuccess && acquireResult != vk::Result::eSuboptimalKHR)
         {
-            ThrowVk(present, "Failed to present swapchain image");
+            throw std::runtime_error("Failed to acquire swapchain image.");
+        }
+
+        m_device.resetFences(*frame.inFlight);
+        const vk::raii::CommandBuffer& commandBuffer = m_commandBuffers[m_currentFrame];
+        commandBuffer.reset();
+        RecordCommandBuffer(commandBuffer, imageIndex);
+
+        const vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eComputeShader;
+        vk::SubmitInfo submitInfo{};
+        submitInfo.setWaitSemaphores(*frame.imageAvailable);
+        submitInfo.setWaitDstStageMask(waitStage);
+        submitInfo.setCommandBuffers(*commandBuffer);
+        submitInfo.setSignalSemaphores(*frame.renderFinished);
+        m_graphicsQueue.submit(submitInfo, *frame.inFlight);
+
+        vk::PresentInfoKHR presentInfo{};
+        presentInfo.setWaitSemaphores(*frame.renderFinished);
+        presentInfo.setSwapchains(*m_swapchain);
+        presentInfo.setImageIndices(imageIndex);
+        const vk::Result present = m_presentQueue.presentKHR(presentInfo);
+        if (present != vk::Result::eSuccess && present != vk::Result::eSuboptimalKHR)
+        {
+            throw std::runtime_error("Failed to present swapchain image.");
         }
 
         ++m_frameIndex;
@@ -1562,88 +1374,54 @@ private:
         }
     }
 
-    // Idle the device, then destroy every Vulkan handle in reverse
-    // construction order. Idempotent — safe to invoke from the
-    // destructor after a successful run or after a partial-init throw.
-    void Cleanup()
-    {
-        if (m_device != VK_NULL_HANDLE)
-        {
-            vkDeviceWaitIdle(m_device);
-        }
-
-        for (auto& frame : m_frames)
-        {
-            if (frame.inFlight != VK_NULL_HANDLE) vkDestroyFence(m_device, frame.inFlight, nullptr);
-            if (frame.renderFinished != VK_NULL_HANDLE) vkDestroySemaphore(m_device, frame.renderFinished, nullptr);
-            if (frame.imageAvailable != VK_NULL_HANDLE) vkDestroySemaphore(m_device, frame.imageAvailable, nullptr);
-        }
-
-        if (!m_commandBuffers.empty() && m_commandPool != VK_NULL_HANDLE)
-        {
-            vkFreeCommandBuffers(m_device,
-                                 m_commandPool,
-                                 static_cast<uint32_t>(m_commandBuffers.size()),
-                                 m_commandBuffers.data());
-        }
-        if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
-        if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
-        if (m_computePipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_computePipeline, nullptr);
-        if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
-        if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
-        DestroySceneBuffers();
-        for (VkImageView view : m_swapchainImageViews)
-        {
-            if (view != VK_NULL_HANDLE) vkDestroyImageView(m_device, view, nullptr);
-        }
-        if (m_swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
-        if (m_device != VK_NULL_HANDLE) vkDestroyDevice(m_device, nullptr);
-        if (m_surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
-        if (m_instance != VK_NULL_HANDLE) vkDestroyInstance(m_instance, nullptr);
-        if (m_window != nullptr) DestroyWindow(m_window);
-    }
-
     struct FrameResources
     {
-        VkSemaphore imageAvailable = VK_NULL_HANDLE;
-        VkSemaphore renderFinished = VK_NULL_HANDLE;
-        VkFence inFlight = VK_NULL_HANDLE;
+        vk::raii::Semaphore imageAvailable{nullptr};
+        vk::raii::Semaphore renderFinished{nullptr};
+        vk::raii::Fence inFlight{nullptr};
     };
 
     HWND m_window = nullptr;
 
     // vk-bootstrap wrappers retained for the lifetime of the app: they own the
-    // builder-side metadata used to fetch queues, image views, etc.
+    // builder-side metadata used to fetch queue family indices.
     vkb::Instance m_vkbInstance;
     vkb::PhysicalDevice m_vkbPhysicalDevice;
     vkb::Device m_vkbDevice;
 
-    VkInstance m_instance = VK_NULL_HANDLE;
-    VkSurfaceKHR m_surface = VK_NULL_HANDLE;
-    VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-    VkDevice m_device = VK_NULL_HANDLE;
-    VkQueue m_graphicsQueue = VK_NULL_HANDLE;
-    VkQueue m_presentQueue = VK_NULL_HANDLE;
+    // RAII Vulkan handles. Declaration order is destruction-reverse order:
+    // device-child objects are declared after the device so they are destroyed
+    // before it; the device after the instance; the instance last.
+    vk::raii::Context m_context;
+    vk::raii::Instance m_instance{nullptr};
+    vk::raii::SurfaceKHR m_surface{nullptr};
+    vk::raii::PhysicalDevice m_physicalDevice{nullptr};
+    vk::raii::Device m_device{nullptr};
+    vk::raii::Queue m_graphicsQueue{nullptr};
+    vk::raii::Queue m_presentQueue{nullptr};
     QueueFamilyIndices m_queueFamilies;
 
-    VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
-    VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
-    VkExtent2D m_swapchainExtent{};
-    std::vector<VkImage> m_swapchainImages;
-    std::vector<VkImageView> m_swapchainImageViews;
-    std::vector<VkImageLayout> m_swapchainLayouts;
-
-    VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_computePipeline = VK_NULL_HANDLE;
-    VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> m_descriptorSets;
-
+    // VMA allocator + its buffers are released manually in the destructor body
+    // (before the raii members, while the device is still alive).
+    VmaAllocator m_allocator = VK_NULL_HANDLE;
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_mieScatteringBuffer{};
 
-    VkCommandPool m_commandPool = VK_NULL_HANDLE;
-    std::vector<VkCommandBuffer> m_commandBuffers;
+    vk::raii::SwapchainKHR m_swapchain{nullptr};
+    vk::Format m_swapchainFormat = vk::Format::eUndefined;
+    vk::Extent2D m_swapchainExtent{};
+    std::vector<vk::Image> m_swapchainImages;
+    std::vector<vk::raii::ImageView> m_swapchainImageViews;
+    std::vector<vk::ImageLayout> m_swapchainLayouts;
+
+    vk::raii::DescriptorSetLayout m_descriptorSetLayout{nullptr};
+    vk::raii::PipelineLayout m_pipelineLayout{nullptr};
+    vk::raii::Pipeline m_computePipeline{nullptr};
+    vk::raii::DescriptorPool m_descriptorPool{nullptr};
+    std::vector<vk::raii::DescriptorSet> m_descriptorSets;
+
+    vk::raii::CommandPool m_commandPool{nullptr};
+    std::vector<vk::raii::CommandBuffer> m_commandBuffers;
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
