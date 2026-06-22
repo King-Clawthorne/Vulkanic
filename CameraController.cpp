@@ -6,17 +6,17 @@
 
 namespace
 {
-// True while the given virtual-key is held this frame (high bit of the async
-// key state). Used for the look / polarizer controls.
-bool IsKeyDown(int virtualKey)
-{
-    return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-}
+    // True while the given virtual-key is held this frame (high bit of the async
+    // key state). Used for the look / polarizer controls.
+    bool IsKeyDown(int virtualKey)
+    {
+        return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+    }
 
-float MaxPitchRadians(const RuntimeConfig& config)
-{
-    return config.maxPitchDegrees * kPi / 180.0f;
-}
+    float MaxPitchRadians(const RuntimeConfig& config)
+    {
+        return config.maxPitchDegrees * kPi / 180.0f;
+    }
 } // namespace
 
 void CameraController::Reset(const RuntimeConfig& config)
