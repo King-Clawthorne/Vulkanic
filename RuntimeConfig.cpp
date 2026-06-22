@@ -469,53 +469,55 @@ std::array<float, 3> ParseFloat3Value(const JsonValue& value, const std::string&
     };
 }
 
+// Each helper leaves `target` at its default when the key is absent, so a
+// partial config still produces a valid scene.
 void ParseOptionalJsonNumber(const JsonValue::Object& object, std::string_view key, float& target)
 {
-    const JsonValue* value = FindMember(object, key);
-    if (value == nullptr)
+    if (const JsonValue* value = FindMember(object, key))
     {
-        return;
+        target = ParseFloatValue(*value, Quote(key));
     }
-    target = ParseFloatValue(*value, Quote(key));
 }
 
 void ParseOptionalJsonUint32(const JsonValue::Object& object, std::string_view key, uint32_t& target)
 {
-    const JsonValue* value = FindMember(object, key);
-    if (value == nullptr)
+    if (const JsonValue* value = FindMember(object, key))
     {
-        return;
+        target = ParseUint32Value(*value, Quote(key));
     }
-    target = ParseUint32Value(*value, Quote(key));
 }
 
 void ParseOptionalJsonVec3(const JsonValue::Object& object, std::string_view key, Vec3& target)
 {
-    const JsonValue* value = FindMember(object, key);
-    if (value == nullptr)
+    if (const JsonValue* value = FindMember(object, key))
     {
-        return;
+        const auto parsed = ParseFloat3Value(*value, Quote(key));
+        target = {parsed[0], parsed[1], parsed[2]};
     }
-
-    const auto parsed = ParseFloat3Value(*value, Quote(key));
-    target = {parsed[0], parsed[1], parsed[2]};
 }
 
-void ParseOptionalJsonFloat3(const JsonValue::Object& object,
-                             std::string_view key,
-                             std::array<float, 3>& target)
+void ParseOptionalJsonFloat3(const JsonValue::Object& object, std::string_view key, std::array<float, 3>& target)
 {
-    const JsonValue* value = FindMember(object, key);
-    if (value == nullptr)
+    if (const JsonValue* value = FindMember(object, key))
     {
-        return;
+        target = ParseFloat3Value(*value, Quote(key));
     }
-    target = ParseFloat3Value(*value, Quote(key));
 }
 
 bool HasNegativeElement(const std::array<float, 3>& value)
 {
     return std::ranges::any_of(value, [](float component) { return component < 0.0f; });
+}
+
+// Throw a validation error when `failed` is true. Lets each semantic check in
+// ParseRuntimeConfig stay a single fail-fast line that reads as the condition
+// that is NOT allowed, paired with its message.
+void FailIf(bool failed, const char* message)
+{
+    if (failed)
+    {
+        throw std::runtime_error(message);
+    }
 }
 
 // Pull the global render / camera / input / sky sections off the root
@@ -615,122 +617,54 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
 
     ParseSections(root, config);
 
-    if (config.width == 0 || config.height == 0)
-    {
-        throw std::runtime_error("\"width\" and \"height\" must be greater than 0.");
-    }
-    if (config.frameCount == 0)
-    {
-        throw std::runtime_error("\"frameCount\" must be greater than 0.");
-    }
-    if (config.samplesPerPixel == 0)
-    {
-        throw std::runtime_error("\"samplesPerPixel\" must be greater than 0.");
-    }
-    if (Length(config.initialLookAt - config.initialPosition) <= 0.001f)
-    {
-        throw std::runtime_error("\"initialPosition\" and \"initialLookAt\" must not be the same.");
-    }
-    if (config.fovYDegrees <= 1.0f || config.fovYDegrees >= 179.0f)
-    {
-        throw std::runtime_error("\"fovYDegrees\" must be between 1 and 179.");
-    }
-    if (config.mouseSensitivity < 0.0f || config.keyLookSpeed < 0.0f || config.polarizerRotateSpeed < 0.0f)
-    {
-        throw std::runtime_error("\"mouseSensitivity\", \"keyLookSpeed\", and \"polarizerRotateSpeed\" must be non-negative.");
-    }
-    if (config.maxPitchDegrees <= 0.0f || config.maxPitchDegrees >= 90.0f)
-    {
-        throw std::runtime_error("\"maxPitchDegrees\" must be greater than 0 and less than 90.");
-    }
-    if (config.skyExposure <= 0.0f)
-    {
-        throw std::runtime_error("\"exposure\" must be greater than 0.");
-    }
-    if (HasNegativeElement(config.skySpectral.betaRayleigh) || config.skySpectral.betaMie < 0.0f)
-    {
-        throw std::runtime_error("Sky scattering coefficients must be non-negative.");
-    }
-    if (config.skySpectral.mieG <= -1.0f || config.skySpectral.mieG >= 1.0f)
-    {
-        throw std::runtime_error("\"MIE_G\" must be between -1 and 1.");
-    }
-    if (config.skySpectral.earthRadius <= 0.0f || config.skySpectral.atmosphereRadius <= 0.0f
-        || config.skySpectral.atmosphereRadius <= config.skySpectral.earthRadius)
-    {
-        throw std::runtime_error("\"EARTH_R\" and \"ATMOS_R\" must be positive, and ATMOS_R must exceed EARTH_R.");
-    }
-    if (config.skySpectral.scaleHeightRayleigh <= 0.0f || config.skySpectral.scaleHeightMie <= 0.0f)
-    {
-        throw std::runtime_error("\"SCALE_H_R\" and \"SCALE_H_M\" must be greater than 0.");
-    }
-    if (HasNegativeElement(config.skySpectral.sunRadiance))
-    {
-        throw std::runtime_error("\"SUN_RADIANCE\" values must be non-negative.");
-    }
-    if (config.skySpectral.sunRadius <= 0.0f || config.skySpectral.sunAa < 0.0f)
-    {
-        throw std::runtime_error("\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
-    }
-    if (HasNegativeElement(config.skySpectral.betaOzone))
-    {
-        throw std::runtime_error("\"BETA_O3\" values must be non-negative.");
-    }
-    if (config.skySpectral.ozoneCenterAltitude < 0.0f || config.skySpectral.ozoneLayerWidth <= 0.0f)
-    {
-        throw std::runtime_error("\"OZONE_CENTER\" must be non-negative and \"OZONE_WIDTH\" must be greater than 0.");
-    }
-    if (!std::ranges::all_of(config.skySpectral.sunLimbDarkening,
-                             [](float value) { return value >= 0.0f && value <= 1.0f; }))
-    {
-        throw std::runtime_error("\"SUN_LIMB_DARKENING\" values must be in [0, 1].");
-    }
-    if (config.skySpectral.refractionStrength < 0.0f)
-    {
-        throw std::runtime_error("\"REFRACTION\" must be non-negative.");
-    }
-    if (config.skySpectral.mieBackgroundBeta < 0.0f || config.skySpectral.mieBackgroundCenter < 0.0f
-        || config.skySpectral.mieBackgroundWidth <= 0.0f)
-    {
-        throw std::runtime_error("\"MIE_BG_BETA\" and \"MIE_BG_CENTER\" must be non-negative and \"MIE_BG_WIDTH\" must be greater than 0.");
-    }
-    if (config.skySpectral.mieSingleScatterAlbedo < 0.0f || config.skySpectral.mieSingleScatterAlbedo > 1.0f)
-    {
-        throw std::runtime_error("\"MIE_ALBEDO\" must be in [0, 1].");
-    }
-    {
-        const auto& d = config.skySpectral.sunDirection;
-        if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= 0.0f)
-        {
-            throw std::runtime_error("\"SUN_DIRECTION\" must be a non-zero vector.");
-        }
-    }
+    const SkySpectralConfig& sky = config.skySpectral;
+    const auto& sunDir = sky.sunDirection;
+
+    FailIf(config.width == 0 || config.height == 0,
+           "\"width\" and \"height\" must be greater than 0.");
+    FailIf(config.frameCount == 0, "\"frameCount\" must be greater than 0.");
+    FailIf(config.samplesPerPixel == 0, "\"samplesPerPixel\" must be greater than 0.");
+    FailIf(Length(config.initialLookAt - config.initialPosition) <= 0.001f,
+           "\"initialPosition\" and \"initialLookAt\" must not be the same.");
+    FailIf(config.fovYDegrees <= 1.0f || config.fovYDegrees >= 179.0f,
+           "\"fovYDegrees\" must be between 1 and 179.");
+    FailIf(config.mouseSensitivity < 0.0f || config.keyLookSpeed < 0.0f || config.polarizerRotateSpeed < 0.0f,
+           "\"mouseSensitivity\", \"keyLookSpeed\", and \"polarizerRotateSpeed\" must be non-negative.");
+    FailIf(config.maxPitchDegrees <= 0.0f || config.maxPitchDegrees >= 90.0f,
+           "\"maxPitchDegrees\" must be greater than 0 and less than 90.");
+    FailIf(config.skyExposure <= 0.0f, "\"exposure\" must be greater than 0.");
+    FailIf(HasNegativeElement(sky.betaRayleigh) || sky.betaMie < 0.0f,
+           "Sky scattering coefficients must be non-negative.");
+    FailIf(sky.mieG <= -1.0f || sky.mieG >= 1.0f, "\"MIE_G\" must be between -1 and 1.");
+    FailIf(sky.earthRadius <= 0.0f || sky.atmosphereRadius <= 0.0f || sky.atmosphereRadius <= sky.earthRadius,
+           "\"EARTH_R\" and \"ATMOS_R\" must be positive, and ATMOS_R must exceed EARTH_R.");
+    FailIf(sky.scaleHeightRayleigh <= 0.0f || sky.scaleHeightMie <= 0.0f,
+           "\"SCALE_H_R\" and \"SCALE_H_M\" must be greater than 0.");
+    FailIf(HasNegativeElement(sky.sunRadiance), "\"SUN_RADIANCE\" values must be non-negative.");
+    FailIf(sky.sunRadius <= 0.0f || sky.sunAa < 0.0f,
+           "\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
+    FailIf(HasNegativeElement(sky.betaOzone), "\"BETA_O3\" values must be non-negative.");
+    FailIf(sky.ozoneCenterAltitude < 0.0f || sky.ozoneLayerWidth <= 0.0f,
+           "\"OZONE_CENTER\" must be non-negative and \"OZONE_WIDTH\" must be greater than 0.");
+    FailIf(!std::ranges::all_of(sky.sunLimbDarkening, [](float v) { return v >= 0.0f && v <= 1.0f; }),
+           "\"SUN_LIMB_DARKENING\" values must be in [0, 1].");
+    FailIf(sky.refractionStrength < 0.0f, "\"REFRACTION\" must be non-negative.");
+    FailIf(sky.mieBackgroundBeta < 0.0f || sky.mieBackgroundCenter < 0.0f || sky.mieBackgroundWidth <= 0.0f,
+           "\"MIE_BG_BETA\" and \"MIE_BG_CENTER\" must be non-negative and \"MIE_BG_WIDTH\" must be greater than 0.");
+    FailIf(sky.mieSingleScatterAlbedo < 0.0f || sky.mieSingleScatterAlbedo > 1.0f,
+           "\"MIE_ALBEDO\" must be in [0, 1].");
+    FailIf(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2] <= 0.0f,
+           "\"SUN_DIRECTION\" must be a non-zero vector.");
     // secondarySamples is currently unused, so any value is accepted.
-    if (config.skySpectral.viewSteps == 0 || config.skySpectral.samples == 0)
-    {
-        throw std::runtime_error("\"VIEW_STEPS\" and \"Samples\" must be greater than 0.");
-    }
-    if (config.skySpectral.rayleighDepolarization < 0.0f || config.skySpectral.rayleighDepolarization >= 1.0f)
-    {
-        throw std::runtime_error("\"RAYLEIGH_DEPOLARIZATION\" must be in [0, 1).");
-    }
-    if (config.skySpectral.aerosolRefractiveIndexReal <= 0.0f
-        || config.skySpectral.aerosolRefractiveIndexImag < 0.0f)
-    {
-        throw std::runtime_error("Aerosol refractive index must have positive real part and non-negative imaginary part.");
-    }
-    if (config.skySpectral.aerosolMeanRadiusMicrometers <= 0.0f || config.skySpectral.aerosolSigma <= 1.0f)
-    {
-        throw std::runtime_error("\"AEROSOL_MEAN_RADIUS_UM\" must be > 0 and \"AEROSOL_SIGMA\" must be > 1.");
-    }
-    if (!std::ranges::all_of(config.skySpectral.aerosolWavelengthsNmRgb,
-                             [](float value) { return value > 0.0f; }))
-    {
-        throw std::runtime_error("\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
-    }
-    if (config.skySpectral.mieTableAngleBins < 2)
-    {
-        throw std::runtime_error("\"MIE_TABLE_ANGLE_BINS\" must be at least 2.");
-    }
+    FailIf(sky.viewSteps == 0 || sky.samples == 0, "\"VIEW_STEPS\" and \"Samples\" must be greater than 0.");
+    FailIf(sky.rayleighDepolarization < 0.0f || sky.rayleighDepolarization >= 1.0f,
+           "\"RAYLEIGH_DEPOLARIZATION\" must be in [0, 1).");
+    FailIf(sky.aerosolRefractiveIndexReal <= 0.0f || sky.aerosolRefractiveIndexImag < 0.0f,
+           "Aerosol refractive index must have positive real part and non-negative imaginary part.");
+    FailIf(sky.aerosolMeanRadiusMicrometers <= 0.0f || sky.aerosolSigma <= 1.0f,
+           "\"AEROSOL_MEAN_RADIUS_UM\" must be > 0 and \"AEROSOL_SIGMA\" must be > 1.");
+    FailIf(!std::ranges::all_of(sky.aerosolWavelengthsNmRgb, [](float v) { return v > 0.0f; }),
+           "\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
+    FailIf(sky.mieTableAngleBins < 2, "\"MIE_TABLE_ANGLE_BINS\" must be at least 2.");
     return config;
 }

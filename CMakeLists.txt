@@ -69,6 +69,7 @@ add_executable(Vulkanic
         main.cpp
         RuntimeConfig.cpp
         MieScattering.cpp
+        CameraController.cpp
         VmaUsage.cpp
         VulkanPathTracer.cpp)
 add_dependencies(Vulkanic vulkan_shader)

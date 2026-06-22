@@ -142,6 +142,11 @@ struct SkySpectralConfig
     float aerosolSigma = 1.5f;                 // log-normal geometric std dev (> 1)
     std::array<float, 3> aerosolWavelengthsNmRgb{680.0f, 550.0f, 440.0f};
     uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
+
+    // C++20 member-wise equality: true only when every spectral field matches.
+    // Drives the "did the sky change?" check that decides whether to re-upload
+    // the scene UBO (and, via HasMieAerosolChanged, rebuild the Mie table).
+    [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
 
 // True when any field that feeds the precomputed Lorenz–Mie scattering matrix

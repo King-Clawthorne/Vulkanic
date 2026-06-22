@@ -26,6 +26,7 @@
 
 #include "VulkanPathTracer.h"
 
+#include "CameraController.h"
 #include "MieScattering.h"
 #include "RuntimeConfig.h"
 
@@ -35,7 +36,6 @@
 #include <VkBootstrap.h>
 #include <vk_mem_alloc.h>
 
-#include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -46,7 +46,6 @@
 #include <format>
 #include <fstream>
 #include <optional>
-#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -174,139 +173,6 @@ struct alignas(16) SceneData
 
 static_assert(sizeof(SceneData) == 160, "Scene data layout must stay 16-byte aligned.");
 
-// 3x3 row-major matrix used only for camera basis math.
-struct Mat3
-{
-    float m[3][3]{};
-};
-
-static Mat3 IdentityMat3()
-{
-    Mat3 result{};
-    result.m[0][0] = 1.0f;
-    result.m[1][1] = 1.0f;
-    result.m[2][2] = 1.0f;
-    return result;
-}
-
-static Mat3 Multiply(const Mat3& left, const Mat3& right)
-{
-    Mat3 result{};
-    for (uint32_t row = 0; row < 3; ++row)
-    {
-        for (uint32_t column = 0; column < 3; ++column)
-        {
-            result.m[row][column] = left.m[row][0] * right.m[0][column]
-                                    + left.m[row][1] * right.m[1][column]
-                                    + left.m[row][2] * right.m[2][column];
-        }
-    }
-    return result;
-}
-
-static Mat3 Transpose(const Mat3& matrix)
-{
-    Mat3 result{};
-    for (uint32_t row = 0; row < 3; ++row)
-    {
-        for (uint32_t column = 0; column < 3; ++column)
-        {
-            result.m[row][column] = matrix.m[column][row];
-        }
-    }
-    return result;
-}
-
-static Vec3 TransformDirection(const Mat3& matrix, const Vec3& value)
-{
-    return {
-        matrix.m[0][0] * value.x + matrix.m[0][1] * value.y + matrix.m[0][2] * value.z,
-        matrix.m[1][0] * value.x + matrix.m[1][1] * value.y + matrix.m[1][2] * value.z,
-        matrix.m[2][0] * value.x + matrix.m[2][1] * value.y + matrix.m[2][2] * value.z,
-    };
-}
-
-static Mat3 MakeScaleMatrix(const Vec3& scale)
-{
-    Mat3 result{};
-    result.m[0][0] = scale.x;
-    result.m[1][1] = scale.y;
-    result.m[2][2] = scale.z;
-    return result;
-}
-
-static Mat3 MakeRotationX(float radians)
-{
-    Mat3 result = IdentityMat3();
-    const float cosine = std::cos(radians);
-    const float sine = std::sin(radians);
-    result.m[1][1] = cosine;
-    result.m[1][2] = -sine;
-    result.m[2][1] = sine;
-    result.m[2][2] = cosine;
-    return result;
-}
-
-static Mat3 MakeRotationY(float radians)
-{
-    Mat3 result = IdentityMat3();
-    const float cosine = std::cos(radians);
-    const float sine = std::sin(radians);
-    result.m[0][0] = cosine;
-    result.m[0][2] = sine;
-    result.m[2][0] = -sine;
-    result.m[2][2] = cosine;
-    return result;
-}
-
-static Mat3 MakeRotationZ(float radians)
-{
-    Mat3 result = IdentityMat3();
-    const float cosine = std::cos(radians);
-    const float sine = std::sin(radians);
-    result.m[0][0] = cosine;
-    result.m[0][1] = -sine;
-    result.m[1][0] = sine;
-    result.m[1][1] = cosine;
-    return result;
-}
-
-static Mat3 MakeEulerRotationMatrixDegrees(const Vec3& rotationDegrees)
-{
-    const float radiansX = rotationDegrees.x * kPi / 180.0f;
-    const float radiansY = rotationDegrees.y * kPi / 180.0f;
-    const float radiansZ = rotationDegrees.z * kPi / 180.0f;
-    return Multiply(Multiply(MakeRotationZ(radiansZ), MakeRotationY(radiansY)), MakeRotationX(radiansX));
-}
-
-static bool HasSkySpectralChanged(const SkySpectralConfig& left, const SkySpectralConfig& right)
-{
-    return left.betaRayleigh != right.betaRayleigh
-           || left.betaMie != right.betaMie
-           || left.mieG != right.mieG
-           || left.earthRadius != right.earthRadius
-           || left.atmosphereRadius != right.atmosphereRadius
-           || left.scaleHeightRayleigh != right.scaleHeightRayleigh
-           || left.scaleHeightMie != right.scaleHeightMie
-           || left.sunRadiance != right.sunRadiance
-           || left.sunRadius != right.sunRadius
-           || left.sunAa != right.sunAa
-           || left.betaOzone != right.betaOzone
-           || left.ozoneCenterAltitude != right.ozoneCenterAltitude
-           || left.ozoneLayerWidth != right.ozoneLayerWidth
-           || left.sunLimbDarkening != right.sunLimbDarkening
-           || left.refractionStrength != right.refractionStrength
-           || left.mieBackgroundBeta != right.mieBackgroundBeta
-           || left.mieBackgroundCenter != right.mieBackgroundCenter
-           || left.mieBackgroundWidth != right.mieBackgroundWidth
-           || left.mieSingleScatterAlbedo != right.mieSingleScatterAlbedo
-           || left.secondarySamples != right.secondarySamples
-           || left.viewSteps != right.viewSteps
-           || left.samples != right.samples
-           || left.rayleighDepolarization != right.rayleighDepolarization
-           || HasMieAerosolChanged(left, right);
-}
-
 struct PushConstants
 {
     float cameraPositionFrame[4];
@@ -321,6 +187,25 @@ struct PushConstants
 };
 
 static_assert(sizeof(PushConstants) == 120, "Push constant layout must match the shader.");
+
+// Pack a 3-vector plus a trailing scalar into a std140 vec4 slot (float[4]).
+// The two overloads cover the project's two 3-component types so the Build*
+// functions read as one xyz+w line per slot instead of four scalar writes.
+static void PackVec4(float (&slot)[4], const std::array<float, 3>& xyz, float w)
+{
+    slot[0] = xyz[0];
+    slot[1] = xyz[1];
+    slot[2] = xyz[2];
+    slot[3] = w;
+}
+
+static void PackVec4(float (&slot)[4], const Vec3& xyz, float w)
+{
+    slot[0] = xyz.x;
+    slot[1] = xyz.y;
+    slot[2] = xyz.z;
+    slot[3] = w;
+}
 
 // =====================================================================
 // SECTION: window procedure
@@ -419,56 +304,28 @@ public:
     }
 
 private:
-    static bool IsKeyDown(int virtualKey)
-    {
-        return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-    }
-
-    float GetCameraMaxPitchRadians() const
-    {
-        return m_config.maxPitchDegrees * kPi / 180.0f;
-    }
-
     SceneData BuildSceneData() const
     {
         const SkySpectralConfig& s = m_config.skySpectral;
         SceneData sceneData{};
-        sceneData.skyBetaRayleighBetaM[0] = s.betaRayleigh[0];
-        sceneData.skyBetaRayleighBetaM[1] = s.betaRayleigh[1];
-        sceneData.skyBetaRayleighBetaM[2] = s.betaRayleigh[2];
-        sceneData.skyBetaRayleighBetaM[3] = s.betaMie;
-        sceneData.skyMieEarthAtmosScaleHr[0] = s.mieG;
-        sceneData.skyMieEarthAtmosScaleHr[1] = s.earthRadius;
-        sceneData.skyMieEarthAtmosScaleHr[2] = s.atmosphereRadius;
-        sceneData.skyMieEarthAtmosScaleHr[3] = s.scaleHeightRayleigh;
-        sceneData.skyScaleHmSunRadiusAa[0] = s.scaleHeightMie;
-        sceneData.skyScaleHmSunRadiusAa[1] = s.sunRadius;
-        sceneData.skyScaleHmSunRadiusAa[2] = s.sunAa;
-        sceneData.skySunRadiance[0] = s.sunRadiance[0];
-        sceneData.skySunRadiance[1] = s.sunRadiance[1];
-        sceneData.skySunRadiance[2] = s.sunRadiance[2];
-        sceneData.skySunDirection[0] = s.sunDirection[0];
-        sceneData.skySunDirection[1] = s.sunDirection[1];
-        sceneData.skySunDirection[2] = s.sunDirection[2];
+        PackVec4(sceneData.skyBetaRayleighBetaM, s.betaRayleigh, s.betaMie);
+        PackVec4(sceneData.skyMieEarthAtmosScaleHr,
+                 std::array<float, 3>{s.mieG, s.earthRadius, s.atmosphereRadius}, s.scaleHeightRayleigh);
+        PackVec4(sceneData.skyScaleHmSunRadiusAa,
+                 std::array<float, 3>{s.scaleHeightMie, s.sunRadius, s.sunAa}, 0.0f);
+        PackVec4(sceneData.skySunRadiance, s.sunRadiance, 0.0f);
+        PackVec4(sceneData.skySunDirection, s.sunDirection, 0.0f);
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;
         sceneData.skySampleCounts[2] = s.samples;
-        sceneData.skyVrtParams[0] = s.rayleighDepolarization;
-        sceneData.skyVrtParams[1] = 0.0f;
-        sceneData.skyVrtParams[2] = static_cast<float>(s.mieTableAngleBins);
-        sceneData.skyVrtParams[3] = s.ozoneLayerWidth;
-        sceneData.skyOzoneBeta[0] = s.betaOzone[0];
-        sceneData.skyOzoneBeta[1] = s.betaOzone[1];
-        sceneData.skyOzoneBeta[2] = s.betaOzone[2];
-        sceneData.skyOzoneBeta[3] = s.ozoneCenterAltitude;
-        sceneData.skySunLimbRefraction[0] = s.sunLimbDarkening[0];
-        sceneData.skySunLimbRefraction[1] = s.sunLimbDarkening[1];
-        sceneData.skySunLimbRefraction[2] = s.sunLimbDarkening[2];
-        sceneData.skySunLimbRefraction[3] = s.refractionStrength;
-        sceneData.skyMieBackground[0] = s.mieBackgroundBeta;
-        sceneData.skyMieBackground[1] = s.mieBackgroundCenter;
-        sceneData.skyMieBackground[2] = s.mieBackgroundWidth;
-        sceneData.skyMieBackground[3] = s.mieSingleScatterAlbedo;
+        PackVec4(sceneData.skyVrtParams,
+                 std::array<float, 3>{s.rayleighDepolarization, 0.0f, static_cast<float>(s.mieTableAngleBins)},
+                 s.ozoneLayerWidth);
+        PackVec4(sceneData.skyOzoneBeta, s.betaOzone, s.ozoneCenterAltitude);
+        PackVec4(sceneData.skySunLimbRefraction, s.sunLimbDarkening, s.refractionStrength);
+        PackVec4(sceneData.skyMieBackground,
+                 std::array<float, 3>{s.mieBackgroundBeta, s.mieBackgroundCenter, s.mieBackgroundWidth},
+                 s.mieSingleScatterAlbedo);
         return sceneData;
     }
 
@@ -574,7 +431,7 @@ private:
     // valid refresh (camera reset, Mie rebuild, sky UBO re-upload).
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
-        const bool skySpectralChanged = HasSkySpectralChanged(config.skySpectral, m_config.skySpectral);
+        const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
         const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
 
         if (!m_configPath.empty() && !resetCameraState)
@@ -589,12 +446,11 @@ private:
         m_config = config;
         if (resetCameraState)
         {
-            ResetCamera();
+            m_camera.Reset(m_config);
             return;
         }
 
-        const float maxPitch = GetCameraMaxPitchRadians();
-        m_cameraPitch = std::clamp(m_cameraPitch, -maxPitch, maxPitch);
+        m_camera.ClampPitch(m_config);
 
         if (skySpectralChanged)
         {
@@ -661,156 +517,6 @@ private:
         }
 
         m_configLastWriteTime = currentWriteTime;
-    }
-
-    // Snap the camera back to the configured initialPosition / initialLookAt
-    // and recompute its yaw/pitch.
-    void ResetCamera()
-    {
-        m_cameraPosition = m_config.initialPosition;
-        const Vec3 initialForward = Normalize(m_config.initialLookAt - m_cameraPosition);
-        m_cameraYaw = std::atan2(initialForward.x, initialForward.z);
-        m_cameraPitch = std::asin(std::clamp(initialForward.y, -1.0f, 1.0f));
-    }
-
-    Vec3 GetCameraForward() const
-    {
-        const float cosPitch = std::cos(m_cameraPitch);
-        return Normalize({
-            std::sin(m_cameraYaw) * cosPitch,
-            std::sin(m_cameraPitch),
-            std::cos(m_cameraYaw) * cosPitch,
-        });
-    }
-
-    // Consume accumulated mouse-delta input and rotate the camera. Pitch
-    // is clamped to ±maxPitchDegrees so the camera never goes upside
-    // down and the yaw axis remains world-up.
-    void UpdateMouseLook()
-    {
-        const bool windowFocused = GetForegroundWindow() == m_window;
-        const bool wantsMouseLook = windowFocused && IsKeyDown(VK_RBUTTON);
-        if (!wantsMouseLook)
-        {
-            if (m_mouseLookActive && GetCapture() == m_window)
-            {
-                ReleaseCapture();
-            }
-            m_mouseLookActive = false;
-            return;
-        }
-
-        POINT cursorPosition{};
-        if (!GetCursorPos(&cursorPosition))
-        {
-            return;
-        }
-
-        if (!m_mouseLookActive)
-        {
-            m_mouseLookActive = true;
-            m_lastMousePosition = cursorPosition;
-            SetCapture(m_window);
-            return;
-        }
-
-        const float mouseDeltaX = static_cast<float>(cursorPosition.x - m_lastMousePosition.x);
-        const float mouseDeltaY = static_cast<float>(cursorPosition.y - m_lastMousePosition.y);
-        m_lastMousePosition = cursorPosition;
-
-        const float maxPitch = GetCameraMaxPitchRadians();
-        m_cameraYaw += mouseDeltaX * m_config.mouseSensitivity;
-        m_cameraPitch = std::clamp(m_cameraPitch - mouseDeltaY * m_config.mouseSensitivity, -maxPitch, maxPitch);
-    }
-
-    // Integrate look input over deltaSeconds: mouse-look, arrow-key look, and
-    // the R reset. The sky is directional, so the camera only rotates — there
-    // is no positional movement.
-    void UpdateCamera(double deltaSeconds)
-    {
-        const float deltaTime = static_cast<float>(std::min(deltaSeconds, 0.1));
-        UpdateMouseLook();
-
-        const bool windowFocused = GetForegroundWindow() == m_window;
-        const bool resetCameraDown = windowFocused && IsKeyDown('R');
-        if (resetCameraDown && !m_resetCameraKeyDown)
-        {
-            ResetCamera();
-        }
-        m_resetCameraKeyDown = resetCameraDown;
-
-        // Polarization filter: P toggles it (edge-triggered so one press is
-        // one toggle), [ and ] rotate the filter axis while held.
-        const bool polarizerToggleDown = windowFocused && IsKeyDown('P');
-        if (polarizerToggleDown && !m_polarizerToggleKeyDown)
-        {
-            m_polarizerEnabled = !m_polarizerEnabled;
-            std::printf("[Polarizer] %s (%s)\n",
-                        m_polarizerEnabled ? "ON" : "OFF",
-                        m_polarizerElliptical ? "elliptical" : "linear");
-        }
-        m_polarizerToggleKeyDown = polarizerToggleDown;
-
-        // C toggles between a linear analyzer and an elliptical one.
-        const bool polarizerModeDown = windowFocused && IsKeyDown('C');
-        if (polarizerModeDown && !m_polarizerModeKeyDown)
-        {
-            m_polarizerElliptical = !m_polarizerElliptical;
-            std::printf("[Polarizer] mode: %s\n", m_polarizerElliptical ? "elliptical" : "linear");
-        }
-        m_polarizerModeKeyDown = polarizerModeDown;
-
-        if (windowFocused)
-        {
-            if (m_polarizerElliptical)
-            {
-                // [ / ] adjust ellipticity; +/-45 degrees reaches circular.
-                if (IsKeyDown(VK_OEM_4))
-                {
-                    m_polarizerEllipticityRadians -= m_config.polarizerRotateSpeed * deltaTime;
-                }
-                if (IsKeyDown(VK_OEM_6))
-                {
-                    m_polarizerEllipticityRadians += m_config.polarizerRotateSpeed * deltaTime;
-                }
-                m_polarizerEllipticityRadians = std::clamp(m_polarizerEllipticityRadians, -kPi * 0.25f, kPi * 0.25f);
-            }
-            else
-            {
-                if (IsKeyDown(VK_OEM_4)) // '[' rotates the filter axis one way
-                {
-                    m_polarizerAngleRadians -= m_config.polarizerRotateSpeed * deltaTime;
-                }
-                if (IsKeyDown(VK_OEM_6)) // ']' rotates it the other way
-                {
-                    m_polarizerAngleRadians += m_config.polarizerRotateSpeed * deltaTime;
-                }
-            }
-        }
-
-        if (!windowFocused)
-        {
-            return;
-        }
-
-        const float maxPitch = GetCameraMaxPitchRadians();
-        if (IsKeyDown(VK_LEFT))
-        {
-            m_cameraYaw -= m_config.keyLookSpeed * deltaTime;
-        }
-        if (IsKeyDown(VK_RIGHT))
-        {
-            m_cameraYaw += m_config.keyLookSpeed * deltaTime;
-        }
-        if (IsKeyDown(VK_UP))
-        {
-            m_cameraPitch += m_config.keyLookSpeed * deltaTime;
-        }
-        if (IsKeyDown(VK_DOWN))
-        {
-            m_cameraPitch -= m_config.keyLookSpeed * deltaTime;
-        }
-        m_cameraPitch = std::clamp(m_cameraPitch, -maxPitch, maxPitch);
     }
 
     // Register the window class and create the main render window at
@@ -1183,42 +889,25 @@ private:
 
     PushConstants BuildPushConstants() const
     {
-        PushConstants constants{};
-        constants.cameraPositionFrame[0] = m_cameraPosition.x;
-        constants.cameraPositionFrame[1] = m_cameraPosition.y;
-        constants.cameraPositionFrame[2] = m_cameraPosition.z;
-        constants.cameraPositionFrame[3] = static_cast<float>(m_frameIndex);
-
-        const Vec3 forward = GetCameraForward();
+        const Vec3 forward = m_camera.Forward();
         const Vec3 right = Normalize(Cross({0.0f, 1.0f, 0.0f}, forward));
         const Vec3 up = Normalize(Cross(forward, right));
-
-        constants.cameraForwardSamples[0] = forward.x;
-        constants.cameraForwardSamples[1] = forward.y;
-        constants.cameraForwardSamples[2] = forward.z;
-        constants.cameraForwardSamples[3] = static_cast<float>(m_config.samplesPerPixel);
-        constants.cameraRightBounces[0] = right.x;
-        constants.cameraRightBounces[1] = right.y;
-        constants.cameraRightBounces[2] = right.z;
-        constants.cameraRightBounces[3] = 0.0f; // (was max bounces; unused in the sky-only renderer)
-        constants.cameraUpTanHalfFovY[0] = up.x;
-        constants.cameraUpTanHalfFovY[1] = up.y;
-        constants.cameraUpTanHalfFovY[2] = up.z;
-        constants.cameraUpTanHalfFovY[3] = std::tan(m_config.fovYDegrees * 0.5f * kPi / 180.0f);
-        constants.skyBottomExposure[0] = m_config.skyBottomColor[0];
-        constants.skyBottomExposure[1] = m_config.skyBottomColor[1];
-        constants.skyBottomExposure[2] = m_config.skyBottomColor[2];
-        constants.skyBottomExposure[3] = m_config.skyExposure;
-        constants.skyTopAspect[0] = m_config.skyTopColor[0];
-        constants.skyTopAspect[1] = m_config.skyTopColor[1];
-        constants.skyTopAspect[2] = m_config.skyTopColor[2];
-        constants.skyTopAspect[3] =
+        const float aspect =
             static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
 
-        constants.polarizer[0] = m_polarizerEnabled ? 1.0f : 0.0f;
-        constants.polarizer[1] = m_polarizerAngleRadians;
-        constants.polarizer[2] = m_polarizerElliptical ? m_polarizerEllipticityRadians : 0.0f;
-        constants.polarizer[3] = 0.0f;
+        PushConstants constants{};
+        PackVec4(constants.cameraPositionFrame, m_camera.Position(), static_cast<float>(m_frameIndex));
+        PackVec4(constants.cameraForwardSamples, forward, static_cast<float>(m_config.samplesPerPixel));
+        // w was max bounces; unused in the sky-only renderer.
+        PackVec4(constants.cameraRightBounces, right, 0.0f);
+        PackVec4(constants.cameraUpTanHalfFovY, up, std::tan(m_config.fovYDegrees * 0.5f * kPi / 180.0f));
+        PackVec4(constants.skyBottomExposure, m_config.skyBottomColor, m_config.skyExposure);
+        PackVec4(constants.skyTopAspect, m_config.skyTopColor, aspect);
+        PackVec4(constants.polarizer,
+                 std::array<float, 3>{m_camera.PolarizerEnabled() ? 1.0f : 0.0f,
+                                      m_camera.PolarizerAngleRadians(),
+                                      m_camera.PolarizerEllipticityRadians()},
+                 0.0f);
 
         constants.imageSize[0] = m_swapchainExtent.width;
         constants.imageSize[1] = m_swapchainExtent.height;
@@ -1362,7 +1051,7 @@ private:
             ReloadRuntimeConfigIfNeeded();
             const double deltaSeconds = std::chrono::duration<double>(frameStart - previousFrameStart).count();
             previousFrameStart = frameStart;
-            UpdateCamera(deltaSeconds);
+            m_camera.Update(deltaSeconds, m_window, m_config);
             RenderFrame();
             const auto frameEnd = Clock::now();
 
@@ -1435,24 +1124,11 @@ private:
     std::filesystem::path m_configPath;
     std::filesystem::file_time_type m_configLastWriteTime{};
     std::chrono::steady_clock::time_point m_lastConfigPollTime{};
-    Vec3 m_cameraPosition{};
-    float m_cameraYaw = 0.0f;
-    float m_cameraPitch = 0.0f;
-    bool m_resetCameraKeyDown = false;
-    bool m_mouseLookActive = false;
-    POINT m_lastMousePosition{};
 
-    // Camera polarization filter. P toggles it on/off; C switches between a
-    // linear analyzer and an elliptical one. In linear mode [ and ] rotate the
-    // major axis (measured in the image plane from camera-right, positive
-    // toward camera-down on screen — counterclockwise facing the incoming
-    // beam); in elliptical mode [ and ] adjust ellipticity (-45..+45 degrees).
-    bool m_polarizerEnabled = false;
-    float m_polarizerAngleRadians = 0.0f;
-    bool m_polarizerToggleKeyDown = false;
-    bool m_polarizerElliptical = false;
-    bool m_polarizerModeKeyDown = false;
-    float m_polarizerEllipticityRadians = kPi * 0.125f;
+    // Look-only camera + polarization-filter state and the Win32 input that
+    // drives them. The renderer only reads the resulting basis / polarizer
+    // parameters when building push constants.
+    CameraController m_camera;
 };
 
 // Public C-style entry point exported by VulkanPathTracer.h. Constructs a
