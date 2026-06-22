@@ -1,6 +1,6 @@
 # Vulkanic
 
-A lightweight, purely native C++17 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
+A lightweight, purely native C++20 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
 renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
 then views it through a runtime camera analyzer that switches between linear and elliptical
 polarization.
@@ -71,7 +71,7 @@ A compact repository whose only job is to render the polarized sky and let you s
 - **GPU:** any Vulkan 1.2+ GPU with a compute queue, a storage-image-capable swapchain, and
   `shaderStorageImageWriteWithoutFormat` support (no hardware ray tracing required).
 - **Vulkan SDK:** installed and exposed via the `VULKAN_SDK` environment variable.
-- **Compiler:** any C++17 toolchain — MSVC via Visual Studio is the tested path.
+- **Compiler:** any C++20 toolchain — MSVC via Visual Studio is the tested path.
 - **CMake:** 3.20 or newer.
 - **Network during first configure:** CMake fetches `vk-bootstrap` and Vulkan Memory Allocator unless
   they are already present in the build cache.
@@ -92,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
 ```
 
 Or build manually with CMake. The project uses the Ninja generator in the script, but any generator
-with a working C++17 toolchain and Vulkan SDK can work:
+with a working C++20 toolchain and Vulkan SDK can work:
 
 ```bash
 mkdir build
@@ -144,6 +144,9 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 - **C++ Core:**
   - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
     message loop, Vulkan-Hpp RAII handles, VMA-backed buffers, and descriptor sets.
+  - `CameraController.h` / `.cpp` — the look-only camera and polarization-analyzer state, plus the
+    raw Win32 keyboard/mouse input that drives them; the renderer reads the resulting camera basis
+    and analyzer parameters when building push constants.
   - `MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
   - `RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
   - `VmaUsage.cpp` — single translation unit that hosts the VMA implementation.
