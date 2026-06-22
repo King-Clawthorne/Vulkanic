@@ -13,8 +13,8 @@ polarization.
 
 Most renderers treat polarization as a post-process trick or ignore it entirely, and the sky as a
 flat gradient or scalar single-scattering model. Scientific polarized-sky models usually live
-offline in radiative-transfer packages. Vulkanic bridges that gap: a readable, dependency-free
-Vulkan program that interactively explores *physically motivated* sky polarization and how an ideal
+offline in radiative-transfer packages. Vulkanic bridges that gap: a readable native Vulkan
+program that interactively explores *physically motivated* sky polarization and how an ideal
 analyzer responds to it.
 
 ### Task
@@ -22,7 +22,8 @@ analyzer responds to it.
 Build a complete, runnable real-time simulator that:
 
 - Targets a raw Vulkan compute pipeline on Windows.
-- Has **zero** third-party wrappers — no GLFW, no GLM, no TinyObjLoader, no nlohmann::json.
+- Uses Win32 directly for the window/input layer and keeps math/config parsing in-repo; CMake fetches
+  `vk-bootstrap` for Vulkan bootstrap setup and Vulkan Memory Allocator for buffer allocation.
 - Carries the full Stokes vector (I, Q, U, V) through the atmosphere, not just scalar RGB radiance.
 - Lets the user aim the camera around the sky dome and switch between linear and elliptical analyzer
   modes at runtime.
@@ -72,6 +73,8 @@ A compact repository whose only job is to render the polarized sky and let you s
 - **Vulkan SDK:** installed and exposed via the `VULKAN_SDK` environment variable.
 - **Compiler:** any C++17 toolchain — MSVC via Visual Studio is the tested path.
 - **CMake:** 3.20 or newer.
+- **Network during first configure:** CMake fetches `vk-bootstrap` and Vulkan Memory Allocator unless
+  they are already present in the build cache.
 
 ## Building
 
@@ -88,7 +91,8 @@ For a clean rebuild:
 powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
 ```
 
-Or build manually with CMake:
+Or build manually with CMake. The project uses the Ninja generator in the script, but any generator
+with a working C++17 toolchain and Vulkan SDK can work:
 
 ```bash
 mkdir build
@@ -134,16 +138,18 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 
 - **Shaders (`glslc` → SPIR-V):**
   - `path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
-    tonemap → image (compute, 8×8 workgroups).
+    tonemap → swapchain storage image (compute, 8×8 workgroups).
   - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
-  - `path_tracer_common.glsl` — descriptor bindings, push constants, RNG, tonemap.
+  - `path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
-    message loop.
+    message loop, Vulkan-Hpp RAII handles, VMA-backed buffers, and descriptor sets.
   - `MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
   - `RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
+  - `VmaUsage.cpp` — single translation unit that hosts the VMA implementation.
   - `main.cpp` — entry point.
 - **Build & Configuration:**
   - `build.ps1` — PowerShell wrapper that loads the MSVC environment and runs CMake.
-  - `CMakeLists.txt` — CMake project; also drives GLSL → SPIR-V compilation.
+  - `CMakeLists.txt` — CMake project; fetches `vk-bootstrap`/VMA and drives GLSL → SPIR-V
+    compilation.
   - `path_tracer_config.json` — sky parameters, camera, input, render settings.
