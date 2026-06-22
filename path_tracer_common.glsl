@@ -12,7 +12,7 @@
 #ifndef PATH_TRACER_COMMON_INCLUDED
 #define PATH_TRACER_COMMON_INCLUDED
 
-layout(set = 0, binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 2) uniform SceneData
 {
     vec4 skyBetaRayleighBetaM;

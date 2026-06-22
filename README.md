@@ -68,8 +68,8 @@ A compact repository whose only job is to render the polarized sky and let you s
 ## System Requirements
 
 - **OS:** Windows 10 / 11 (uses `VK_USE_PLATFORM_WIN32_KHR`).
-- **GPU:** any Vulkan 1.2+ GPU with a compute queue and a storage-image-capable swapchain (no
-  hardware ray tracing required).
+- **GPU:** any Vulkan 1.2+ GPU with a compute queue, a storage-image-capable swapchain, and
+  `shaderStorageImageWriteWithoutFormat` support (no hardware ray tracing required).
 - **Vulkan SDK:** installed and exposed via the `VULKAN_SDK` environment variable.
 - **Compiler:** any C++17 toolchain — MSVC via Visual Studio is the tested path.
 - **CMake:** 3.20 or newer.

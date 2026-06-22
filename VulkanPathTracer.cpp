@@ -896,9 +896,13 @@ private:
     // the non-semantic-info extension that keeps debugPrintfEXT working.
     void PickPhysicalDevice()
     {
+        VkPhysicalDeviceFeatures requiredFeatures{};
+        requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+
         auto deviceResult = vkb::PhysicalDeviceSelector{m_vkbInstance}
                                 .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
                                 .set_minimum_version(1, 2)
+                                .set_required_features(requiredFeatures)
                                 .add_required_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME)
                                 .require_present()
                                 .select();
