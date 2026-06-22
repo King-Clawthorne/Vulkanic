@@ -32,6 +32,8 @@
 #include <windows.h>
 #include <vulkan/vulkan.h>
 
+#include <VkBootstrap.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -124,15 +126,6 @@ struct QueueFamilyIndices
     {
         return graphicsFamily.has_value() && presentFamily.has_value();
     }
-};
-
-// Snapshot of what a (physical device, surface) pair supports. Captured
-// once during init and again on swapchain recreation (window resize).
-struct SwapchainSupport
-{
-    VkSurfaceCapabilitiesKHR capabilities{};
-    std::vector<VkSurfaceFormatKHR> formats;
-    std::vector<VkPresentModeKHR> presentModes;
 };
 
 // Generic GPU buffer + its backing memory. Owned together so destruction
@@ -889,31 +882,24 @@ private:
         std::puts("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
     }
 
-    // Create the VkInstance with the platform surface extensions
-    // required for Win32. No validation layers are requested by default;
-    // they can be enabled via the SDK's environment variables.
+    // Create the VkInstance via vk-bootstrap, which auto-enables the Win32
+    // surface extensions. Validation layers are requested only when present so
+    // the SDK's debug layers light up without a hard dependency on them.
     void CreateInstance()
     {
-        const std::array<const char*, 2> extensions = {
-            VK_KHR_SURFACE_EXTENSION_NAME,
-            VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-        };
+        auto instanceResult = vkb::InstanceBuilder{}
+                                  .set_app_name("Vulkan Path Tracer")
+                                  .set_engine_name("None")
+                                  .require_api_version(1, 2, 0)
+                                  .request_validation_layers()
+                                  .build();
+        if (!instanceResult)
+        {
+            throw std::runtime_error("Failed to create Vulkan instance: " + instanceResult.error().message());
+        }
 
-        VkApplicationInfo applicationInfo{};
-        applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        applicationInfo.pApplicationName = "Vulkan Path Tracer";
-        applicationInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-        applicationInfo.pEngineName = "None";
-        applicationInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        applicationInfo.apiVersion = VK_API_VERSION_1_2;
-
-        VkInstanceCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        createInfo.pApplicationInfo = &applicationInfo;
-        createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
-        createInfo.ppEnabledExtensionNames = extensions.data();
-
-        ThrowVk(vkCreateInstance(&createInfo, nullptr, &m_instance), "Failed to create Vulkan instance");
+        m_vkbInstance = instanceResult.value();
+        m_instance = m_vkbInstance.instance;
     }
 
     // Create the Win32 VkSurfaceKHR linking the HWND to the Vulkan
@@ -928,185 +914,58 @@ private:
                 "Failed to create Win32 surface");
     }
 
-    QueueFamilyIndices FindQueueFamilies(VkPhysicalDevice device) const
-    {
-        QueueFamilyIndices indices;
-
-        uint32_t queueFamilyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
-        std::vector<VkQueueFamilyProperties> families(queueFamilyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, families.data());
-
-        for (uint32_t i = 0; i < queueFamilyCount; ++i)
-        {
-            if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
-            {
-                indices.graphicsFamily = i;
-            }
-
-            VkBool32 presentSupported = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_surface, &presentSupported);
-            if (presentSupported == VK_TRUE)
-            {
-                indices.presentFamily = i;
-            }
-
-            if (indices.IsComplete())
-            {
-                break;
-            }
-        }
-
-        return indices;
-    }
-
-    SwapchainSupport QuerySwapchainSupport(VkPhysicalDevice device) const
-    {
-        SwapchainSupport support{};
-        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, m_surface, &support.capabilities);
-
-        uint32_t formatCount = 0;
-        vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, nullptr);
-        support.formats.resize(formatCount);
-        if (formatCount > 0)
-        {
-            vkGetPhysicalDeviceSurfaceFormatsKHR(device, m_surface, &formatCount, support.formats.data());
-        }
-
-        uint32_t presentModeCount = 0;
-        vkGetPhysicalDeviceSurfacePresentModesKHR(device, m_surface, &presentModeCount, nullptr);
-        support.presentModes.resize(presentModeCount);
-        if (presentModeCount > 0)
-        {
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device,
-                                                      m_surface,
-                                                      &presentModeCount,
-                                                      support.presentModes.data());
-        }
-
-        return support;
-    }
-
-    bool IsDeviceSuitable(VkPhysicalDevice device)
-    {
-        const auto queueFamilies = FindQueueFamilies(device);
-        if (!queueFamilies.IsComplete())
-        {
-            return false;
-        }
-
-        uint32_t extensionCount = 0;
-        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
-        std::vector<VkExtensionProperties> extensions(extensionCount);
-        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
-
-        // Compute-only renderer: a presentable swapchain is the only hard
-        // requirement (compute itself is core Vulkan).
-        bool hasSwapchain = false;
-        for (const auto& extension : extensions)
-        {
-            if (std::strcmp(extension.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
-            {
-                hasSwapchain = true;
-                break;
-            }
-        }
-        if (!hasSwapchain)
-        {
-            return false;
-        }
-
-        const auto swapchainSupport = QuerySwapchainSupport(device);
-        if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty())
-        {
-            return false;
-        }
-
-        return (swapchainSupport.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
-    }
-
-    // Iterate adapters and select the first one that supports the required
-    // queue families and a storage-image swapchain. Throws if none qualifies.
+    // Select a physical device via vk-bootstrap. vkb requires a presentable
+    // swapchain by default; we additionally require the swapchain surface to
+    // support storage-image usage (the compute shader writes it directly) and
+    // the non-semantic-info extension that keeps debugPrintfEXT working.
     void PickPhysicalDevice()
     {
-        uint32_t deviceCount = 0;
-        ThrowVk(vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr),
-                "Failed to enumerate Vulkan physical devices");
-        if (deviceCount == 0)
+        auto deviceResult = vkb::PhysicalDeviceSelector{m_vkbInstance}
+                                .set_surface(m_surface)
+                                .set_minimum_version(1, 2)
+                                .add_required_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME)
+                                .require_present()
+                                .select();
+        if (!deviceResult)
         {
-            throw std::runtime_error("No Vulkan-capable GPU found.");
+            throw std::runtime_error("Failed to select Vulkan physical device: " + deviceResult.error().message());
         }
 
-        std::vector<VkPhysicalDevice> devices(deviceCount);
-        ThrowVk(vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data()),
-                "Failed to enumerate Vulkan physical devices");
+        m_vkbPhysicalDevice = deviceResult.value();
+        m_physicalDevice = m_vkbPhysicalDevice.physical_device;
 
-        for (VkPhysicalDevice device : devices)
+        VkSurfaceCapabilitiesKHR capabilities{};
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &capabilities);
+        if ((capabilities.supportedUsageFlags & VK_IMAGE_USAGE_STORAGE_BIT) == 0)
         {
-            if (IsDeviceSuitable(device))
-            {
-                m_physicalDevice = device;
-                m_queueFamilies = FindQueueFamilies(device);
-                break;
-            }
-        }
-
-        if (m_physicalDevice == VK_NULL_HANDLE)
-        {
-            throw std::runtime_error("No Vulkan device supports storage-image swapchains for this app.");
+            throw std::runtime_error("Selected GPU does not support storage-image swapchains for this app.");
         }
     }
 
-    // Create the VkDevice (swapchain extension only) and fetch the
-    // graphics+present queue handles.
+    // Create the VkDevice via vk-bootstrap and fetch the graphics+present
+    // queue handles and their family indices. vkb already enabled the
+    // swapchain and non-semantic-info extensions during device selection.
     void CreateLogicalDevice()
     {
-        const float queuePriority = 1.0f;
-        std::vector<VkDeviceQueueCreateInfo> queueInfos;
-        const std::array<uint32_t, 2> uniqueFamilies = {
-            m_queueFamilies.graphicsFamily.value(),
-            m_queueFamilies.presentFamily.value(),
-        };
-
-        std::vector<uint32_t> familyList;
-        for (uint32_t family : uniqueFamilies)
+        auto deviceResult = vkb::DeviceBuilder{m_vkbPhysicalDevice}.build();
+        if (!deviceResult)
         {
-            if (std::find(familyList.begin(), familyList.end(), family) == familyList.end())
-            {
-                familyList.push_back(family);
-            }
+            throw std::runtime_error("Failed to create Vulkan logical device: " + deviceResult.error().message());
         }
 
-        for (uint32_t family : familyList)
+        m_vkbDevice = deviceResult.value();
+        m_device = m_vkbDevice.device;
+
+        auto graphicsQueue = m_vkbDevice.get_queue(vkb::QueueType::graphics);
+        auto presentQueue = m_vkbDevice.get_queue(vkb::QueueType::present);
+        if (!graphicsQueue || !presentQueue)
         {
-            VkDeviceQueueCreateInfo queueInfo{};
-            queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-            queueInfo.queueFamilyIndex = family;
-            queueInfo.queueCount = 1;
-            queueInfo.pQueuePriorities = &queuePriority;
-            queueInfos.push_back(queueInfo);
+            throw std::runtime_error("Failed to retrieve graphics/present queues.");
         }
-
-        // Compute-only renderer: a swapchain is the only device extension we
-        // need. (Shader non-semantic info keeps debugPrintfEXT working under the
-        // -g shader build.)
-        const std::array<const char*, 2> deviceExtensions = {
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-            VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
-        };
-
-        VkDeviceCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
-        createInfo.pQueueCreateInfos = queueInfos.data();
-        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-        createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-
-        ThrowVk(vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device),
-                "Failed to create Vulkan logical device");
-
-        vkGetDeviceQueue(m_device, m_queueFamilies.graphicsFamily.value(), 0, &m_graphicsQueue);
-        vkGetDeviceQueue(m_device, m_queueFamilies.presentFamily.value(), 0, &m_presentQueue);
+        m_graphicsQueue = graphicsQueue.value();
+        m_presentQueue = presentQueue.value();
+        m_queueFamilies.graphicsFamily = m_vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+        m_queueFamilies.presentFamily = m_vkbDevice.get_queue_index(vkb::QueueType::present).value();
     }
 
     uint32_t FindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties) const
@@ -1243,118 +1102,40 @@ private:
         UploadSceneDataFromConfig();
     }
 
-    VkSurfaceFormatKHR ChooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const
-    {
-        for (const auto& format : formats)
-        {
-            if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-            {
-                return format;
-            }
-        }
-
-        return formats.front();
-    }
-
-    VkPresentModeKHR ChoosePresentMode(const std::vector<VkPresentModeKHR>& modes) const
-    {
-        for (VkPresentModeKHR mode : modes)
-        {
-            if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-            {
-                return mode;
-            }
-        }
-
-        for (VkPresentModeKHR mode : modes)
-        {
-            if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
-            {
-                return mode;
-            }
-        }
-
-        return VK_PRESENT_MODE_FIFO_KHR;
-    }
-
-    // Create (or recreate after a resize) the swapchain and its image
-    // views. The swapchain images are created with VK_IMAGE_USAGE_STORAGE_BIT
-    // and written directly by the compute shader (no separate offscreen image
-    // or blit), so the surface format must support storage usage.
+    // Create the swapchain and its image views via vk-bootstrap. The images
+    // are created with VK_IMAGE_USAGE_STORAGE_BIT and written directly by the
+    // compute shader (no separate offscreen image or blit). Present-mode
+    // priority is IMMEDIATE → MAILBOX → FIFO (FIFO is the guaranteed fallback);
+    // at least frameCount images are requested so per-frame resources line up.
     void CreateSwapchain()
     {
-        const auto support = QuerySwapchainSupport(m_physicalDevice);
-        const auto surfaceFormat = ChooseSurfaceFormat(support.formats);
-        const auto presentMode = ChoosePresentMode(support.presentModes);
-
-        m_swapchainExtent = {m_config.width, m_config.height};
-        uint32_t imageCount = support.capabilities.minImageCount + 1;
-        if (support.capabilities.maxImageCount > 0 && m_config.frameCount > support.capabilities.maxImageCount)
+        auto swapchainResult = vkb::SwapchainBuilder{m_vkbDevice}
+                                   .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                                   .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+                                   .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
+                                   .set_desired_extent(m_config.width, m_config.height)
+                                   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
+                                   .set_required_min_image_count(m_config.frameCount)
+                                   .build();
+        if (!swapchainResult)
         {
-            throw std::runtime_error("Configured frameCount exceeds the swapchain image limit for this surface.");
-        }
-        if (support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount)
-        {
-            imageCount = support.capabilities.maxImageCount;
-        }
-        imageCount = std::max(imageCount, m_config.frameCount);
-
-        const uint32_t queueFamilyIndices[] = {
-            m_queueFamilies.graphicsFamily.value(),
-            m_queueFamilies.presentFamily.value(),
-        };
-
-        VkSwapchainCreateInfoKHR createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        createInfo.surface = m_surface;
-        createInfo.minImageCount = imageCount;
-        createInfo.imageFormat = surfaceFormat.format;
-        createInfo.imageColorSpace = surfaceFormat.colorSpace;
-        createInfo.imageExtent = m_swapchainExtent;
-        createInfo.imageArrayLayers = 1;
-        createInfo.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT;
-        createInfo.preTransform = support.capabilities.currentTransform;
-        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        createInfo.presentMode = presentMode;
-        createInfo.clipped = VK_TRUE;
-        if (m_queueFamilies.graphicsFamily != m_queueFamilies.presentFamily)
-        {
-            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-            createInfo.queueFamilyIndexCount = 2;
-            createInfo.pQueueFamilyIndices = queueFamilyIndices;
-        }
-        else
-        {
-            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            throw std::runtime_error("Failed to create Vulkan swapchain: " + swapchainResult.error().message());
         }
 
-        ThrowVk(vkCreateSwapchainKHR(m_device, &createInfo, nullptr, &m_swapchain),
-                "Failed to create Vulkan swapchain");
+        vkb::Swapchain swapchain = swapchainResult.value();
+        m_swapchain = swapchain.swapchain;
+        m_swapchainFormat = swapchain.image_format;
+        m_swapchainExtent = swapchain.extent;
 
-        m_swapchainFormat = surfaceFormat.format;
-
-        uint32_t actualImageCount = 0;
-        ThrowVk(vkGetSwapchainImagesKHR(m_device, m_swapchain, &actualImageCount, nullptr),
-                "Failed to query swapchain image count");
-        m_swapchainImages.resize(actualImageCount);
-        ThrowVk(vkGetSwapchainImagesKHR(m_device, m_swapchain, &actualImageCount, m_swapchainImages.data()),
-                "Failed to get swapchain images");
-        m_swapchainImageViews.resize(actualImageCount);
-        m_swapchainLayouts.assign(actualImageCount, VK_IMAGE_LAYOUT_UNDEFINED);
-
-        for (size_t i = 0; i < m_swapchainImages.size(); ++i)
+        auto images = swapchain.get_images();
+        auto imageViews = swapchain.get_image_views();
+        if (!images || !imageViews)
         {
-            VkImageViewCreateInfo viewInfo{};
-            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewInfo.image = m_swapchainImages[i];
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewInfo.format = m_swapchainFormat;
-            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewInfo.subresourceRange.levelCount = 1;
-            viewInfo.subresourceRange.layerCount = 1;
-            ThrowVk(vkCreateImageView(m_device, &viewInfo, nullptr, &m_swapchainImageViews[i]),
-                    "Failed to create swapchain image view");
+            throw std::runtime_error("Failed to retrieve swapchain images/views.");
         }
+        m_swapchainImages = images.value();
+        m_swapchainImageViews = imageViews.value();
+        m_swapchainLayouts.assign(m_swapchainImages.size(), VK_IMAGE_LAYOUT_UNDEFINED);
     }
 
     // Define the descriptor-set layout used by the compute pipeline: the
@@ -1830,6 +1611,12 @@ private:
     };
 
     HWND m_window = nullptr;
+
+    // vk-bootstrap wrappers retained for the lifetime of the app: they own the
+    // builder-side metadata used to fetch queues, image views, etc.
+    vkb::Instance m_vkbInstance;
+    vkb::PhysicalDevice m_vkbPhysicalDevice;
+    vkb::Device m_vkbDevice;
 
     VkInstance m_instance = VK_NULL_HANDLE;
     VkSurfaceKHR m_surface = VK_NULL_HANDLE;
