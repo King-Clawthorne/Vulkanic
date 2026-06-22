@@ -12,48 +12,44 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <numbers>
 #include <string>
 #include <vector>
 
 // Single source of truth for pi across the C++ side; shaders define their
 // own copies in path_tracer_common.glsl.
-inline constexpr float kPi = 3.14159265358979323846f;
+inline constexpr float kPi = std::numbers::pi_v<float>;
 
 // Plain 3-component float vector. Trivially copyable, matches std430 layout
 // for a tightly-packed vec3 on the GPU once padded by the caller.
+//
+// The C++20 defaulted operator== synthesizes the member-wise equality the old
+// hand-written comparison provided (and, with it, operator!= for free).
 struct Vec3
 {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
+
+    [[nodiscard]] friend constexpr bool operator==(const Vec3&, const Vec3&) = default;
 };
 
-inline bool operator==(const Vec3& left, const Vec3& right)
-{
-    return left.x == right.x && left.y == right.y && left.z == right.z;
-}
-
-inline bool operator!=(const Vec3& left, const Vec3& right)
-{
-    return !(left == right);
-}
-
-inline Vec3 operator+(const Vec3& left, const Vec3& right)
+[[nodiscard]] constexpr Vec3 operator+(const Vec3& left, const Vec3& right)
 {
     return {left.x + right.x, left.y + right.y, left.z + right.z};
 }
 
-inline Vec3 operator-(const Vec3& left, const Vec3& right)
+[[nodiscard]] constexpr Vec3 operator-(const Vec3& left, const Vec3& right)
 {
     return {left.x - right.x, left.y - right.y, left.z - right.z};
 }
 
-inline Vec3 operator*(const Vec3& value, float scalar)
+[[nodiscard]] constexpr Vec3 operator*(const Vec3& value, float scalar)
 {
     return {value.x * scalar, value.y * scalar, value.z * scalar};
 }
 
-inline Vec3& operator+=(Vec3& left, const Vec3& right)
+constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 {
     left.x += right.x;
     left.y += right.y;
@@ -61,12 +57,12 @@ inline Vec3& operator+=(Vec3& left, const Vec3& right)
     return left;
 }
 
-inline float Length(const Vec3& value)
+[[nodiscard]] inline float Length(const Vec3& value)
 {
     return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
 }
 
-inline Vec3 Normalize(const Vec3& value)
+[[nodiscard]] inline Vec3 Normalize(const Vec3& value)
 {
     const float length = Length(value);
     if (length <= 0.0f)
@@ -76,7 +72,7 @@ inline Vec3 Normalize(const Vec3& value)
     return value * (1.0f / length);
 }
 
-inline Vec3 Cross(const Vec3& left, const Vec3& right)
+[[nodiscard]] constexpr Vec3 Cross(const Vec3& left, const Vec3& right)
 {
     return {
         left.y * right.z - left.z * right.y,

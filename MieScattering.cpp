@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <numbers>
 
 // Lorenz–Mie implementation following Bohren & Huffman, "Absorption and
 // Scattering of Light by Small Particles" (1983), chapter 4. Everything is
@@ -12,7 +13,7 @@
 
 namespace
 {
-constexpr double kPi = 3.14159265358979323846;
+constexpr double kPi = std::numbers::pi_v<double>;
 using Complex = std::complex<double>;
 
 // Number of Mie terms to sum (Wiscombe 1980 convergence criterion) plus a

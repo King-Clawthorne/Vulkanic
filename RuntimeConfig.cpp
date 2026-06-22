@@ -15,12 +15,15 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdlib>
+#include <format>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <ranges>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
@@ -411,7 +414,7 @@ private:
 
 std::string Quote(std::string_view value)
 {
-    return "\"" + std::string(value) + "\"";
+    return std::format("\"{}\"", value);
 }
 
 const JsonValue* FindMember(const JsonValue::Object& object, std::string_view key)
@@ -512,7 +515,7 @@ void ParseOptionalJsonFloat3(const JsonValue::Object& object,
 
 bool HasNegativeElement(const std::array<float, 3>& value)
 {
-    return value[0] < 0.0f || value[1] < 0.0f || value[2] < 0.0f;
+    return std::ranges::any_of(value, [](float component) { return component < 0.0f; });
 }
 
 // Pull the global render / camera / input / sky sections off the root
@@ -677,10 +680,8 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     {
         throw std::runtime_error("\"OZONE_CENTER\" must be non-negative and \"OZONE_WIDTH\" must be greater than 0.");
     }
-    if (HasNegativeElement(config.skySpectral.sunLimbDarkening)
-        || config.skySpectral.sunLimbDarkening[0] > 1.0f
-        || config.skySpectral.sunLimbDarkening[1] > 1.0f
-        || config.skySpectral.sunLimbDarkening[2] > 1.0f)
+    if (!std::ranges::all_of(config.skySpectral.sunLimbDarkening,
+                             [](float value) { return value >= 0.0f && value <= 1.0f; }))
     {
         throw std::runtime_error("\"SUN_LIMB_DARKENING\" values must be in [0, 1].");
     }
@@ -722,10 +723,8 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     {
         throw std::runtime_error("\"AEROSOL_MEAN_RADIUS_UM\" must be > 0 and \"AEROSOL_SIGMA\" must be > 1.");
     }
-    if (HasNegativeElement(config.skySpectral.aerosolWavelengthsNmRgb)
-        || config.skySpectral.aerosolWavelengthsNmRgb[0] <= 0.0f
-        || config.skySpectral.aerosolWavelengthsNmRgb[1] <= 0.0f
-        || config.skySpectral.aerosolWavelengthsNmRgb[2] <= 0.0f)
+    if (!std::ranges::all_of(config.skySpectral.aerosolWavelengthsNmRgb,
+                             [](float value) { return value > 0.0f; }))
     {
         throw std::runtime_error("\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
     }

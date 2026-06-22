@@ -37,13 +37,17 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <cwchar>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <optional>
+#include <ranges>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -76,9 +80,7 @@ static void ThrowVk(VkResult result, const char* message)
 {
     if (result != VK_SUCCESS)
     {
-        char buffer[256]{};
-        std::snprintf(buffer, sizeof(buffer), "%s (VkResult=%d)", message, static_cast<int>(result));
-        throw std::runtime_error(buffer);
+        throw std::runtime_error(std::format("{} (VkResult={})", message, static_cast<int>(result)));
     }
 }
 
@@ -505,7 +507,7 @@ private:
         const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(params);
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        UploadToBuffer(m_mieScatteringBuffer, table.data(), table.size() * sizeof(MieMatrixEntry));
+        UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
         std::printf("[Sky] Baked Lorenz-Mie scattering matrix: %d angle bins x 3 bands.\n", params.angleBins);
     }
 
@@ -522,7 +524,7 @@ private:
     void UploadSceneDataFromConfig()
     {
         const SceneData sceneData = BuildSceneData();
-        UploadToBuffer(m_sceneDataBuffer, &sceneData, sizeof(sceneData));
+        UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span{&sceneData, 1}));
     }
 
     // Bind the live resources (output image, scene UBO, Mie SSBO) into the
@@ -1000,14 +1002,17 @@ private:
 
     // Copy host data into the buffer's persistently mapped allocation, then
     // flush so the write is visible to the GPU even on non-coherent memory.
-    void UploadToBuffer(const BufferAllocation& allocation, const void* data, size_t dataSize) const
+    // The std::span overload lets callers pass any trivially-copyable object or
+    // contiguous range via std::as_bytes without hand-computing byte sizes.
+    void UploadToBuffer(const BufferAllocation& allocation, std::span<const std::byte> data) const
     {
-        if (dataSize > static_cast<size_t>(allocation.size))
+        if (data.size() > static_cast<size_t>(allocation.size))
         {
             throw std::runtime_error("Upload exceeds destination buffer size.");
         }
-        std::memcpy(allocation.mapped, data, dataSize);
-        ThrowVk(vmaFlushAllocation(m_allocator, allocation.allocation, 0, dataSize), "Failed to flush buffer allocation");
+        std::memcpy(allocation.mapped, data.data(), data.size());
+        ThrowVk(vmaFlushAllocation(m_allocator, allocation.allocation, 0, data.size()),
+                "Failed to flush buffer allocation");
     }
 
     // Allocate the scene UBO + Mie SSBO and upload the sky parameters. There
@@ -1069,11 +1074,12 @@ private:
         // Lorenz–Mie scattering-matrix SSBO (binding 7) — all read/written by
         // the ray-generation shader. The binding numbers keep their original
         // values (gaps are legal) so the shared sky header is untouched.
+        using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
         const std::array<vk::DescriptorSetLayoutBinding, 3> bindings = {
-            vk::DescriptorSetLayoutBinding{0, vk::DescriptorType::eStorageImage, 1, compute},
-            vk::DescriptorSetLayoutBinding{2, vk::DescriptorType::eUniformBuffer, 1, compute},
-            vk::DescriptorSetLayoutBinding{7, vk::DescriptorType::eStorageBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
+            vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
         };
 
         vk::DescriptorSetLayoutCreateInfo createInfo{};
@@ -1085,7 +1091,7 @@ private:
     {
         vk::ShaderModuleCreateInfo createInfo{};
         createInfo.codeSize = bytecode.size();
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(bytecode.data());
+        createInfo.pCode = std::bit_cast<const uint32_t*>(bytecode.data());
         return vk::raii::ShaderModule(m_device, createInfo);
     }
 
@@ -1118,11 +1124,12 @@ private:
     // because they depend on scene resources that are created later.
     void CreateDescriptorSets()
     {
+        using enum vk::DescriptorType;
         const uint32_t count = static_cast<uint32_t>(m_swapchainImageViews.size());
         const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
-            vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, count},
-            vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, count},
-            vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, count},
+            vk::DescriptorPoolSize{eStorageImage, count},
+            vk::DescriptorPoolSize{eUniformBuffer, count},
+            vk::DescriptorPoolSize{eStorageBuffer, count},
         };
 
         vk::DescriptorPoolCreateInfo poolInfo{};
@@ -1322,13 +1329,8 @@ private:
     // milliseconds — cheap diagnostic for performance tuning.
     void UpdateWindowTitle(double fps, double frameMs)
     {
-        wchar_t buffer[256]{};
-        std::swprintf(buffer,
-                      sizeof(buffer) / sizeof(buffer[0]),
-                      L"Vulkan Path Tracer - %.1f FPS (%.2f ms)",
-                      fps,
-                      frameMs);
-        SetWindowTextW(m_window, buffer);
+        const std::wstring title = std::format(L"Vulkan Path Tracer - {:.1f} FPS ({:.2f} ms)", fps, frameMs);
+        SetWindowTextW(m_window, title.c_str());
     }
 
     // Main loop: pump Win32 messages, hot-reload config, advance camera,
