@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <mdspan>
 #include <numbers>
+#include <ranges>
 
 // Lorenz–Mie implementation following Bohren & Huffman, "Absorption and
 // Scattering of Light by Small Particles" (1983), chapter 4. Everything is
@@ -51,7 +53,7 @@ void MieCoefficients(double x, Complex m, std::vector<Complex>& a, std::vector<C
     double chiPrev = -std::sin(x);
     double chi = std::cos(x);
 
-    for (int n = 1; n <= nmax; ++n)
+    for (int n : std::views::iota(1, nmax + 1))
     {
         const double dn = static_cast<double>(n);
         const double psiN = (2.0 * dn - 1.0) / x * psi - psiPrev;
@@ -81,7 +83,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
     // Cache scattering-angle cosines / sines.
     std::vector<double> mu(static_cast<size_t>(bins));
     std::vector<double> sinTheta(static_cast<size_t>(bins));
-    for (int i = 0; i < bins; ++i)
+    for (int i : std::views::iota(0, bins))
     {
         const double theta = kPi * static_cast<double>(i) / static_cast<double>(bins - 1);
         mu[static_cast<size_t>(i)] = std::cos(theta);
@@ -99,8 +101,11 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
     const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
 
     std::vector<MieMatrixEntry> table(static_cast<size_t>(bins) * 3u);
+    // mdspan provides 2D [band, bin] indexing over the flat table buffer,
+    // eliminating the manual band*bins+i index arithmetic below.
+    auto tableView = std::mdspan(table.data(), 3, static_cast<size_t>(bins));
 
-    for (int band = 0; band < 3; ++band)
+    for (int band : std::views::iota(0, 3))
     {
         const double lambdaUm = params.wavelengthsNmRgb[band] * 1e-3; // nm -> µm
         const double k = 2.0 * kPi / lambdaUm;
@@ -110,7 +115,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
         std::vector<double> p33(static_cast<size_t>(bins), 0.0);
         std::vector<double> p34(static_cast<size_t>(bins), 0.0);
 
-        for (int rs = 0; rs < radiusSamples; ++rs)
+        for (int rs : std::views::iota(0, radiusSamples))
         {
             const double lnR = lnMin + dLn * static_cast<double>(rs);
             const double z = (lnR - lnRg) / lnSigma;
@@ -127,7 +132,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
             MieCoefficients(x, m, a, b);
             const int nmax = static_cast<int>(a.size()) - 1;
 
-            for (int i = 0; i < bins; ++i)
+            for (int i : std::views::iota(0, bins))
             {
                 const double u = mu[static_cast<size_t>(i)];
 
@@ -137,7 +142,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
                 Complex s1(0.0, 0.0);
                 Complex s2(0.0, 0.0);
 
-                for (int n = 1; n <= nmax; ++n)
+                for (int n : std::views::iota(1, nmax + 1))
                 {
                     const double dn = static_cast<double>(n);
                     const double tauCur = dn * u * piCur - (dn + 1.0) * piPrev;
@@ -164,18 +169,19 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
         // Rayleigh phase-matrix convention used in sky.comp. The same factor
         // scales F12/F33/F34 so the polarization ratios are preserved.
         const double dTheta = kPi / static_cast<double>(bins - 1);
-        double integral = 0.0;
-        for (int i = 0; i + 1 < bins; ++i)
-        {
-            const double fL = p11[static_cast<size_t>(i)] * sinTheta[static_cast<size_t>(i)];
-            const double fR = p11[static_cast<size_t>(i) + 1u] * sinTheta[static_cast<size_t>(i) + 1u];
-            integral += 0.5 * (fL + fR) * dTheta;
-        }
+        const double integral = std::ranges::fold_left(
+            std::views::iota(0, bins - 1),
+            0.0,
+            [&](double acc, int i) {
+                const double fL = p11[static_cast<size_t>(i)] * sinTheta[static_cast<size_t>(i)];
+                const double fR = p11[static_cast<size_t>(i) + 1u] * sinTheta[static_cast<size_t>(i) + 1u];
+                return acc + 0.5 * (fL + fR) * dTheta;
+            });
         const double norm = std::max(0.5 * integral, 1e-20);
 
-        for (int i = 0; i < bins; ++i)
+        for (int i : std::views::iota(0, bins))
         {
-            MieMatrixEntry& entry = table[static_cast<size_t>(band) * static_cast<size_t>(bins) + static_cast<size_t>(i)];
+            MieMatrixEntry& entry = tableView[band, static_cast<size_t>(i)];
             entry.f11 = static_cast<float>(p11[static_cast<size_t>(i)] / norm);
             entry.f12 = static_cast<float>(p12[static_cast<size_t>(i)] / norm);
             entry.f33 = static_cast<float>(p33[static_cast<size_t>(i)] / norm);

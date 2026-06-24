@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <exception>
+#include <print>
 
 int main()
 {
@@ -21,7 +22,7 @@ int main()
     {
         // Top-level fatal error sink — anything thrown by the tracer
         // surfaces here so the user sees a single, consistent diagnostic.
-        std::fprintf(stderr, "[ERROR] %s\n", error.what());
+        std::println(stderr, "[ERROR] {}", error.what());
         return 1;
     }
 }

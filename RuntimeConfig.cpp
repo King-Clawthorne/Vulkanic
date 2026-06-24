@@ -18,15 +18,15 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdlib>
+#include <charconv>
+#include <flat_map>
 #include <format>
 #include <fstream>
 #include <limits>
-#include <map>
 #include <ranges>
 #include <stdexcept>
 #include <string_view>
-#include <unordered_map>
+#include <system_error>
 #include <utility>
 #include <variant>
 
@@ -96,7 +96,7 @@ namespace
 struct JsonValue
 {
     using Array = std::vector<JsonValue>;
-    using Object = std::map<std::string, JsonValue>;
+    using Object = std::flat_map<std::string, JsonValue, std::less<>>;
 
     std::variant<std::nullptr_t, bool, double, std::string, Array, Object> data = nullptr;
 
@@ -339,20 +339,20 @@ private:
         throw std::runtime_error("Unterminated JSON string.");
     }
 
-    // Defer numeric parsing to std::strtod; it accepts the JSON number
-    // grammar (and a little more, but the dispatcher in ParseValue already
-    // gates on '-' or a digit so the slack is harmless).
+    // std::from_chars is locale-independent and does not require a
+    // null-terminated string, making it strictly more correct than strtod
+    // for parsing untrusted JSON text into a double.
     double ParseNumber()
     {
-        const char* begin = m_text.data() + m_position;
-        char* end = nullptr;
-        const double value = std::strtod(begin, &end);
-        if (end == begin)
+        const char* const begin = m_text.data() + m_position;
+        const char* const end = m_text.data() + m_text.size();
+        double value{};
+        const auto [ptr, ec] = std::from_chars(begin, end, value);
+        if (ec != std::errc{})
         {
             throw std::runtime_error("Expected a JSON number.");
         }
-
-        m_position = static_cast<size_t>(end - m_text.data());
+        m_position = static_cast<size_t>(ptr - m_text.data());
         return value;
     }
 
@@ -419,7 +419,7 @@ std::string Quote(std::string_view value)
 
 const JsonValue* FindMember(const JsonValue::Object& object, std::string_view key)
 {
-    const auto iterator = object.find(std::string(key));
+    const auto iterator = object.find(key);
     if (iterator == object.end())
     {
         return nullptr;

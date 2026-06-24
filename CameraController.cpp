@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
+#include <print>
 
 namespace
 {
@@ -105,9 +105,9 @@ void CameraController::Update(double deltaSeconds, HWND window, const RuntimeCon
     if (polarizerToggleDown && !m_polarizerToggleKeyDown)
     {
         m_polarizerEnabled = !m_polarizerEnabled;
-        std::printf("[Polarizer] %s (%s)\n",
-                    m_polarizerEnabled ? "ON" : "OFF",
-                    m_polarizerElliptical ? "elliptical" : "linear");
+        std::println("[Polarizer] {} ({})",
+                     m_polarizerEnabled ? "ON" : "OFF",
+                     m_polarizerElliptical ? "elliptical" : "linear");
     }
     m_polarizerToggleKeyDown = polarizerToggleDown;
 
@@ -116,7 +116,7 @@ void CameraController::Update(double deltaSeconds, HWND window, const RuntimeCon
     if (polarizerModeDown && !m_polarizerModeKeyDown)
     {
         m_polarizerElliptical = !m_polarizerElliptical;
-        std::printf("[Polarizer] mode: %s\n", m_polarizerElliptical ? "elliptical" : "linear");
+        std::println("[Polarizer] mode: {}", m_polarizerElliptical ? "elliptical" : "linear");
     }
     m_polarizerModeKeyDown = polarizerModeDown;
 

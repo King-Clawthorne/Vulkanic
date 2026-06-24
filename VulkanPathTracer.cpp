@@ -42,6 +42,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <print>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -365,7 +366,7 @@ private:
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
-        std::printf("[Sky] Baked Lorenz-Mie scattering matrix: %d angle bins x 3 bands.\n", params.angleBins);
+        std::println("[Sky] Baked Lorenz-Mie scattering matrix: {} angle bins x 3 bands.", params.angleBins);
     }
 
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
@@ -439,7 +440,7 @@ private:
             if (config.width != m_config.width || config.height != m_config.height
                 || config.frameCount != m_config.frameCount)
             {
-                std::puts("[Config] width/height/frameCount changes apply on the next launch.");
+                std::println("[Config] width/height/frameCount changes apply on the next launch.");
             }
         }
 
@@ -478,7 +479,7 @@ private:
             throw std::runtime_error("Failed to read config file timestamp.");
         }
 
-        std::printf("[Config] Loaded %s\n", m_configPath.string().c_str());
+        std::println("[Config] Loaded {}", m_configPath.string());
     }
 
     // Poll the config file's last-write time once per frame; on a change
@@ -509,11 +510,11 @@ private:
         try
         {
             ApplyRuntimeConfig(ParseRuntimeConfig(LoadTextFile(m_configPath)), false);
-            std::printf("[Config] Reloaded %s\n", m_configPath.string().c_str());
+            std::println("[Config] Reloaded {}", m_configPath.string());
         }
         catch (const std::exception& error)
         {
-            std::fprintf(stderr, "[Config] Reload failed: %s\n", error.what());
+            std::println(stderr, "[Config] Reload failed: {}", error.what());
         }
 
         m_configLastWriteTime = currentWriteTime;
@@ -562,11 +563,11 @@ private:
 
         ShowWindow(m_window, SW_SHOWDEFAULT);
         UpdateWindow(m_window);
-        std::printf("[Config] Edit %s and save to hot-reload tuning.\n", m_configPath.string().c_str());
-        std::puts("[Config] width, height, and frameCount are loaded from JSON at startup.");
-        std::puts("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
-        std::puts("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
-        std::puts("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
+        std::println("[Config] Edit {} and save to hot-reload tuning.", m_configPath.string());
+        std::println("[Config] width, height, and frameCount are loaded from JSON at startup.");
+        std::println("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
+        std::println("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
+        std::println("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
     }
 
     // Create the VkInstance via vk-bootstrap, which auto-enables the Win32
@@ -1062,7 +1063,7 @@ private:
                 const double fps = static_cast<double>(framesSinceUpdate) / elapsedSeconds;
                 const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
                 UpdateWindowTitle(fps, frameMs);
-                std::printf("[Vulkan] %.1f FPS (%.2f ms)\n", fps, frameMs);
+                std::println("[Vulkan] {:.1f} FPS ({:.2f} ms)", fps, frameMs);
                 framesSinceUpdate = 0;
                 statsStart = frameEnd;
             }
