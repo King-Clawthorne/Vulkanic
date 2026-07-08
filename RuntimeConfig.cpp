@@ -572,15 +572,6 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonFloat3(spectral, "SUN_DIRECTION", config.skySpectral.sunDirection);
             ParseOptionalJsonNumber(spectral, "SUN_RADIUS", config.skySpectral.sunRadius);
             ParseOptionalJsonNumber(spectral, "SUN_AA", config.skySpectral.sunAa);
-            ParseOptionalJsonFloat3(spectral, "BETA_O3", config.skySpectral.betaOzone);
-            ParseOptionalJsonNumber(spectral, "OZONE_CENTER", config.skySpectral.ozoneCenterAltitude);
-            ParseOptionalJsonNumber(spectral, "OZONE_WIDTH", config.skySpectral.ozoneLayerWidth);
-            ParseOptionalJsonFloat3(spectral, "SUN_LIMB_DARKENING", config.skySpectral.sunLimbDarkening);
-            ParseOptionalJsonNumber(spectral, "REFRACTION", config.skySpectral.refractionStrength);
-            ParseOptionalJsonNumber(spectral, "MIE_BG_BETA", config.skySpectral.mieBackgroundBeta);
-            ParseOptionalJsonNumber(spectral, "MIE_BG_CENTER", config.skySpectral.mieBackgroundCenter);
-            ParseOptionalJsonNumber(spectral, "MIE_BG_WIDTH", config.skySpectral.mieBackgroundWidth);
-            ParseOptionalJsonNumber(spectral, "MIE_ALBEDO", config.skySpectral.mieSingleScatterAlbedo);
             ParseOptionalJsonUint32(spectral, "secondarySamples", config.skySpectral.secondarySamples);
             ParseOptionalJsonUint32(spectral, "VIEW_STEPS", config.skySpectral.viewSteps);
             ParseOptionalJsonUint32(spectral, "Samples", config.skySpectral.samples);
@@ -643,16 +634,6 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     FailIf(HasNegativeElement(sky.sunRadiance), "\"SUN_RADIANCE\" values must be non-negative.");
     FailIf(sky.sunRadius <= 0.0f || sky.sunAa < 0.0f,
            "\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
-    FailIf(HasNegativeElement(sky.betaOzone), "\"BETA_O3\" values must be non-negative.");
-    FailIf(sky.ozoneCenterAltitude < 0.0f || sky.ozoneLayerWidth <= 0.0f,
-           "\"OZONE_CENTER\" must be non-negative and \"OZONE_WIDTH\" must be greater than 0.");
-    FailIf(!std::ranges::all_of(sky.sunLimbDarkening, [](float v) { return v >= 0.0f && v <= 1.0f; }),
-           "\"SUN_LIMB_DARKENING\" values must be in [0, 1].");
-    FailIf(sky.refractionStrength < 0.0f, "\"REFRACTION\" must be non-negative.");
-    FailIf(sky.mieBackgroundBeta < 0.0f || sky.mieBackgroundCenter < 0.0f || sky.mieBackgroundWidth <= 0.0f,
-           "\"MIE_BG_BETA\" and \"MIE_BG_CENTER\" must be non-negative and \"MIE_BG_WIDTH\" must be greater than 0.");
-    FailIf(sky.mieSingleScatterAlbedo < 0.0f || sky.mieSingleScatterAlbedo > 1.0f,
-           "\"MIE_ALBEDO\" must be in [0, 1].");
     FailIf(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2] <= 0.0f,
            "\"SUN_DIRECTION\" must be a non-zero vector.");
     // secondarySamples is currently unused, so any value is accepted.
