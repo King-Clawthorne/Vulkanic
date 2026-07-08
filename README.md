@@ -1,6 +1,6 @@
 # Vulkanic
 
-A lightweight, purely native C++20 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
+A lightweight, purely native C++23 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
 renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
 then views it through a runtime camera analyzer that switches between linear and elliptical
 polarization.

@@ -19,7 +19,7 @@
 #include <array>
 #include <cctype>
 #include <charconv>
-#include <flat_map>
+#include <map>
 #include <format>
 #include <fstream>
 #include <limits>
@@ -96,7 +96,7 @@ namespace
 struct JsonValue
 {
     using Array = std::vector<JsonValue>;
-    using Object = std::flat_map<std::string, JsonValue, std::less<>>;
+    using Object = std::map<std::string, JsonValue, std::less<>>;
 
     std::variant<std::nullptr_t, bool, double, std::string, Array, Object> data = nullptr;
 
