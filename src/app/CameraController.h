@@ -14,7 +14,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include "RuntimeConfig.h"
+#include "config/RuntimeConfig.h"
 
 class CameraController
 {

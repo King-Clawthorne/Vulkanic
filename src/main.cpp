@@ -5,7 +5,7 @@
 // to stderr, and translated into a non-zero exit code so callers (build
 // scripts, CI) can detect failure without inspecting log output.
 
-#include "VulkanPathTracer.h"
+#include "renderer/VulkanPathTracer.h"
 
 #include <cstdio>
 #include <exception>

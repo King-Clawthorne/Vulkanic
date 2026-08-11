@@ -39,23 +39,38 @@ FetchContent_Declare(
         vma
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
         GIT_TAG v3.1.0)
-FetchContent_MakeAvailable(vk_bootstrap vma)
+FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG v1.92.9)
+FetchContent_MakeAvailable(vk_bootstrap vma imgui)
+
+add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
 
 set(SHADER_SOURCES
-        path_tracer.comp)
+        shaders/path_tracer.comp)
 
 set(SHADER_SHARED_DEPENDENCIES
-        "${CMAKE_CURRENT_SOURCE_DIR}/path_tracer_common.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/sky.comp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp")
 
 set(SHADER_SPV_OUTPUTS)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
     set(SHADER_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}")
-    set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SOURCE}.spv")
+    get_filename_component(SHADER_SOURCE_NAME "${SHADER_SOURCE}" NAME)
+    set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SOURCE_NAME}.spv")
 
     add_custom_command(
             OUTPUT "${SHADER_OUTPUT}"
-            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -g -O0 -I "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -g -O0 -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
             -o "${SHADER_OUTPUT}" "${SHADER_INPUT}"
             DEPENDS "${SHADER_INPUT}" ${SHADER_SHARED_DEPENDENCIES}
             VERBATIM)
@@ -66,14 +81,15 @@ endforeach()
 add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 
 add_executable(Vulkanic
-        main.cpp
-        RuntimeConfig.cpp
-        MieScattering.cpp
-        CameraController.cpp
-        VmaUsage.cpp
-        VulkanPathTracer.cpp)
+        src/main.cpp
+        src/config/RuntimeConfig.cpp
+        src/sky/MieScattering.cpp
+        src/app/CameraController.cpp
+        src/renderer/VmaUsage.cpp
+        src/renderer/VulkanPathTracer.cpp)
 add_dependencies(Vulkanic vulkan_shader)
-target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator)
+target_include_directories(Vulkanic PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator imgui)
 
 foreach(SHADER_OUTPUT IN LISTS SHADER_SPV_OUTPUTS)
     get_filename_component(SHADER_FILE_NAME "${SHADER_OUTPUT}" NAME)
@@ -82,3 +98,8 @@ foreach(SHADER_OUTPUT IN LISTS SHADER_SPV_OUTPUTS)
             "${SHADER_OUTPUT}"
             "$<TARGET_FILE_DIR:Vulkanic>/${SHADER_FILE_NAME}")
 endforeach()
+
+add_custom_command(TARGET Vulkanic POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json"
+        "$<TARGET_FILE_DIR:Vulkanic>/path_tracer_config.json")

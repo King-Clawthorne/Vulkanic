@@ -26,14 +26,17 @@
 
 #include "VulkanPathTracer.h"
 
-#include "CameraController.h"
-#include "MieScattering.h"
-#include "RuntimeConfig.h"
+#include "app/CameraController.h"
+#include "config/RuntimeConfig.h"
+#include "sky/MieScattering.h"
 
 #include <windows.h>
 #include <vulkan/vulkan_raii.hpp>
 
 #include <VkBootstrap.h>
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+#include <imgui_impl_win32.h>
 #include <vk_mem_alloc.h>
 
 #include <array>
@@ -50,6 +53,8 @@
 #include <span>
 #include <stdexcept>
 #include <vector>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 
 // =====================================================================
 // SECTION: helpers
@@ -218,18 +223,6 @@ static void PackVec4(float (&slot)[4], const Vec3& xyz, float w)
 // is independent of the desktop pointer-acceleration curve.
 // =====================================================================
 
-static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    switch (message)
-    {
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-    default:
-        return DefWindowProcW(window, message, wParam, lParam);
-    }
-}
-
 // =====================================================================
 // SECTION: Vulkan app
 //
@@ -268,6 +261,13 @@ public:
         {
             m_device.waitIdle();
         }
+        if (m_imguiInitialized)
+        {
+            ImGui_ImplVulkan_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext();
+            m_imguiInitialized = false;
+        }
         DestroySceneBuffers();
         if (m_allocator != VK_NULL_HANDLE)
         {
@@ -277,6 +277,7 @@ public:
         if (m_window != nullptr)
         {
             DestroyWindow(m_window);
+            m_window = nullptr;
         }
     }
 
@@ -295,16 +296,106 @@ public:
         CreateCommandPool();
         CreateSceneResources();
         CreateSwapchain();
+        CreateGuiRenderTargets();
         CreateDescriptorSetLayout();
         CreatePipeline();
         CreateDescriptorSets();
         CreateCommandBuffers();
         CreateSyncObjects();
+        CreateGui();
         MessageLoop();
         m_device.waitIdle();
     }
 
 private:
+    static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        auto* app = reinterpret_cast<VulkanPathTracer*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE)
+        {
+            const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+            app = static_cast<VulkanPathTracer*>(create->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+        }
+        if (message == WM_KEYDOWN && wParam == VK_F1 && app != nullptr)
+        {
+            app->m_showGui = !app->m_showGui;
+            return 0;
+        }
+        if (app != nullptr && app->m_imguiInitialized && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam))
+        {
+            return 1;
+        }
+        if (message == WM_DESTROY)
+        {
+            PostQuitMessage(0);
+            return 0;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    void CreateGui()
+    {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+        ImGui_ImplWin32_Init(m_window);
+
+        ImGui_ImplVulkan_InitInfo initInfo{};
+        initInfo.ApiVersion = VK_API_VERSION_1_2;
+        initInfo.Instance = static_cast<VkInstance>(*m_instance);
+        initInfo.PhysicalDevice = static_cast<VkPhysicalDevice>(*m_physicalDevice);
+        initInfo.Device = static_cast<VkDevice>(*m_device);
+        initInfo.QueueFamily = m_queueFamilies.graphicsFamily.value();
+        initInfo.Queue = static_cast<VkQueue>(*m_graphicsQueue);
+        initInfo.DescriptorPoolSize = 64;
+        initInfo.MinImageCount = std::max(2u, m_config.frameCount);
+        initInfo.ImageCount = static_cast<uint32_t>(m_swapchainImages.size());
+        initInfo.PipelineInfoMain.RenderPass = static_cast<VkRenderPass>(*m_guiRenderPass);
+        initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        if (!ImGui_ImplVulkan_Init(&initInfo))
+        {
+            throw std::runtime_error("Failed to initialize Dear ImGui Vulkan backend.");
+        }
+        m_imguiInitialized = true;
+    }
+
+    void BuildGuiFrame()
+    {
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        if (m_showGui)
+        {
+            ImGui::SetNextWindowPos({16.0f, 16.0f}, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize({330.0f, 0.0f}, ImGuiCond_FirstUseEver);
+            ImGui::Begin("Vulkanic Controls", &m_showGui, ImGuiWindowFlags_AlwaysAutoResize);
+            RuntimeConfig next = m_config;
+            bool changed = false;
+            changed |= ImGui::SliderFloat("Exposure", &next.skyExposure, 0.1f, 4.0f, "%.2f");
+            float aerosolDensity = next.skySpectral.betaMie * 1.0e6f;
+            if (ImGui::SliderFloat("Aerosol density", &aerosolDensity, 0.0f, 100.0f, "%.1f"))
+            {
+                next.skySpectral.betaMie = aerosolDensity * 1.0e-6f;
+                changed = true;
+            }
+            int viewSteps = static_cast<int>(next.skySpectral.viewSteps);
+            if (ImGui::SliderInt("View steps", &viewSteps, 1, 64))
+            {
+                next.skySpectral.viewSteps = static_cast<uint32_t>(viewSteps);
+                changed = true;
+            }
+            if (changed)
+            {
+                ApplyRuntimeConfig(next, false);
+            }
+            ImGui::TextDisabled("F1 toggles controls");
+            ImGui::End();
+        }
+        ImGui::Render();
+    }
+
     SceneData BuildSceneData() const
     {
         const SkySpectralConfig& s = m_config.skySpectral;
@@ -555,7 +646,7 @@ private:
                                    nullptr,
                                    nullptr,
                                    instance,
-                                   nullptr);
+                                   this);
         if (m_window == nullptr)
         {
             throw std::runtime_error("Failed to create window.");
@@ -568,6 +659,7 @@ private:
         std::println("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
         std::println("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
         std::println("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
+        std::println("[Controls] F1 toggles the live GUI control panel.");
     }
 
     // Create the VkInstance via vk-bootstrap, which auto-enables the Win32
@@ -742,7 +834,7 @@ private:
                                    .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
                                    .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
                                    .set_desired_extent(m_config.width, m_config.height)
-                                   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
+                                   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
                                    .set_required_min_image_count(m_config.frameCount)
                                    .build();
         if (!swapchainResult)
@@ -770,6 +862,42 @@ private:
             m_swapchainImageViews.emplace_back(m_device, viewInfo);
         }
         m_swapchainLayouts.assign(m_swapchainImages.size(), vk::ImageLayout::eUndefined);
+    }
+
+    void CreateGuiRenderTargets()
+    {
+        vk::AttachmentDescription colorAttachment{};
+        colorAttachment.format = m_swapchainFormat;
+        colorAttachment.samples = vk::SampleCountFlagBits::e1;
+        colorAttachment.loadOp = vk::AttachmentLoadOp::eLoad;
+        colorAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+        colorAttachment.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+        colorAttachment.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+        colorAttachment.initialLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        colorAttachment.finalLayout = vk::ImageLayout::ePresentSrcKHR;
+
+        const vk::AttachmentReference colorReference{0, vk::ImageLayout::eColorAttachmentOptimal};
+        vk::SubpassDescription subpass{};
+        subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
+        subpass.setColorAttachments(colorReference);
+
+        vk::RenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.setAttachments(colorAttachment);
+        renderPassInfo.setSubpasses(subpass);
+        m_guiRenderPass = vk::raii::RenderPass(m_device, renderPassInfo);
+
+        m_guiFramebuffers.clear();
+        for (const auto& imageView : m_swapchainImageViews)
+        {
+            const vk::ImageView attachment = *imageView;
+            vk::FramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.renderPass = *m_guiRenderPass;
+            framebufferInfo.setAttachments(attachment);
+            framebufferInfo.width = m_swapchainExtent.width;
+            framebufferInfo.height = m_swapchainExtent.height;
+            framebufferInfo.layers = 1;
+            m_guiFramebuffers.emplace_back(m_device, framebufferInfo);
+        }
     }
 
     // Define the descriptor-set layout used by the compute pipeline: the
@@ -958,15 +1086,23 @@ private:
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
         commandBuffer.dispatch(groupsX, groupsY, 1);
 
-        vk::ImageMemoryBarrier toPresent = toGeneral;
-        toPresent.oldLayout = vk::ImageLayout::eGeneral;
-        toPresent.newLayout = vk::ImageLayout::ePresentSrcKHR;
-        toPresent.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-        toPresent.dstAccessMask = {};
+        vk::ImageMemoryBarrier toColorAttachment = toGeneral;
+        toColorAttachment.oldLayout = vk::ImageLayout::eGeneral;
+        toColorAttachment.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
+        toColorAttachment.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+        toColorAttachment.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
 
         commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                      vk::PipelineStageFlagBits::eBottomOfPipe,
-                                      {}, nullptr, nullptr, toPresent);
+                                      vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                      {}, nullptr, nullptr, toColorAttachment);
+
+        vk::RenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.renderPass = *m_guiRenderPass;
+        renderPassInfo.framebuffer = *m_guiFramebuffers[imageIndex];
+        renderPassInfo.renderArea = vk::Rect2D{{0, 0}, m_swapchainExtent};
+        commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), static_cast<VkCommandBuffer>(*commandBuffer));
+        commandBuffer.endRenderPass();
 
         commandBuffer.end();
         m_swapchainLayouts[imageIndex] = vk::ImageLayout::ePresentSrcKHR;
@@ -1052,7 +1188,12 @@ private:
             ReloadRuntimeConfigIfNeeded();
             const double deltaSeconds = std::chrono::duration<double>(frameStart - previousFrameStart).count();
             previousFrameStart = frameStart;
-            m_camera.Update(deltaSeconds, m_window, m_config);
+            BuildGuiFrame();
+            const ImGuiIO& io = ImGui::GetIO();
+            if (!io.WantCaptureMouse && !io.WantCaptureKeyboard)
+            {
+                m_camera.Update(deltaSeconds, m_window, m_config);
+            }
             RenderFrame();
             const auto frameEnd = Clock::now();
 
@@ -1063,7 +1204,6 @@ private:
                 const double fps = static_cast<double>(framesSinceUpdate) / elapsedSeconds;
                 const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
                 UpdateWindowTitle(fps, frameMs);
-                std::println("[Vulkan] {:.1f} FPS ({:.2f} ms)", fps, frameMs);
                 framesSinceUpdate = 0;
                 statsStart = frameEnd;
             }
@@ -1078,6 +1218,8 @@ private:
     };
 
     HWND m_window = nullptr;
+    bool m_imguiInitialized = false;
+    bool m_showGui = true;
 
     // vk-bootstrap wrappers retained for the lifetime of the app: they own the
     // builder-side metadata used to fetch queue family indices.
@@ -1109,6 +1251,8 @@ private:
     std::vector<vk::Image> m_swapchainImages;
     std::vector<vk::raii::ImageView> m_swapchainImageViews;
     std::vector<vk::ImageLayout> m_swapchainLayouts;
+    vk::raii::RenderPass m_guiRenderPass{nullptr};
+    std::vector<vk::raii::Framebuffer> m_guiFramebuffers;
 
     vk::raii::DescriptorSetLayout m_descriptorSetLayout{nullptr};
     vk::raii::PipelineLayout m_pipelineLayout{nullptr};

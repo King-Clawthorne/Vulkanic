@@ -32,7 +32,7 @@ Build a complete, runnable real-time simulator that:
 
 The repository implements the whole stack from the OS layer up:
 
-- **Polarized vector radiative transfer** (`sky.comp`) — Rayleigh scattering with molecular
+- **Polarized vector radiative transfer** (`shaders/sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix (boundary-layer haze,
   conservative scattering). Everything is transported as Stokes vectors with proper Mueller
   matrices and frame rotations (single scattering).
@@ -41,8 +41,8 @@ The repository implements the whole stack from the OS layer up:
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
-- **From-scratch numerics** — a hand-written Lorenz–Mie solver (`MieScattering.cpp`) bakes the
-  scattering-matrix table at startup; a hand-written JSON parser (`RuntimeConfig.cpp`) loads the
+- **From-scratch numerics** — a hand-written Lorenz–Mie solver (`src/sky/MieScattering.cpp`) bakes the
+  scattering-matrix table at startup; a hand-written JSON parser (`src/config/RuntimeConfig.cpp`) loads the
   tunable parameters.
 - **Hot config reload** — `path_tracer_config.json` is polled each frame; sky/aerosol edits apply
   live (aerosol changes rebuild the Mie table).
@@ -55,7 +55,7 @@ The repository implements the whole stack from the OS layer up:
 
 A compact repository whose only job is to render the polarized sky and let you study it:
 
-- One executable, one config file. Run `build.ps1` and you can look around a physically motivated
+- One executable, one config file. Run `scripts/build.ps1` and you can look around a physically motivated
   polarized sky.
 - The analyzer toggles live between linear and elliptical, making the renderer useful for studying
   the Rayleigh polarization band, neutral points, and analyzer response.
@@ -80,13 +80,13 @@ The provided PowerShell script sets up the MSVC environment and (optionally) `sc
 
 ```powershell
 # from the project root, in a PowerShell terminal
-.\build.ps1
+.\scripts\build.ps1
 ```
 
 For a clean rebuild:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
+powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Clean
 ```
 
 Or build manually with CMake. The project uses the Ninja generator in the script, but any generator
@@ -103,6 +103,8 @@ cmake --build .
 
 - Hold right mouse button and move the mouse to look around the sky.
 - Arrow keys look around without the mouse. `R` resets the camera to the JSON view.
+- The Dear ImGui overlay adjusts exposure, aerosol density, and integration steps.
+  Press `F1` to hide or show it.
 - `P` toggles the polarization analyzer.
 - `C` switches the analyzer between linear and elliptical modes.
 - In linear mode, `[` / `]` rotate the analyzer axis.
@@ -112,7 +114,7 @@ cmake --build .
 
 ## Runtime Configuration
 
-`path_tracer_config.json` drives the renderer:
+`config/path_tracer_config.json` drives the renderer:
 
 - `render` — resolution, swapchain frame count, samples per pixel.
 - `camera` — startup view and vertical field of view.
@@ -127,22 +129,24 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 ## Project Structure
 
 - **Shaders (`glslc` → SPIR-V):**
-  - `path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
+  - `shaders/path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
     tonemap → swapchain storage image (compute, 8×8 workgroups).
-  - `sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
-  - `path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
+  - `shaders/sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `shaders/path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
-  - `VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
+  - `src/renderer/VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
     message loop, Vulkan-Hpp RAII handles, VMA-backed buffers, and descriptor sets.
-  - `CameraController.h` / `.cpp` — the look-only camera and polarization-analyzer state, plus the
+  - `src/app/CameraController.h` / `.cpp` — the look-only camera and polarization-analyzer state, plus the
     raw Win32 keyboard/mouse input that drives them; the renderer reads the resulting camera basis
     and analyzer parameters when building push constants.
-  - `MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
-  - `RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
-  - `VmaUsage.cpp` — single translation unit that hosts the VMA implementation.
-  - `main.cpp` — entry point.
+  - `src/sky/MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
+  - `src/config/RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
+  - `config/path_tracer_config.json` — runtime render, camera, input, and sky settings.
+  - `scripts/build.ps1` — Windows configure-and-build helper.
+  - `src/renderer/VmaUsage.cpp` — single translation unit that hosts the VMA implementation.
+  - `src/main.cpp` — entry point.
 - **Build & Configuration:**
-  - `build.ps1` — PowerShell wrapper that loads the MSVC environment and runs CMake.
+  - `scripts/build.ps1` — PowerShell wrapper that loads the MSVC environment and runs CMake.
   - `CMakeLists.txt` — CMake project; fetches `vk-bootstrap`/VMA and drives GLSL → SPIR-V
     compilation.
-  - `path_tracer_config.json` — sky parameters, camera, input, render settings.
+  - `config/path_tracer_config.json` — sky parameters, camera, input, render settings.
