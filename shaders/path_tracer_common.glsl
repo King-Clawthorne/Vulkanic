@@ -81,17 +81,32 @@ vec3 GetSunDirection()
     return normalize(sceneData.skySunDirectionRadius.xyz);
 }
 
-// ACES filmic tone mapping (Narkowicz 2015 fit), then sRGB gamma encode.
+// Hue-preserving photographic shoulder. The curve is evaluated from the
+// brightest channel and the same scale is applied to all three channels, so
+// brightness changes across an anti-aliased solar edge cannot rotate its hue.
+vec3 HuePreservingToneMap(vec3 colour)
+{
+    float peak = max(colour.r, max(colour.g, colour.b));
+    if (peak <= 0.0)
+    {
+        return vec3(0.0);
+    }
+    float mappedPeak = peak / (1.0 + peak);
+    return colour * (mappedPeak / peak);
+}
+
+vec3 LinearToSrgb(vec3 colour)
+{
+    bvec3 low = lessThanEqual(colour, vec3(0.0031308));
+    vec3 linearSegment = 12.92 * colour;
+    vec3 powerSegment = 1.055 * pow(max(colour, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return mix(powerSegment, linearSegment, low);
+}
+
 vec3 ToneMap(vec3 colour)
 {
     colour = max(colour, vec3(0.0));
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    vec3 mapped = clamp((colour * (a * colour + b)) / (colour * (c * colour + d) + e), 0.0, 1.0);
-    return pow(mapped, vec3(1.0 / 2.2));
+    return clamp(LinearToSrgb(HuePreservingToneMap(colour)), 0.0, 1.0);
 }
 
 #endif

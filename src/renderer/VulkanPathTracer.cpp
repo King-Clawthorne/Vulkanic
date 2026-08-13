@@ -369,7 +369,7 @@ private:
                 changed = true;
             }
             int viewSteps = static_cast<int>(next.skySpectral.viewSteps);
-            if (ImGui::SliderInt("View steps", &viewSteps, 1, 64))
+            if (ImGui::SliderInt("View steps", &viewSteps, 1, 25))
             {
                 next.skySpectral.viewSteps = static_cast<uint32_t>(viewSteps);
                 changed = true;
@@ -536,7 +536,26 @@ private:
     // can pick up live edits.
     void LoadInitialRuntimeConfig()
     {
-        m_configPath = ResolveRuntimeFilePath(CONFIG_FILE_NAME);
+        // Prefer the editable source-tree config when launched from the repo.
+        // The build also copies a deployment config beside the executable,
+        // but choosing that copy first makes source edits appear to require a
+        // rebuild because the hot-reloader watches the copied file instead.
+        const std::array<std::filesystem::path, 2> editableCandidates = {
+            std::filesystem::current_path() / L"config" / CONFIG_FILE_NAME,
+            std::filesystem::current_path().parent_path() / L"config" / CONFIG_FILE_NAME,
+        };
+        for (const auto& candidate : editableCandidates)
+        {
+            if (std::filesystem::exists(candidate))
+            {
+                m_configPath = std::filesystem::absolute(candidate).lexically_normal();
+                break;
+            }
+        }
+        if (m_configPath.empty())
+        {
+            m_configPath = ResolveRuntimeFilePath(CONFIG_FILE_NAME);
+        }
         if (m_configPath.empty())
         {
             throw std::runtime_error("Failed to locate path_tracer_config.json.");

@@ -525,12 +525,16 @@ Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band)
     sky = stokes_add(sky, second_scatter_stokes(origin, viewDir, L,
                                                 SkyViewSteps(), SkySecondarySamples(), SkySamples(), band));
 
-    // Direct sun disk (unpolarized).
-    vec2 sunGround = ray_sphere(origin, L, SkyEarthRadius());
-    if (sunGround.x <= 0.0)
+    // Direct sun disk (unpolarized). Visibility is evaluated along this
+    // pixel's view ray, not only along the disk centre L, so the black Earth
+    // clips the finite/anti-aliased disk correctly at the horizon.
+    vec2 viewGround = ray_sphere(origin, viewDir, SkyEarthRadius());
+    float disk = sun_disk(viewDir, L);
+    if (disk > 0.0 && viewGround.x <= 0.0)
     {
-        float disk = sun_disk(viewDir, L);
-        float T_sunDisk = transmittance(origin, L, 16, band);
+        // A finite disk pixel travels along viewDir; using centre direction L
+        // here would attenuate or occlude the entire disk as one point source.
+        float T_sunDisk = transmittance(origin, viewDir, 16, band);
         sky.I += disk * SkySunRadiance(band) * T_sunDisk;
     }
 

@@ -115,7 +115,9 @@ cmake --build .
 
 ## Runtime Configuration
 
-`config/path_tracer_config.json` drives the renderer:
+`config/path_tracer_config.json` drives the renderer. When launched from the repository, this
+source-tree file is preferred over the deployment copy beside the executable, so saving it hot
+reloads the running simulation without rebuilding:
 
 - `render` — resolution, swapchain frame count, samples per pixel.
 - `camera` — startup view and vertical field of view.
