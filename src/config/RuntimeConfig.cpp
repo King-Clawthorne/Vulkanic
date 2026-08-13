@@ -554,16 +554,13 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
     if (const JsonValue* skyValue = FindMember(root, "sky"))
     {
         const auto& sky = skyValue->AsObject("\"sky\"");
-        ParseOptionalJsonFloat3(sky, "bottomColor", config.skyBottomColor);
         ParseOptionalJsonNumber(sky, "exposure", config.skyExposure);
-        ParseOptionalJsonFloat3(sky, "topColor", config.skyTopColor);
 
         if (const JsonValue* spectralValue = FindMember(sky, "spectralConstants"))
         {
             const auto& spectral = spectralValue->AsObject("\"sky.spectralConstants\"");
             ParseOptionalJsonFloat3(spectral, "BETA_R", config.skySpectral.betaRayleigh);
             ParseOptionalJsonNumber(spectral, "BETA_M", config.skySpectral.betaMie);
-            ParseOptionalJsonNumber(spectral, "MIE_G", config.skySpectral.mieG);
             ParseOptionalJsonNumber(spectral, "EARTH_R", config.skySpectral.earthRadius);
             ParseOptionalJsonNumber(spectral, "ATMOS_R", config.skySpectral.atmosphereRadius);
             ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
@@ -586,8 +583,6 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonNumber(spectral, "AEROSOL_MEAN_RADIUS_UM",
                                     config.skySpectral.aerosolMeanRadiusMicrometers);
             ParseOptionalJsonNumber(spectral, "AEROSOL_SIGMA", config.skySpectral.aerosolSigma);
-            ParseOptionalJsonFloat3(spectral, "AEROSOL_WAVELENGTHS_NM",
-                                    config.skySpectral.aerosolWavelengthsNmRgb);
             ParseOptionalJsonUint32(spectral, "MIE_TABLE_ANGLE_BINS",
                                     config.skySpectral.mieTableAngleBins);
         }
@@ -626,7 +621,6 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     FailIf(config.skyExposure <= 0.0f, "\"exposure\" must be greater than 0.");
     FailIf(HasNegativeElement(sky.betaRayleigh) || sky.betaMie < 0.0f,
            "Sky scattering coefficients must be non-negative.");
-    FailIf(sky.mieG <= -1.0f || sky.mieG >= 1.0f, "\"MIE_G\" must be between -1 and 1.");
     FailIf(sky.earthRadius <= 0.0f || sky.atmosphereRadius <= 0.0f || sky.atmosphereRadius <= sky.earthRadius,
            "\"EARTH_R\" and \"ATMOS_R\" must be positive, and ATMOS_R must exceed EARTH_R.");
     FailIf(sky.scaleHeightRayleigh <= 0.0f || sky.scaleHeightMie <= 0.0f,
@@ -636,16 +630,14 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
     FailIf(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2] <= 0.0f,
            "\"SUN_DIRECTION\" must be a non-zero vector.");
-    // secondarySamples is currently unused, so any value is accepted.
-    FailIf(sky.viewSteps == 0 || sky.samples == 0, "\"VIEW_STEPS\" and \"Samples\" must be greater than 0.");
+    FailIf(sky.secondarySamples == 0 || sky.viewSteps == 0 || sky.samples == 0,
+           "\"secondarySamples\", \"VIEW_STEPS\", and \"Samples\" must be greater than 0.");
     FailIf(sky.rayleighDepolarization < 0.0f || sky.rayleighDepolarization >= 1.0f,
            "\"RAYLEIGH_DEPOLARIZATION\" must be in [0, 1).");
     FailIf(sky.aerosolRefractiveIndexReal <= 0.0f || sky.aerosolRefractiveIndexImag < 0.0f,
            "Aerosol refractive index must have positive real part and non-negative imaginary part.");
     FailIf(sky.aerosolMeanRadiusMicrometers <= 0.0f || sky.aerosolSigma <= 1.0f,
            "\"AEROSOL_MEAN_RADIUS_UM\" must be > 0 and \"AEROSOL_SIGMA\" must be > 1.");
-    FailIf(!std::ranges::all_of(sky.aerosolWavelengthsNmRgb, [](float v) { return v > 0.0f; }),
-           "\"AEROSOL_WAVELENGTHS_NM\" values must be greater than 0.");
     FailIf(sky.mieTableAngleBins < 2, "\"MIE_TABLE_ANGLE_BINS\" must be at least 2.");
     return config;
 }

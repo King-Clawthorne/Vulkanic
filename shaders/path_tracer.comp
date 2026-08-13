@@ -37,7 +37,7 @@ void main()
     vec3 cameraUp = pc.cameraUpTanHalfFovY.xyz;
     uint samplesPerPixel = uint(pc.cameraForwardSamples.w);
     float tanHalfFovY = pc.cameraUpTanHalfFovY.w;
-    float aspectRatio = pc.skyTopAspect.w;
+    float aspectRatio = pc.displayParams.y;
     bool polarized = pc.polarizer.x > 0.5;
 
     // Elliptical analyzer as a unit Stokes vector: major-axis angle polarizer.y,
@@ -72,24 +72,25 @@ void main()
         // observer facing the incoming beam).
         vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
 
-        Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir);
-
-        if (polarized)
+        vec3 sampleRgb = vec3(0.0);
+        for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
-            // Ideal elliptical analyzer, per band: I_out = 0.5 (I + a·(Q,U,V)).
-            accumulatedRadiance += 0.5 * (sky.I
-                                          + analyzer.x * sky.Q
-                                          + analyzer.y * sky.U
-                                          + analyzer.z * sky.V);
+            Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+            float radiance = sky.I;
+            if (polarized)
+            {
+                radiance = 0.5 * (sky.I
+                                  + analyzer.x * sky.Q
+                                  + analyzer.y * sky.U
+                                  + analyzer.z * sky.V);
+            }
+            sampleRgb[band] = max(radiance, 0.0);
         }
-        else
-        {
-            accumulatedRadiance += sky.I;
-        }
+        accumulatedRadiance += sampleRgb;
     }
 
     // Average across SPP, scale by the exposure stop, and tonemap into
     // display-referred space.
-    vec3 displayColour = ToneMap(accumulatedRadiance / max(1u, samplesPerPixel) * pc.skyBottomExposure.w);
+    vec3 displayColour = ToneMap(accumulatedRadiance / max(1u, samplesPerPixel) * pc.displayParams.x);
     imageStore(outputImage, ivec2(pixel), vec4(displayColour, 1.0));
 }

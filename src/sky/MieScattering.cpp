@@ -100,14 +100,14 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
     const double lnMax = lnRg + 4.0 * lnSigma;
     const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
 
-    std::vector<MieMatrixEntry> table(static_cast<size_t>(bins) * 3u);
+    std::vector<MieMatrixEntry> table(static_cast<size_t>(bins) * kSpectralBandCount);
     // mdspan provides 2D [band, bin] indexing over the flat table buffer,
     // eliminating the manual band*bins+i index arithmetic below.
-    auto tableView = std::mdspan(table.data(), 3, static_cast<size_t>(bins));
+    auto tableView = std::mdspan(table.data(), static_cast<size_t>(kSpectralBandCount), static_cast<size_t>(bins));
 
-    for (int band : std::views::iota(0, 3))
+    for (int band : std::views::iota(0, kSpectralBandCount))
     {
-        const double lambdaUm = params.wavelengthsNmRgb[band] * 1e-3; // nm -> µm
+        const double lambdaUm = kSpectralWavelengthsNm[band] * 1e-3;
         const double k = 2.0 * kPi / lambdaUm;
 
         std::vector<double> p11(static_cast<size_t>(bins), 0.0);

@@ -1,9 +1,9 @@
 # Vulkanic
 
 A lightweight, purely native C++23 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as a full Stokes-vector single-scattering problem — Rayleigh + Lorenz–Mie —
-then views it through a runtime camera analyzer that switches between linear and elliptical
-polarization.
+renders the daytime sky as an RGB Stokes-vector first- and second-order scattering problem —
+Rayleigh + Lorenz–Mie — viewed through a runtime camera analyzer that switches between linear and
+elliptical polarization.
 
 ---
 
@@ -24,7 +24,8 @@ Build a complete, runnable real-time simulator that:
 - Targets a raw Vulkan compute pipeline on Windows.
 - Uses Win32 directly for the window/input layer and keeps math/config parsing in-repo; CMake fetches
   `vk-bootstrap` for Vulkan bootstrap setup and Vulkan Memory Allocator for buffer allocation.
-- Carries the full Stokes vector (I, Q, U, V) through the atmosphere, not just scalar RGB radiance.
+- Carries the full Stokes vector (I, Q, U, V) through the atmosphere in representative red, green,
+  and blue bands.
 - Lets the user aim the camera around the sky dome and switch between linear and elliptical analyzer
   modes at runtime.
 
@@ -35,7 +36,7 @@ The repository implements the whole stack from the OS layer up:
 - **Polarized vector radiative transfer** (`shaders/sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix (boundary-layer haze,
   conservative scattering). Everything is transported as Stokes vectors with proper Mueller
-  matrices and frame rotations (single scattering).
+  matrices and frame rotations through two scattering events.
 - **Physical sky details** — a binary earth-shadow test that puts twilight points behind the
   planet's limb into umbra, giving the sky its terminator.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
@@ -121,8 +122,8 @@ cmake --build .
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
   depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
-  - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` and `Samples` are currently
-    unused (reserved for multiple scattering).
+  - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` controls equal-area angular
+    samples for polarized second-order scattering; `Samples` controls each secondary ray's steps.
 
 Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
 
@@ -131,7 +132,7 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 - **Shaders (`glslc` → SPIR-V):**
   - `shaders/path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
     tonemap → swapchain storage image (compute, 8×8 workgroups).
-  - `shaders/sky.comp` — the polarized single-scattering atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `shaders/sky.comp` — the polarized first- and second-order atmosphere (Rayleigh/Mie, Stokes machinery).
   - `shaders/path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `src/renderer/VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +

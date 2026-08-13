@@ -156,28 +156,16 @@ struct BufferAllocation
 struct alignas(16) SceneData
 {
     float skyBetaRayleighBetaM[4];
-    float skyMieEarthAtmosScaleHr[4];
-    float skyScaleHmSunRadiusAa[4];
+    float skyRadiiScaleHeights[4];
     float skySunRadiance[4];
-    float skySunDirection[4];
+    float skySunDirectionRadius[4];
     uint32_t skySampleCounts[4];
-    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
-    // z = Mie table angle bins, w = ozone layer Gaussian width (m). The Mie
-    // scattering matrix itself rides in the binding-7 SSBO, not here.
+    // x = sun-disk AA width, y = Rayleigh depolarization,
+    // z = Mie table angle bins, w unused.
     float skyVrtParams[4];
-    // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
-    // RGB band (1/m), w = layer center altitude (m).
-    float skyOzoneBeta[4];
-    // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
-    // refraction strength (1 = standard atmosphere, 0 = off).
-    float skySunLimbRefraction[4];
-    // Aerosol extras: x = stratospheric background peak extinction (1/m),
-    // y = background layer center altitude (m), z = layer Gaussian width (m),
-    // w = aerosol single-scattering albedo.
-    float skyMieBackground[4];
 };
 
-static_assert(sizeof(SceneData) == 160, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 96, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -185,14 +173,14 @@ struct PushConstants
     float cameraForwardSamples[4];
     float cameraRightBounces[4];
     float cameraUpTanHalfFovY[4];
-    float skyBottomExposure[4];
-    float skyTopAspect[4];
+    // x = exposure, y = viewport aspect ratio, z/w unused.
+    float displayParams[4];
     // x = filter enabled (0/1), y = filter axis angle in radians, z/w unused.
     float polarizer[4];
     uint32_t imageSize[2];
 };
 
-static_assert(sizeof(PushConstants) == 120, "Push constant layout must match the shader.");
+static_assert(sizeof(PushConstants) == 104, "Push constant layout must match the shader.");
 
 // Pack a 3-vector plus a trailing scalar into a std140 vec4 slot (float[4]).
 // The two overloads cover the project's two 3-component types so the Build*
@@ -401,23 +389,18 @@ private:
         const SkySpectralConfig& s = m_config.skySpectral;
         SceneData sceneData{};
         PackVec4(sceneData.skyBetaRayleighBetaM, s.betaRayleigh, s.betaMie);
-        PackVec4(sceneData.skyMieEarthAtmosScaleHr,
-                 std::array<float, 3>{s.mieG, s.earthRadius, s.atmosphereRadius}, s.scaleHeightRayleigh);
-        PackVec4(sceneData.skyScaleHmSunRadiusAa,
-                 std::array<float, 3>{s.scaleHeightMie, s.sunRadius, s.sunAa}, 0.0f);
+        sceneData.skyRadiiScaleHeights[0] = s.earthRadius;
+        sceneData.skyRadiiScaleHeights[1] = s.atmosphereRadius;
+        sceneData.skyRadiiScaleHeights[2] = s.scaleHeightRayleigh;
+        sceneData.skyRadiiScaleHeights[3] = s.scaleHeightMie;
         PackVec4(sceneData.skySunRadiance, s.sunRadiance, 0.0f);
-        PackVec4(sceneData.skySunDirection, s.sunDirection, 0.0f);
+        PackVec4(sceneData.skySunDirectionRadius, s.sunDirection, s.sunRadius);
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;
         sceneData.skySampleCounts[2] = s.samples;
-        PackVec4(sceneData.skyVrtParams,
-                 std::array<float, 3>{s.rayleighDepolarization, 0.0f, static_cast<float>(s.mieTableAngleBins)},
-                 s.ozoneLayerWidth);
-        PackVec4(sceneData.skyOzoneBeta, s.betaOzone, s.ozoneCenterAltitude);
-        PackVec4(sceneData.skySunLimbRefraction, s.sunLimbDarkening, s.refractionStrength);
-        PackVec4(sceneData.skyMieBackground,
-                 std::array<float, 3>{s.mieBackgroundBeta, s.mieBackgroundCenter, s.mieBackgroundWidth},
-                 s.mieSingleScatterAlbedo);
+        sceneData.skyVrtParams[0] = s.sunAa;
+        sceneData.skyVrtParams[1] = s.rayleighDepolarization;
+        sceneData.skyVrtParams[2] = static_cast<float>(s.mieTableAngleBins);
         return sceneData;
     }
 
@@ -439,9 +422,6 @@ private:
         params.refractiveIndexImag = s.aerosolRefractiveIndexImag;
         params.meanRadiusMicrometers = s.aerosolMeanRadiusMicrometers;
         params.sigma = s.aerosolSigma;
-        params.wavelengthsNmRgb[0] = s.aerosolWavelengthsNmRgb[0];
-        params.wavelengthsNmRgb[1] = s.aerosolWavelengthsNmRgb[1];
-        params.wavelengthsNmRgb[2] = s.aerosolWavelengthsNmRgb[2];
         params.angleBins = static_cast<int>(s.mieTableAngleBins);
         return params;
     }
@@ -457,7 +437,8 @@ private:
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
-        std::println("[Sky] Baked Lorenz-Mie scattering matrix: {} angle bins x 3 bands.", params.angleBins);
+        std::println("[Sky] Baked Lorenz-Mie scattering matrix: {} angle bins x {} spectral bands.",
+                     params.angleBins, kSpectralBandCount);
     }
 
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
@@ -1030,8 +1011,8 @@ private:
         // w was max bounces; unused in the sky-only renderer.
         PackVec4(constants.cameraRightBounces, right, 0.0f);
         PackVec4(constants.cameraUpTanHalfFovY, up, std::tan(m_config.fovYDegrees * 0.5f * kPi / 180.0f));
-        PackVec4(constants.skyBottomExposure, m_config.skyBottomColor, m_config.skyExposure);
-        PackVec4(constants.skyTopAspect, m_config.skyTopColor, aspect);
+        constants.displayParams[0] = m_config.skyExposure;
+        constants.displayParams[1] = aspect;
         PackVec4(constants.polarizer,
                  std::array<float, 3>{m_camera.PolarizerEnabled() ? 1.0f : 0.0f,
                                       m_camera.PolarizerAngleRadians(),

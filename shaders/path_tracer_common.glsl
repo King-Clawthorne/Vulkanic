@@ -16,29 +16,18 @@ layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 2) uniform SceneData
 {
     vec4 skyBetaRayleighBetaM;
-    vec4 skyMieEarthAtmosScaleHr;
-    vec4 skyScaleHmSunRadiusAa;
+    vec4 skyRadiiScaleHeights;
     vec4 skySunRadiance;
-    vec4 skySunDirection;
+    vec4 skySunDirectionRadius;
     uvec4 skySampleCounts;
-    // Vector radiative transfer: x = Rayleigh depolarization, y unused,
-    // z = Mie table angle bins, w = ozone layer Gaussian width (m).
+    // x = sun-disk AA width, y = Rayleigh depolarization,
+    // z = Mie table angle bins, w unused.
     vec4 skyVrtParams;
-    // Ozone Chappuis-band absorption: xyz = peak absorption coefficient per
-    // RGB band (1/m), w = layer center altitude (m).
-    vec4 skyOzoneBeta;
-    // xyz = sun limb-darkening coefficient per RGB band, w = atmospheric
-    // refraction strength (1 = standard atmosphere, 0 = off).
-    vec4 skySunLimbRefraction;
-    // Aerosol extras: x = stratospheric background peak extinction (1/m),
-    // y = background layer center altitude (m), z = layer Gaussian width (m),
-    // w = aerosol single-scattering albedo.
-    vec4 skyMieBackground;
 } sceneData;
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
 // (F11, F12, F33, F34) at one scattering angle; entries are stored band-major
-// (band * angleBins + bin), bands = R,G,B, bin i ↦ theta = i/(bins-1)·π.
+// (band * angleBins + bin), bands = R, G, B.
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
 {
     vec4 entries[];
@@ -50,8 +39,8 @@ layout(push_constant) uniform PushConstants
     vec4 cameraForwardSamples;
     vec4 cameraRightBounces;
     vec4 cameraUpTanHalfFovY;
-    vec4 skyBottomExposure;
-    vec4 skyTopAspect;
+    // x = exposure, y = viewport aspect ratio, z/w unused.
+    vec4 displayParams;
     // Camera polarization filter: x = enabled (0/1), y = major-axis angle
     // in radians (image plane, from the camera right axis), z = ellipticity
     // angle in radians (-pi/4..pi/4; 0 = linear, +/-pi/4 = circular), w unused.
@@ -89,7 +78,7 @@ vec2 NextFloat2(inout uint state)
 
 vec3 GetSunDirection()
 {
-    return normalize(sceneData.skySunDirection.xyz);
+    return normalize(sceneData.skySunDirectionRadius.xyz);
 }
 
 // ACES filmic tone mapping (Narkowicz 2015 fit), then sRGB gamma encode.

@@ -17,13 +17,10 @@
     "polarizerRotateSpeed": 1.5
   },
   "sky": {
-    "bottomColor": [0.03, 0.04, 0.06],
     "exposure": 1.0,
-    "topColor": [0.55, 0.72, 0.95],
     "spectralConstants": {
       "BETA_R": [3.8e-6, 13.5e-6, 33.1e-6],
       "BETA_M": 2.1e-5,
-      "MIE_G": 0.76,
       "EARTH_R": 6360000.0,
       "ATMOS_R": 6420000.0,
       "SCALE_H_R": 7994.0,
@@ -32,15 +29,14 @@
       "SUN_DIRECTION": [0.35, 0.1, 0.25],
       "SUN_RADIUS": 0.1,
       "SUN_AA": 0.01,
-      "secondarySamples": 1,
+      "secondarySamples": 4,
       "VIEW_STEPS": 5,
-      "Samples": 1,
+      "Samples": 3,
       "RAYLEIGH_DEPOLARIZATION": 0.0279,
       "AEROSOL_IOR_REAL": 1.33,
       "AEROSOL_IOR_IMAG": 0.0,
       "AEROSOL_MEAN_RADIUS_UM": 0.2,
       "AEROSOL_SIGMA": 1.5,
-      "AEROSOL_WAVELENGTHS_NM": [680.0, 550.0, 440.0],
       "MIE_TABLE_ANGLE_BINS": 181
     }
   }

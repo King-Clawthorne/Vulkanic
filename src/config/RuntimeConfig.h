@@ -82,7 +82,8 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 }
 
 // Physical sky / atmosphere parameters fed to sky.comp. These follow the
-// Bruneton/Nishita single-scattering parameterization: Rayleigh + Mie
+// Bruneton/Nishita atmosphere parameterization: Rayleigh + Mie first- and
+// second-order scattering
 // scattering against an Earth-sized sphere, plus a directional sun disk.
 //
 // Units are SI (metres) for the radii and scale heights; scattering
@@ -92,7 +93,6 @@ struct SkySpectralConfig
 {
     std::array<float, 3> betaRayleigh{3.8e-6f, 13.5e-6f, 33.1e-6f};
     float betaMie = 21e-6f;
-    float mieG = 0.76f;
     float earthRadius = 6360e3f;
     float atmosphereRadius = 6420e3f;
     float scaleHeightRayleigh = 7994.0f;
@@ -101,35 +101,12 @@ struct SkySpectralConfig
     std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
     float sunRadius = 0.1f;
     float sunAa = 0.01f;
-    // Ozone Chappuis-band absorption (pure absorption, no scattering). Peak
-    // coefficients per RGB band in 1/m at the layer-center density; the
-    // density profile is Gaussian, exp(-((h - center)/width)^2). Defaults give
-    // a vertical ozone column equivalent to ~300 Dobson units — this is what
-    // keeps the zenith blue at twilight instead of yellow-green.
-    std::array<float, 3> betaOzone{0.650e-6f, 1.881e-6f, 0.085e-6f};
-    float ozoneCenterAltitude = 25000.0f;
-    float ozoneLayerWidth = 9000.0f;
-    // Sun limb darkening u per RGB band, I(mu)/I(0) = 1 - u(1 - mu)
-    // (Hestroffer & Magnan 1998 fits at ~680/550/440 nm).
-    std::array<float, 3> sunLimbDarkening{0.45f, 0.60f, 0.75f};
-    // Atmospheric refraction strength: 1 = standard conditions (sun lifted
-    // ~0.57 deg and flattened at the horizon), 0 = disabled.
-    float refractionStrength = 1.0f;
-    // Stratospheric background (Junge) aerosol layer: Gaussian profile with
-    // peak extinction (1/m), center altitude and width in metres. Shares the
-    // boundary-layer mode's phase matrix. Defaults give a background optical
-    // depth of ~0.004; raise the beta x10-100 for volcanic "purple light".
-    float mieBackgroundBeta = 4.0e-7f;
-    float mieBackgroundCenter = 20000.0f;
-    float mieBackgroundWidth = 5000.0f;
-    // Aerosol single-scattering albedo: BETA_M is extinction, and only this
-    // fraction of it scatters (1 = conservative; smoke ~0.90, dust ~0.95).
-    float mieSingleScatterAlbedo = 0.95f;
-    // viewSteps = primary view-ray march steps; secondarySamples and samples
-    // are currently unused (reserved for multiple scattering).
-    uint32_t secondarySamples = 1;
+    // Second-order multiple scattering uses secondarySamples uniformly
+    // distributed incident directions at every primary view-ray point. Each
+    // secondary ray is integrated with samples steps.
+    uint32_t secondarySamples = 4;
     uint32_t viewSteps = 5;
-    uint32_t samples = 1;
+    uint32_t samples = 3;
 
     // ── Vector radiative transfer (polarized sky) ──
     // Rayleigh molecular depolarization factor (air ≈ 0.0279). Caps the
@@ -140,7 +117,6 @@ struct SkySpectralConfig
     float aerosolRefractiveIndexImag = 0.0f;
     float aerosolMeanRadiusMicrometers = 0.2f; // log-normal geometric mean radius
     float aerosolSigma = 1.5f;                 // log-normal geometric std dev (> 1)
-    std::array<float, 3> aerosolWavelengthsNmRgb{680.0f, 550.0f, 440.0f};
     uint32_t mieTableAngleBins = 181;          // scattering-angle samples in the Mie table
 
     // C++20 member-wise equality: true only when every spectral field matches.
@@ -157,7 +133,6 @@ inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectra
            || left.aerosolRefractiveIndexImag != right.aerosolRefractiveIndexImag
            || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers
            || left.aerosolSigma != right.aerosolSigma
-           || left.aerosolWavelengthsNmRgb != right.aerosolWavelengthsNmRgb
            || left.mieTableAngleBins != right.mieTableAngleBins;
 }
 
@@ -176,9 +151,7 @@ struct RuntimeConfig
     float keyLookSpeed = 1.8f;
     float polarizerRotateSpeed = 6.3f;
     float maxPitchDegrees = 89.0f;
-    std::array<float, 3> skyBottomColor{0.03f, 0.04f, 0.06f};
     float skyExposure = 1.35f;
-    std::array<float, 3> skyTopColor{0.55f, 0.72f, 0.95f};
     SkySpectralConfig skySpectral{};
 };
 
