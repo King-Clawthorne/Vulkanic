@@ -369,7 +369,7 @@ private:
                 changed = true;
             }
             int viewSteps = static_cast<int>(next.skySpectral.viewSteps);
-            if (ImGui::SliderInt("View steps", &viewSteps, 1, 25))
+            if (ImGui::SliderInt("View steps", &viewSteps, 1, 20))
             {
                 next.skySpectral.viewSteps = static_cast<uint32_t>(viewSteps);
                 changed = true;

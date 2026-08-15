@@ -30,7 +30,7 @@
       "SUN_RADIUS": 0.1,
       "SUN_AA": 0.01,
       "secondarySamples": 1,
-      "VIEW_STEPS": 5,
+      "VIEW_STEPS": 1,
       "Samples": 1,
       "RAYLEIGH_DEPOLARIZATION": 0.0279,
       "AEROSOL_IOR_REAL": 1.33,
