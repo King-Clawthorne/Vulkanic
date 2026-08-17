@@ -19,13 +19,14 @@
   "sky": {
     "exposure": 1.0,
     "spectralConstants": {
-      "BETA_R": [3.8e-6, 13.5e-6, 33.1e-6],
+      "BETA_R_550": 13.5e-6,
       "BETA_M": 2.1e-5,
       "EARTH_R": 6360000.0,
       "ATMOS_R": 6420000.0,
       "SCALE_H_R": 7994.0,
       "SCALE_H_M": 1200.0,
-      "SUN_RADIANCE": [20.0, 18.0, 14.5],
+      "SUN_TEMPERATURE_K": 5778.0,
+      "SUN_RADIANCE_550": 18.0,
       "SUN_DIRECTION": [0.35, 0.01, 0.25],
       "SUN_RADIUS": 0.1,
       "SUN_AA": 0.01,

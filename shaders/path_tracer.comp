@@ -72,7 +72,8 @@ void main()
         // observer facing the incoming beam).
         vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
 
-        vec3 sampleRgb = vec3(0.0);
+        vec3 sampleXyz = vec3(0.0);
+        float yNormalization = 0.0;
         for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
             Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
@@ -84,9 +85,11 @@ void main()
                                   + analyzer.y * sky.U
                                   + analyzer.z * sky.V);
             }
-            sampleRgb[band] = max(radiance, 0.0);
+            vec3 xyzWeight = CieXyz(wavelength_nm(band));
+            sampleXyz += max(radiance, 0.0) * xyzWeight;
+            yNormalization += xyzWeight.y;
         }
-        accumulatedRadiance += sampleRgb;
+        accumulatedRadiance += XyzToLinearSrgb(sampleXyz / max(yNormalization, 1.0e-6));
     }
 
     // Average across SPP, scale by the exposure stop, and tonemap into

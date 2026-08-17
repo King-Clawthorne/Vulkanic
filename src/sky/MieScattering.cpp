@@ -107,7 +107,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
 
     for (int band : std::views::iota(0, kSpectralBandCount))
     {
-        const double lambdaUm = kSpectralWavelengthsNm[band] * 1e-3;
+        const double lambdaUm = (kSpectralLambdaMinNm + kSpectralLambdaStepNm * band) * 1e-3;
         const double k = 2.0 * kPi / lambdaUm;
 
         std::vector<double> p11(static_cast<size_t>(bins), 0.0);

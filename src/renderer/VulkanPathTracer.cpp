@@ -155,9 +155,10 @@ struct BufferAllocation
 // alignment fails to compile rather than corrupting the GPU view of the data.
 struct alignas(16) SceneData
 {
-    float skyBetaRayleighBetaM[4];
+    // x = Rayleigh extinction at 550 nm, y = Mie extinction,
+    // z = solar temperature (K), w = solar radiance at 550 nm.
+    float skySpectralParams[4];
     float skyRadiiScaleHeights[4];
-    float skySunRadiance[4];
     float skySunDirectionRadius[4];
     uint32_t skySampleCounts[4];
     // x = sun-disk AA width, y = Rayleigh depolarization,
@@ -165,7 +166,7 @@ struct alignas(16) SceneData
     float skyVrtParams[4];
 };
 
-static_assert(sizeof(SceneData) == 96, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 80, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -388,12 +389,14 @@ private:
     {
         const SkySpectralConfig& s = m_config.skySpectral;
         SceneData sceneData{};
-        PackVec4(sceneData.skyBetaRayleighBetaM, s.betaRayleigh, s.betaMie);
+        sceneData.skySpectralParams[0] = s.betaRayleigh550;
+        sceneData.skySpectralParams[1] = s.betaMie;
+        sceneData.skySpectralParams[2] = s.sunTemperatureKelvin;
+        sceneData.skySpectralParams[3] = s.sunRadiance550;
         sceneData.skyRadiiScaleHeights[0] = s.earthRadius;
         sceneData.skyRadiiScaleHeights[1] = s.atmosphereRadius;
         sceneData.skyRadiiScaleHeights[2] = s.scaleHeightRayleigh;
         sceneData.skyRadiiScaleHeights[3] = s.scaleHeightMie;
-        PackVec4(sceneData.skySunRadiance, s.sunRadiance, 0.0f);
         PackVec4(sceneData.skySunDirectionRadius, s.sunDirection, s.sunRadius);
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;

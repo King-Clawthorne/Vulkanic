@@ -91,13 +91,14 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 // cost.
 struct SkySpectralConfig
 {
-    std::array<float, 3> betaRayleigh{3.8e-6f, 13.5e-6f, 33.1e-6f};
+    float betaRayleigh550 = 13.5e-6f;
     float betaMie = 21e-6f;
     float earthRadius = 6360e3f;
     float atmosphereRadius = 6420e3f;
     float scaleHeightRayleigh = 7994.0f;
     float scaleHeightMie = 1200.0f;
-    std::array<float, 3> sunRadiance{20.0f, 18.0f, 14.5f};
+    float sunTemperatureKelvin = 5778.0f;
+    float sunRadiance550 = 18.0f;
     std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
     float sunRadius = 0.1f;
     float sunAa = 0.01f;

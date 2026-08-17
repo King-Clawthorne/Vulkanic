@@ -504,11 +504,6 @@ void ParseOptionalJsonFloat3(const JsonValue::Object& object, std::string_view k
     }
 }
 
-bool HasNegativeElement(const std::array<float, 3>& value)
-{
-    return std::ranges::any_of(value, [](float component) { return component < 0.0f; });
-}
-
 // Throw a validation error when `failed` is true. Lets each semantic check in
 // ParseRuntimeConfig stay a single fail-fast line that reads as the condition
 // that is NOT allowed, paired with its message.
@@ -559,13 +554,14 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
         if (const JsonValue* spectralValue = FindMember(sky, "spectralConstants"))
         {
             const auto& spectral = spectralValue->AsObject("\"sky.spectralConstants\"");
-            ParseOptionalJsonFloat3(spectral, "BETA_R", config.skySpectral.betaRayleigh);
+            ParseOptionalJsonNumber(spectral, "BETA_R_550", config.skySpectral.betaRayleigh550);
             ParseOptionalJsonNumber(spectral, "BETA_M", config.skySpectral.betaMie);
             ParseOptionalJsonNumber(spectral, "EARTH_R", config.skySpectral.earthRadius);
             ParseOptionalJsonNumber(spectral, "ATMOS_R", config.skySpectral.atmosphereRadius);
             ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
             ParseOptionalJsonNumber(spectral, "SCALE_H_M", config.skySpectral.scaleHeightMie);
-            ParseOptionalJsonFloat3(spectral, "SUN_RADIANCE", config.skySpectral.sunRadiance);
+            ParseOptionalJsonNumber(spectral, "SUN_TEMPERATURE_K", config.skySpectral.sunTemperatureKelvin);
+            ParseOptionalJsonNumber(spectral, "SUN_RADIANCE_550", config.skySpectral.sunRadiance550);
             ParseOptionalJsonFloat3(spectral, "SUN_DIRECTION", config.skySpectral.sunDirection);
             ParseOptionalJsonNumber(spectral, "SUN_RADIUS", config.skySpectral.sunRadius);
             ParseOptionalJsonNumber(spectral, "SUN_AA", config.skySpectral.sunAa);
@@ -619,13 +615,14 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
     FailIf(config.maxPitchDegrees <= 0.0f || config.maxPitchDegrees >= 90.0f,
            "\"maxPitchDegrees\" must be greater than 0 and less than 90.");
     FailIf(config.skyExposure <= 0.0f, "\"exposure\" must be greater than 0.");
-    FailIf(HasNegativeElement(sky.betaRayleigh) || sky.betaMie < 0.0f,
+    FailIf(sky.betaRayleigh550 < 0.0f || sky.betaMie < 0.0f,
            "Sky scattering coefficients must be non-negative.");
     FailIf(sky.earthRadius <= 0.0f || sky.atmosphereRadius <= 0.0f || sky.atmosphereRadius <= sky.earthRadius,
            "\"EARTH_R\" and \"ATMOS_R\" must be positive, and ATMOS_R must exceed EARTH_R.");
     FailIf(sky.scaleHeightRayleigh <= 0.0f || sky.scaleHeightMie <= 0.0f,
            "\"SCALE_H_R\" and \"SCALE_H_M\" must be greater than 0.");
-    FailIf(HasNegativeElement(sky.sunRadiance), "\"SUN_RADIANCE\" values must be non-negative.");
+    FailIf(sky.sunTemperatureKelvin <= 0.0f || sky.sunRadiance550 < 0.0f,
+           "\"SUN_TEMPERATURE_K\" must be positive and \"SUN_RADIANCE_550\" non-negative.");
     FailIf(sky.sunRadius <= 0.0f || sky.sunAa < 0.0f,
            "\"SUN_RADIUS\" must be greater than 0 and \"SUN_AA\" must be non-negative.");
     FailIf(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2] <= 0.0f,

@@ -1,9 +1,9 @@
 # Vulkanic
 
 A lightweight, purely native C++23 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as an RGB Stokes-vector first- and second-order scattering problem —
-Rayleigh + Lorenz–Mie — viewed through a runtime camera analyzer that switches between linear and
-elliptical polarization.
+renders the daytime sky as a thirteen-band spectral Stokes-vector first- and second-order scattering
+problem — Rayleigh + Lorenz–Mie — then converts CIE XYZ to display RGB after a runtime camera
+analyzer that switches between linear and elliptical polarization.
 
 ---
 
@@ -24,8 +24,8 @@ Build a complete, runnable real-time simulator that:
 - Targets a raw Vulkan compute pipeline on Windows.
 - Uses Win32 directly for the window/input layer and keeps math/config parsing in-repo; CMake fetches
   `vk-bootstrap` for Vulkan bootstrap setup and Vulkan Memory Allocator for buffer allocation.
-- Carries the full Stokes vector (I, Q, U, V) through the atmosphere in representative red, green,
-  and blue bands.
+- Carries the full Stokes vector (I, Q, U, V) through the atmosphere at thirteen wavelengths from
+  400–700 nm, rather than transporting display RGB.
 - Lets the user aim the camera around the sky dome and switch between linear and elliptical analyzer
   modes at runtime.
 
@@ -37,6 +37,9 @@ The repository implements the whole stack from the OS layer up:
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix (boundary-layer haze,
   conservative scattering). Everything is transported as Stokes vectors with proper Mueller
   matrices and frame rotations through two scattering events.
+- **Spectral colour pipeline** — thirteen 25 nm bands drive wavelength-scaled Rayleigh extinction,
+  wavelength-resolved Mie matrices, and a Planck solar spectrum. CIE 1931 XYZ integration and
+  linear-sRGB conversion happen only after atmospheric transport and polarization analysis.
 - **Physical sky details** — a binary earth-shadow test that puts twilight points behind the
   planet's limb into umbra, giving the sky its terminator.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the

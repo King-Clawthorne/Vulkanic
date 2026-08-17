@@ -8,7 +8,7 @@
 // series runs over tens of terms per particle and must be integrated over a
 // particle size distribution, per wavelength). Instead we bake it once on the
 // CPU into a table of the four independent scattering-matrix elements
-// (F11, F12, F33, F34) versus scattering angle for representative RGB bands,
+// (F11, F12, F33, F34) versus scattering angle for thirteen spectral bands,
 // and sample that table in sky.comp.
 //
 // For spherical particles the 4x4 single-scattering (Mueller) matrix is block
@@ -23,8 +23,9 @@
 #include <cstdint>
 #include <vector>
 
-inline constexpr int kSpectralBandCount = 3;
-inline constexpr double kSpectralWavelengthsNm[kSpectralBandCount] = {680.0, 550.0, 440.0};
+inline constexpr int kSpectralBandCount = 13;
+inline constexpr double kSpectralLambdaMinNm = 400.0;
+inline constexpr double kSpectralLambdaStepNm = 25.0;
 
 // Aerosol model + sampling controls for the Mie table bake. Defaults model a
 // mild continental haze (water-ish droplets, sub-micron, weakly absorbing).
@@ -48,7 +49,7 @@ struct MieMatrixEntry
 };
 
 // Compute the ensemble-averaged, phase-normalized Mie scattering-matrix table.
-// Returns entries for representative red, green, and blue wavelengths,
+// Returns entries for each 25 nm band from 400 through 700 nm,
 // concatenated band-major:
 //   index(band, bin) = band * angleBins + bin
 // where bin i corresponds to scattering angle theta = i/(angleBins-1) * π.

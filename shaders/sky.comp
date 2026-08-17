@@ -13,12 +13,13 @@
 #define SKY_COMP_INCLUDED
 
 const float PI = 3.14159265358979323846;
-const int SPECTRAL_BANDS = 3;
+const int SPECTRAL_BANDS = 13;
+const float LAMBDA_MIN_NM = 400.0;
+const float LAMBDA_STEP_NM = 25.0;
 
 float wavelength_nm(int band)
 {
-    const float wavelengthsNm[3] = float[3](680.0, 550.0, 440.0);
-    return wavelengthsNm[band];
+    return LAMBDA_MIN_NM + LAMBDA_STEP_NM * float(band);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -27,12 +28,13 @@ float wavelength_nm(int band)
 
 float SkyBetaR(int band)
 {
-    return sceneData.skyBetaRayleighBetaM[band];
+    float ratio = 550.0 / wavelength_nm(band);
+    return sceneData.skySpectralParams.x * ratio * ratio * ratio * ratio;
 }
 
 float SkyBetaM()
 {
-    return sceneData.skyBetaRayleighBetaM.w;
+    return sceneData.skySpectralParams.y;
 }
 
 float SkyEarthRadius()
@@ -67,7 +69,16 @@ float SkySunAa()
 
 float SkySunRadiance(int band)
 {
-    return sceneData.skySunRadiance[band];
+    // Planck spectral radiance, normalized at 550 nm so the configured
+    // radiance retains a simple scene-scale meaning.
+    float temperature = sceneData.skySpectralParams.z;
+    float lambda = wavelength_nm(band) * 1.0e-9;
+    float lambdaRef = 550.0e-9;
+    const float c2 = 1.4387769e-2;
+    float shape = pow(lambdaRef / lambda, 5.0)
+                * (exp(c2 / (lambdaRef * temperature)) - 1.0)
+                / (exp(c2 / (lambda * temperature)) - 1.0);
+    return sceneData.skySpectralParams.w * shape;
 }
 
 int SkySecondarySamples()
@@ -168,8 +179,8 @@ float sun_disk(vec3 V, vec3 L)
 // POLARIZED VECTOR RADIATIVE TRANSFER
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// The sky radiance is solved in representative red, green, and blue bands as
-// a Stokes-vector (I, Q, U, V) transfer problem. Rayleigh uses an analytic
+// The sky radiance is solved independently in thirteen visible-spectrum bands
+// as a Stokes-vector (I, Q, U, V) transfer problem. Rayleigh uses an analytic
 // depolarized scattering matrix; aerosols use the wavelength-resolved
 // Lorenz–Mie matrix in mieMatrixBuffer.
 

@@ -15,9 +15,10 @@
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 2) uniform SceneData
 {
-    vec4 skyBetaRayleighBetaM;
+    // x = Rayleigh extinction at 550 nm, y = Mie extinction,
+    // z = solar temperature (K), w = solar radiance at 550 nm.
+    vec4 skySpectralParams;
     vec4 skyRadiiScaleHeights;
-    vec4 skySunRadiance;
     vec4 skySunDirectionRadius;
     uvec4 skySampleCounts;
     // x = sun-disk AA width, y = Rayleigh depolarization,
@@ -27,7 +28,7 @@ layout(set = 0, binding = 2) uniform SceneData
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
 // (F11, F12, F33, F34) at one scattering angle; entries are stored band-major
-// (band * angleBins + bin), bands = R, G, B.
+// (band * angleBins + bin), 13 bands from 400 to 700 nm.
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
 {
     vec4 entries[];
@@ -79,6 +80,35 @@ vec2 NextFloat2(inout uint state)
 vec3 GetSunDirection()
 {
     return normalize(sceneData.skySunDirectionRadius.xyz);
+}
+
+// Smooth analytic fits to the CIE 1931 2-degree colour-matching functions.
+// Spectral transport remains in radiometric units; this conversion occurs
+// only once, at the display boundary.
+float cie_gaussian(float lambda, float mean, float leftScale, float rightScale)
+{
+    float scale = lambda < mean ? leftScale : rightScale;
+    float x = (lambda - mean) * scale;
+    return exp(-0.5 * x * x);
+}
+
+vec3 CieXyz(float lambda)
+{
+    float x = 1.056 * cie_gaussian(lambda, 599.8, 0.0264, 0.0323)
+            + 0.362 * cie_gaussian(lambda, 442.0, 0.0624, 0.0374)
+            - 0.065 * cie_gaussian(lambda, 501.1, 0.0490, 0.0382);
+    float y = 0.821 * cie_gaussian(lambda, 568.8, 0.0213, 0.0247)
+            + 0.286 * cie_gaussian(lambda, 530.9, 0.0613, 0.0322);
+    float z = 1.217 * cie_gaussian(lambda, 437.0, 0.0845, 0.0278)
+            + 0.681 * cie_gaussian(lambda, 459.0, 0.0385, 0.0725);
+    return max(vec3(x, y, z), vec3(0.0));
+}
+
+vec3 XyzToLinearSrgb(vec3 xyz)
+{
+    return mat3( 3.2406, -0.9689,  0.0557,
+                -1.5372,  1.8758, -0.2040,
+                -0.4986,  0.0415,  1.0570) * xyz;
 }
 
 // Hue-preserving photographic shoulder. The curve is evaluated from the
