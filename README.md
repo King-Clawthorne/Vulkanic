@@ -1,6 +1,6 @@
 # Vulkanic
 
-A lightweight, purely native C++23 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
+A lightweight, purely native C++26 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
 renders the daytime sky as a thirteen-band spectral Stokes-vector first- and second-order scattering
 problem — Rayleigh + Lorenz–Mie — then converts CIE XYZ to display RGB after a runtime camera
 analyzer that switches between linear and elliptical polarization.
@@ -73,8 +73,8 @@ A compact repository whose only job is to render the polarized sky and let you s
 - **GPU:** any Vulkan 1.2+ GPU with a compute queue, a storage-image-capable swapchain, and
   `shaderStorageImageWriteWithoutFormat` support (no hardware ray tracing required).
 - **Vulkan SDK:** installed and exposed via the `VULKAN_SDK` environment variable.
-- **Compiler:** any C++20 toolchain — MSVC via Visual Studio is the tested path.
-- **CMake:** 3.20 or newer.
+- **Compiler:** a C++26-capable toolchain — MSVC via Visual Studio is the tested path.
+- **CMake:** 3.25 or newer (required for C++26 standard selection).
 - **Network during first configure:** CMake fetches `vk-bootstrap` and Vulkan Memory Allocator unless
   they are already present in the build cache.
 
@@ -94,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 -Clean
 ```
 
 Or build manually with CMake. The project uses the Ninja generator in the script, but any generator
-with a working C++20 toolchain and Vulkan SDK can work:
+with a working C++26 toolchain and Vulkan SDK can work:
 
 ```bash
 mkdir build

@@ -1,11 +1,14 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25)
 project(vulkan_path_tracer)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
+    # CMake does not yet expose CXX26 as a strict MSVC dialect, but its
+    # non-strict fallback selects MSVC's C++26-capable /std:c++latest mode.
+    set(CMAKE_CXX_STANDARD_REQUIRED OFF)
+
     foreach(flag_var
             CMAKE_C_FLAGS_DEBUG
             CMAKE_CXX_FLAGS_DEBUG
@@ -15,6 +18,8 @@ if(MSVC)
             string(REPLACE "/Zi" "/Z7" ${flag_var} "${${flag_var}}")
         endif()
     endforeach()
+else()
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
 find_program(SCCACHE_EXECUTABLE NAMES sccache)
