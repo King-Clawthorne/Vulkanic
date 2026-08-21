@@ -65,7 +65,8 @@ set(SHADER_SOURCES
 
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp")
 
 set(SHADER_SPV_OUTPUTS)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
@@ -89,6 +90,7 @@ add_executable(Vulkanic
         src/main.cpp
         src/config/RuntimeConfig.cpp
         src/sky/MieScattering.cpp
+        src/sky/RainbowScattering.cpp
         src/app/CameraController.cpp
         src/renderer/VmaUsage.cpp
         src/renderer/VulkanPathTracer.cpp)

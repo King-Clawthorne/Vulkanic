@@ -1,7 +1,7 @@
 # Vulkanic
 
 A lightweight, purely native C++26 Vulkan **real-time polarized-sky simulator**. **Vulkanic**
-renders the daytime sky as a thirteen-band spectral Stokes-vector first- and second-order scattering
+renders the daytime sky as a thirteen-band spectral Stokes-vector successive-order scattering
 problem — Rayleigh + Lorenz–Mie — then converts CIE XYZ to display RGB after a runtime camera
 analyzer that switches between linear and elliptical polarization.
 
@@ -36,12 +36,18 @@ The repository implements the whole stack from the OS layer up:
 - **Polarized vector radiative transfer** (`shaders/sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix (boundary-layer haze,
   conservative scattering). Everything is transported as Stokes vectors with proper Mueller
-  matrices and frame rotations through two scattering events.
+  matrices and frame rotations through up to four scattering events.
 - **Spectral colour pipeline** — thirteen 25 nm bands drive wavelength-scaled Rayleigh extinction,
   wavelength-resolved Mie matrices, and a Planck solar spectrum. CIE 1931 XYZ integration and
   linear-sRGB conversion happen only after atmospheric transport and polarization analysis.
 - **Physical sky details** — a binary earth-shadow test that puts twilight points behind the
-  planet's limb into umbra, giving the sky its terminator.
+  planet's limb into umbra, giving the sky its terminator. A configurable spectrally neutral
+  Lambertian lower boundary reflects attenuated direct sunlight and feeds the polarized
+  successive-order atmosphere.
+- **Polarized physical rainbow** — a CPU-baked, 13-band water-droplet Debye/Fresnel Mueller table
+  drives primary and secondary bow scattering through a finite ellipsoidal rain volume, including
+  rain/air attenuation and finite-solar-disk broadening. The result joins the sky as Stokes
+  radiance before the camera analyzer and CIE conversion.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
@@ -109,6 +115,8 @@ cmake --build .
 - Arrow keys look around without the mouse. `R` resets the camera to the JSON view.
 - The Dear ImGui overlay adjusts exposure, aerosol density, and integration steps.
   Press `F1` to hide or show it.
+- `F2` switches to the next JSON config discovered alongside the active config.
+- `F5` saves the current GUI-adjusted settings back to the active config file.
 - `P` toggles the polarization analyzer.
 - `C` switches the analyzer between linear and elliptical modes.
 - In linear mode, `[` / `]` rotate the analyzer axis.
@@ -127,8 +135,15 @@ reloads the running simulation without rebuilding:
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
   depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
+  - `GROUND_ALBEDO` — Lambertian lower-boundary reflectance in `[0,1]`; `0` restores black Earth.
   - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` controls equal-area angular
     samples for polarized second-order scattering; `Samples` controls each secondary ray's steps.
+  - `SCATTERING_ORDERS` — successive polarized scattering orders from `1` through `4`. Orders
+    three and four are much more expensive; select `1` or `2` for realtime tuning.
+- `rainbow` — enables the local rain ellipsoid and controls its centre/radii, edge softness,
+  scattering/extinction coefficients, effective droplet radius/variance, angular table resolution,
+  view-ray integration steps, and the secondary bow. Optical/distribution edits rebuild the CPU
+  table; spatial/density edits update only the scene buffer.
 
 Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
 
@@ -137,7 +152,8 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 - **Shaders (`glslc` → SPIR-V):**
   - `shaders/path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
     tonemap → swapchain storage image (compute, 8×8 workgroups).
-  - `shaders/sky.comp` — the polarized first- and second-order atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `shaders/sky.comp` — the polarized first-through-fourth-order atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `shaders/rainbow.comp` — finite-volume polarized water-droplet scattering and attenuation.
   - `shaders/path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `src/renderer/VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
@@ -146,6 +162,7 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
     raw Win32 keyboard/mouse input that drives them; the renderer reads the resulting camera basis
     and analyzer parameters when building push constants.
   - `src/sky/MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
+  - `src/sky/RainbowScattering.h` / `.cpp` — CPU water-droplet Debye/Fresnel rainbow table precompute.
   - `src/config/RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
   - `config/path_tracer_config.json` — runtime render, camera, input, and sky settings.
   - `scripts/build.ps1` — Windows configure-and-build helper.

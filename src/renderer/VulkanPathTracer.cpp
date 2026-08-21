@@ -29,6 +29,7 @@
 #include "app/CameraController.h"
 #include "config/RuntimeConfig.h"
 #include "sky/MieScattering.h"
+#include "sky/RainbowScattering.h"
 
 #include <windows.h>
 #include <vulkan/vulkan_raii.hpp>
@@ -49,7 +50,10 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iomanip>
 #include <optional>
+#include <ranges>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -162,11 +166,14 @@ struct alignas(16) SceneData
     float skySunDirectionRadius[4];
     uint32_t skySampleCounts[4];
     // x = sun-disk AA width, y = Rayleigh depolarization,
-    // z = Mie table angle bins, w unused.
+    // z = Mie table angle bins, w = Lambertian ground albedo.
     float skyVrtParams[4];
+    float rainbowCenterEnabled[4];
+    float rainbowRadiiEdge[4];
+    float rainbowOptical[4];
 };
 
-static_assert(sizeof(SceneData) == 80, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 128, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -200,6 +207,52 @@ static void PackVec4(float (&slot)[4], const Vec3& xyz, float w)
     slot[1] = xyz.y;
     slot[2] = xyz.z;
     slot[3] = w;
+}
+
+// Serialize every runtime-controlled field so F5 writes a complete,
+// independently loadable config rather than a lossy GUI-only patch.
+static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
+{
+    const SkySpectralConfig& s = c.skySpectral;
+    const RainbowConfig& r = c.rainbow;
+    std::ostringstream out;
+    out << std::setprecision(9) << std::boolalpha;
+    out << "{\n  \"render\": {\n"
+        << "    \"width\": " << c.width << ",\n    \"height\": " << c.height
+        << ",\n    \"frameCount\": " << c.frameCount << ",\n    \"samplesPerPixel\": " << c.samplesPerPixel
+        << "\n  },\n  \"camera\": {\n"
+        << "    \"initialPosition\": [" << c.initialPosition.x << ", " << c.initialPosition.y << ", " << c.initialPosition.z << "],\n"
+        << "    \"initialLookAt\": [" << c.initialLookAt.x << ", " << c.initialLookAt.y << ", " << c.initialLookAt.z << "],\n"
+        << "    \"fovYDegrees\": " << c.fovYDegrees << ",\n    \"maxPitchDegrees\": " << c.maxPitchDegrees
+        << "\n  },\n  \"input\": {\n"
+        << "    \"mouseSensitivity\": " << c.mouseSensitivity << ",\n    \"keyLookSpeed\": " << c.keyLookSpeed
+        << ",\n    \"polarizerRotateSpeed\": " << c.polarizerRotateSpeed
+        << "\n  },\n  \"rainbow\": {\n"
+        << "    \"enabled\": " << r.enabled << ",\n    \"center\": [" << r.center.x << ", " << r.center.y << ", " << r.center.z << "],\n"
+        << "    \"radii\": [" << r.radii.x << ", " << r.radii.y << ", " << r.radii.z << "],\n"
+        << "    \"edgeSoftness\": " << r.edgeSoftness << ",\n    \"scatteringCoefficient\": " << r.scatteringCoefficient
+        << ",\n    \"extinctionCoefficient\": " << r.extinctionCoefficient
+        << ",\n    \"effectiveRadiusMicrometers\": " << r.effectiveRadiusMicrometers
+        << ",\n    \"effectiveVariance\": " << r.effectiveVariance << ",\n    \"angleBins\": " << r.angleBins
+        << ",\n    \"viewSteps\": " << r.viewSteps << ",\n    \"includeSecondary\": " << r.includeSecondary
+        << "\n  },\n  \"sky\": {\n    \"exposure\": " << c.skyExposure << ",\n    \"spectralConstants\": {\n"
+        << "      \"BETA_R_550\": " << s.betaRayleigh550 << ",\n      \"BETA_M\": " << s.betaMie
+        << ",\n      \"EARTH_R\": " << s.earthRadius << ",\n      \"ATMOS_R\": " << s.atmosphereRadius
+        << ",\n      \"SCALE_H_R\": " << s.scaleHeightRayleigh << ",\n      \"SCALE_H_M\": " << s.scaleHeightMie
+        << ",\n      \"SUN_TEMPERATURE_K\": " << s.sunTemperatureKelvin << ",\n      \"SUN_RADIANCE_550\": " << s.sunRadiance550
+        << ",\n      \"SUN_DIRECTION\": [" << s.sunDirection[0] << ", " << s.sunDirection[1] << ", " << s.sunDirection[2] << "],\n"
+        << "      \"SUN_RADIUS\": " << s.sunRadius << ",\n      \"SUN_AA\": " << s.sunAa
+        << ",\n      \"secondarySamples\": " << s.secondarySamples << ",\n      \"VIEW_STEPS\": " << s.viewSteps
+        << ",\n      \"Samples\": " << s.samples << ",\n      \"SCATTERING_ORDERS\": " << s.scatteringOrders
+        << ",\n      \"RAYLEIGH_DEPOLARIZATION\": " << s.rayleighDepolarization
+        << ",\n      \"GROUND_ALBEDO\": " << s.groundAlbedo
+        << ",\n      \"AEROSOL_IOR_REAL\": " << s.aerosolRefractiveIndexReal
+        << ",\n      \"AEROSOL_IOR_IMAG\": " << s.aerosolRefractiveIndexImag
+        << ",\n      \"AEROSOL_MEAN_RADIUS_UM\": " << s.aerosolMeanRadiusMicrometers
+        << ",\n      \"AEROSOL_SIGMA\": " << s.aerosolSigma
+        << ",\n      \"MIE_TABLE_ANGLE_BINS\": " << s.mieTableAngleBins
+        << "\n    }\n  }\n}\n";
+    return out.str();
 }
 
 // =====================================================================
@@ -311,6 +364,19 @@ private:
             app->m_showGui = !app->m_showGui;
             return 0;
         }
+        if (message == WM_KEYDOWN && app != nullptr && (lParam & (1LL << 30)) == 0)
+        {
+            if (wParam == VK_F2)
+            {
+                app->m_cycleConfigRequested = true;
+                return 0;
+            }
+            if (wParam == VK_F5)
+            {
+                app->m_saveConfigRequested = true;
+                return 0;
+            }
+        }
         if (app != nullptr && app->m_imguiInitialized && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam))
         {
             return 1;
@@ -375,11 +441,38 @@ private:
                 next.skySpectral.viewSteps = static_cast<uint32_t>(viewSteps);
                 changed = true;
             }
+            int scatteringOrders = static_cast<int>(next.skySpectral.scatteringOrders);
+            if (ImGui::SliderInt("Scattering orders", &scatteringOrders, 1, 4))
+            {
+                next.skySpectral.scatteringOrders = static_cast<uint32_t>(scatteringOrders);
+                changed = true;
+            }
+            changed |= ImGui::SliderFloat("Ground albedo", &next.skySpectral.groundAlbedo,
+                                          0.0f, 1.0f, "%.2f");
+            bool rainbowEnabled = next.rainbow.enabled != 0;
+            if (ImGui::Checkbox("Rainbow", &rainbowEnabled))
+            {
+                next.rainbow.enabled = rainbowEnabled ? 1u : 0u;
+                changed = true;
+            }
+            if (rainbowEnabled)
+            {
+                float rainScattering = next.rainbow.scatteringCoefficient * 1.0e4f;
+                if (ImGui::SliderFloat("Rain scattering", &rainScattering, 0.0f, 5.0f, "%.2f"))
+                {
+                    next.rainbow.scatteringCoefficient = rainScattering * 1.0e-4f;
+                    next.rainbow.extinctionCoefficient = std::max(next.rainbow.extinctionCoefficient,
+                                                                   next.rainbow.scatteringCoefficient);
+                    changed = true;
+                }
+            }
             if (changed)
             {
                 ApplyRuntimeConfig(next, false);
             }
-            ImGui::TextDisabled("F1 toggles controls");
+            ImGui::Separator();
+            ImGui::Text("Config: %s", m_configPath.filename().string().c_str());
+            ImGui::TextDisabled("F1 GUI | F2 next config | F5 save");
             ImGui::End();
         }
         ImGui::Render();
@@ -401,9 +494,18 @@ private:
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;
         sceneData.skySampleCounts[2] = s.samples;
+        sceneData.skySampleCounts[3] = s.scatteringOrders;
         sceneData.skyVrtParams[0] = s.sunAa;
         sceneData.skyVrtParams[1] = s.rayleighDepolarization;
         sceneData.skyVrtParams[2] = static_cast<float>(s.mieTableAngleBins);
+        sceneData.skyVrtParams[3] = s.groundAlbedo;
+        const RainbowConfig& r = m_config.rainbow;
+        PackVec4(sceneData.rainbowCenterEnabled, r.center, static_cast<float>(r.enabled));
+        PackVec4(sceneData.rainbowRadiiEdge, r.radii, r.edgeSoftness);
+        sceneData.rainbowOptical[0] = r.scatteringCoefficient;
+        sceneData.rainbowOptical[1] = r.extinctionCoefficient;
+        sceneData.rainbowOptical[2] = static_cast<float>(r.angleBins);
+        sceneData.rainbowOptical[3] = static_cast<float>(r.viewSteps);
         return sceneData;
     }
 
@@ -413,6 +515,7 @@ private:
     {
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
         CreateMieScatteringBuffer();
+        CreateRainbowScatteringBuffer();
     }
 
     // Translate the aerosol fields of the live config into the Mie precompute
@@ -444,12 +547,35 @@ private:
                      params.angleBins, kSpectralBandCount);
     }
 
+    RainbowScatteringParams BuildRainbowScatteringParams() const
+    {
+        RainbowScatteringParams params{};
+        params.effectiveRadiusMicrometers = m_config.rainbow.effectiveRadiusMicrometers;
+        params.effectiveVariance = m_config.rainbow.effectiveVariance;
+        params.solarAngularRadiusRadians = m_config.skySpectral.sunRadius;
+        params.angleBins = static_cast<int>(m_config.rainbow.angleBins);
+        params.includeSecondary = m_config.rainbow.includeSecondary != 0;
+        return params;
+    }
+
+    void CreateRainbowScatteringBuffer()
+    {
+        const RainbowScatteringParams params = BuildRainbowScatteringParams();
+        const std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(params);
+        const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
+        m_rainbowScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        UploadToBuffer(m_rainbowScatteringBuffer, std::as_bytes(std::span{table}));
+        std::println("[Rainbow] Baked droplet Mueller matrix: {} angle bins x {} spectral bands.",
+                     params.angleBins, kSpectralBandCount);
+    }
+
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
     // call when the buffer was never created (no-op).
     void DestroySceneBuffers()
     {
         DestroyBuffer(m_sceneDataBuffer);
         DestroyBuffer(m_mieScatteringBuffer);
+        DestroyBuffer(m_rainbowScatteringBuffer);
     }
 
     // Pack the current RuntimeConfig.skySpectral into a SceneData record and
@@ -474,19 +600,23 @@ private:
             const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[i], vk::ImageLayout::eGeneral};
             const vk::DescriptorBufferInfo sceneDataInfo{m_sceneDataBuffer.buffer, 0, m_sceneDataBuffer.size};
             const vk::DescriptorBufferInfo mieDataInfo{m_mieScatteringBuffer.buffer, 0, m_mieScatteringBuffer.size};
+            const vk::DescriptorBufferInfo rainbowDataInfo{m_rainbowScatteringBuffer.buffer, 0,
+                                                            m_rainbowScatteringBuffer.size};
 
             vk::WriteDescriptorSet imageWrite{*m_descriptorSets[i], 0, 0, vk::DescriptorType::eStorageImage, imageInfo};
             vk::WriteDescriptorSet sceneWrite{*m_descriptorSets[i], 2, 0, vk::DescriptorType::eUniformBuffer, {}, sceneDataInfo};
             vk::WriteDescriptorSet mieWrite{*m_descriptorSets[i], 7, 0, vk::DescriptorType::eStorageBuffer, {}, mieDataInfo};
+            vk::WriteDescriptorSet rainbowWrite{*m_descriptorSets[i], 8, 0,
+                                                 vk::DescriptorType::eStorageBuffer, {}, rainbowDataInfo};
 
-            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite}, nullptr);
+            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite}, nullptr);
         }
     }
 
     // Re-apply the current m_config's sky parameters to live GPU resources.
     // Rebuilds the Mie scattering table when the aerosol model changed, then
     // re-uploads the scene UBO.
-    void RefreshSceneFromConfig(bool rebuildMieTable)
+    void RefreshSceneFromConfig(bool rebuildMieTable, bool rebuildRainbowTable)
     {
         if (m_sceneDataBuffer.buffer == VK_NULL_HANDLE)
         {
@@ -500,6 +630,12 @@ private:
             CreateMieScatteringBuffer();
             UpdateDescriptorSetContents();
         }
+        if (rebuildRainbowTable)
+        {
+            DestroyBuffer(m_rainbowScatteringBuffer);
+            CreateRainbowScatteringBuffer();
+            UpdateDescriptorSetContents();
+        }
         UploadSceneDataFromConfig();
     }
 
@@ -509,6 +645,9 @@ private:
     {
         const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
         const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
+        const bool rainbowChanged = config.rainbow != m_config.rainbow;
+        const bool rainbowOpticsChanged = HasRainbowOpticsChanged(config.rainbow, m_config.rainbow)
+                                           || config.skySpectral.sunRadius != m_config.skySpectral.sunRadius;
 
         if (!m_configPath.empty() && !resetCameraState)
         {
@@ -528,9 +667,9 @@ private:
 
         m_camera.ClampPitch(m_config);
 
-        if (skySpectralChanged)
+        if (skySpectralChanged || rainbowChanged)
         {
-            RefreshSceneFromConfig(mieAerosolChanged);
+            RefreshSceneFromConfig(mieAerosolChanged, rainbowOpticsChanged);
         }
     }
 
@@ -559,6 +698,8 @@ private:
         {
             m_configPath = ResolveRuntimeFilePath(CONFIG_FILE_NAME);
         }
+
+        DiscoverConfigFiles();
         if (m_configPath.empty())
         {
             throw std::runtime_error("Failed to locate path_tracer_config.json.");
@@ -574,6 +715,102 @@ private:
         }
 
         std::println("[Config] Loaded {}", m_configPath.string());
+        std::println("[Config] F2 cycles {} discovered config file(s); F5 saves GUI settings.",
+                     m_configFiles.size());
+    }
+
+    void DiscoverConfigFiles()
+    {
+        m_configFiles.clear();
+        std::vector<std::filesystem::path> directories = {
+            m_configPath.parent_path(),
+            std::filesystem::current_path() / L"config",
+            std::filesystem::current_path().parent_path() / L"config",
+        };
+        for (const auto& directory : directories)
+        {
+            std::error_code errorCode;
+            if (!std::filesystem::is_directory(directory, errorCode)) continue;
+            for (const auto& entry : std::filesystem::directory_iterator(directory, errorCode))
+            {
+                if (errorCode) break;
+                if (!entry.is_regular_file() || entry.path().extension() != L".json") continue;
+                const auto path = std::filesystem::absolute(entry.path()).lexically_normal();
+                if (std::ranges::find(m_configFiles, path) == m_configFiles.end())
+                    m_configFiles.push_back(path);
+            }
+        }
+        std::ranges::sort(m_configFiles);
+        const auto selected = std::ranges::find(m_configFiles, m_configPath);
+        if (selected == m_configFiles.end())
+        {
+            m_configFiles.push_back(m_configPath);
+            m_configIndex = m_configFiles.size() - 1;
+        }
+        else
+        {
+            m_configIndex = static_cast<size_t>(selected - m_configFiles.begin());
+        }
+    }
+
+    void SaveActiveConfig()
+    {
+        std::ofstream file(m_configPath, std::ios::binary | std::ios::trunc);
+        if (!file) throw std::runtime_error("Failed to open active config for saving.");
+        const std::string json = SerializeRuntimeConfig(m_config);
+        file.write(json.data(), static_cast<std::streamsize>(json.size()));
+        file.close();
+        if (!file) throw std::runtime_error("Failed to save active config.");
+        std::error_code errorCode;
+        m_configLastWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
+        if (errorCode) throw std::runtime_error("Saved config but could not read its timestamp.");
+        std::println("[Config] Saved {}", m_configPath.string());
+    }
+
+    void CycleActiveConfig()
+    {
+        DiscoverConfigFiles();
+        if (m_configFiles.size() < 2)
+        {
+            std::println("[Config] No alternate JSON config files found.");
+            return;
+        }
+        const size_t oldIndex = m_configIndex;
+        const std::filesystem::path oldPath = m_configPath;
+        m_configIndex = (m_configIndex + 1) % m_configFiles.size();
+        m_configPath = m_configFiles[m_configIndex];
+        try
+        {
+            ApplyRuntimeConfig(ParseRuntimeConfig(LoadTextFile(m_configPath)), false);
+            std::error_code errorCode;
+            m_configLastWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
+            if (errorCode) throw std::runtime_error("Failed to read alternate config timestamp.");
+            std::println("[Config] Switched to {}", m_configPath.string());
+        }
+        catch (const std::exception& error)
+        {
+            m_configIndex = oldIndex;
+            m_configPath = oldPath;
+            std::println(stderr, "[Config] Failed to switch config: {}", error.what());
+        }
+    }
+
+    void ProcessConfigCommands()
+    {
+        if (m_cycleConfigRequested)
+        {
+            m_cycleConfigRequested = false;
+            CycleActiveConfig();
+        }
+        if (m_saveConfigRequested)
+        {
+            m_saveConfigRequested = false;
+            try { SaveActiveConfig(); }
+            catch (const std::exception& error)
+            {
+                std::println(stderr, "[Config] Save failed: {}", error.what());
+            }
+        }
     }
 
     // Poll the config file's last-write time once per frame; on a change
@@ -914,10 +1151,11 @@ private:
         // values (gaps are legal) so the shared sky header is untouched.
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 3> bindings = {
+        const std::array<vk::DescriptorSetLayoutBinding, 4> bindings = {
             vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
             vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{8, eStorageBuffer, 1, compute},
         };
 
         vk::DescriptorSetLayoutCreateInfo createInfo{};
@@ -967,7 +1205,7 @@ private:
         const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
             vk::DescriptorPoolSize{eStorageImage, count},
             vk::DescriptorPoolSize{eUniformBuffer, count},
-            vk::DescriptorPoolSize{eStorageBuffer, count},
+            vk::DescriptorPoolSize{eStorageBuffer, count * 2u},
         };
 
         vk::DescriptorPoolCreateInfo poolInfo{};
@@ -1188,6 +1426,7 @@ private:
             }
 
             const auto frameStart = Clock::now();
+            ProcessConfigCommands();
             ReloadRuntimeConfigIfNeeded();
             const double deltaSeconds = std::chrono::duration<double>(frameStart - previousFrameStart).count();
             previousFrameStart = frameStart;
@@ -1247,6 +1486,7 @@ private:
     VmaAllocator m_allocator = VK_NULL_HANDLE;
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_mieScatteringBuffer{};
+    BufferAllocation m_rainbowScatteringBuffer{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Format m_swapchainFormat = vk::Format::eUndefined;
@@ -1270,6 +1510,10 @@ private:
     uint64_t m_frameIndex = 0;
     RuntimeConfig m_config{};
     std::filesystem::path m_configPath;
+    std::vector<std::filesystem::path> m_configFiles;
+    size_t m_configIndex = 0;
+    bool m_cycleConfigRequested = false;
+    bool m_saveConfigRequested = false;
     std::filesystem::file_time_type m_configLastWriteTime{};
     std::chrono::steady_clock::time_point m_lastConfigPollTime{};
 

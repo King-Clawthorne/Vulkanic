@@ -77,6 +77,8 @@ void main()
         for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
             Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+            Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+            sky = stokes_add(sky, rainbow);
             float radiance = sky.I;
             if (polarized)
             {

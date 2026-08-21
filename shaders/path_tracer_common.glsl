@@ -22,8 +22,13 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 skySunDirectionRadius;
     uvec4 skySampleCounts;
     // x = sun-disk AA width, y = Rayleigh depolarization,
-    // z = Mie table angle bins, w unused.
+    // z = Mie table angle bins, w = Lambertian ground albedo.
     vec4 skyVrtParams;
+    // Local rain ellipsoid and optical/table integration parameters.
+    vec4 rainbowCenterEnabled;
+    vec4 rainbowRadiiEdge;
+    // x/y scattering/extinction (1/m), z angle bins, w view steps.
+    vec4 rainbowOptical;
 } sceneData;
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is
@@ -33,6 +38,11 @@ layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
 {
     vec4 entries[];
 } mieMatrixBuffer;
+
+layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer
+{
+    vec4 entries[];
+} rainbowMatrixBuffer;
 
 layout(push_constant) uniform PushConstants
 {
@@ -50,6 +60,7 @@ layout(push_constant) uniform PushConstants
 } pc;
 
 #include "sky.comp"
+#include "rainbow.comp"
 
 // Wang hash — seeds per-pixel RNG state from a tile-friendly integer so
 // neighbouring pixels diverge after one mix.

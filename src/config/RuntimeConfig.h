@@ -98,21 +98,29 @@ struct SkySpectralConfig
     float scaleHeightRayleigh = 7994.0f;
     float scaleHeightMie = 1200.0f;
     float sunTemperatureKelvin = 5778.0f;
-    float sunRadiance550 = 18.0f;
+    // Disk radiance corresponding to the former 18.0-at-0.1-radian setup,
+    // rescaled to preserve solar irradiance at the physical 0.00465 rad radius.
+    float sunRadiance550 = 8317.742f;
     std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
-    float sunRadius = 0.1f;
-    float sunAa = 0.01f;
+    float sunRadius = 0.00465f;
+    float sunAa = 0.0005f;
     // Second-order multiple scattering uses secondarySamples uniformly
     // distributed incident directions at every primary view-ray point. Each
     // secondary ray is integrated with samples steps.
     uint32_t secondarySamples = 4;
     uint32_t viewSteps = 5;
     uint32_t samples = 3;
+    // Successive scattering orders evaluated by sky.comp (1-4). Cost grows
+    // rapidly with angular samples, so 1-2 are intended for realtime tuning.
+    uint32_t scatteringOrders = 3;
 
     // ── Vector radiative transfer (polarized sky) ──
     // Rayleigh molecular depolarization factor (air ≈ 0.0279). Caps the
     // single-scatter degree of polarization below the ideal 1.0.
     float rayleighDepolarization = 0.0279f;
+    // Spectrally neutral Lambertian lower-boundary reflectance. Zero restores
+    // the former black-Earth model; typical soil/vegetation is roughly 0.1-0.3.
+    float groundAlbedo = 0.18f;
     // Aerosol model for the precomputed Lorenz–Mie scattering matrix.
     float aerosolRefractiveIndexReal = 1.33f;
     float aerosolRefractiveIndexImag = 0.0f;
@@ -137,6 +145,34 @@ inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectra
            || left.mieTableAngleBins != right.mieTableAngleBins;
 }
 
+// A finite local ellipsoidal rain shaft. Scattering/extinction coefficients
+// are ensemble volume coefficients in 1/m; the CPU table contains only the
+// normalized angular/polarization distribution of the selected Debye orders.
+struct RainbowConfig
+{
+    uint32_t enabled = 1;
+    Vec3 center{0.0f, 1200.0f, 0.0f};
+    Vec3 radii{5000.0f, 1800.0f, 5000.0f};
+    float edgeSoftness = 0.15f;
+    float scatteringCoefficient = 1.2e-4f;
+    float extinctionCoefficient = 2.0e-4f;
+    float effectiveRadiusMicrometers = 500.0f;
+    float effectiveVariance = 0.08f;
+    uint32_t angleBins = 4097;
+    uint32_t viewSteps = 24;
+    uint32_t includeSecondary = 1;
+
+    [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
+};
+
+inline bool HasRainbowOpticsChanged(const RainbowConfig& left, const RainbowConfig& right)
+{
+    return left.effectiveRadiusMicrometers != right.effectiveRadiusMicrometers
+           || left.effectiveVariance != right.effectiveVariance
+           || left.angleBins != right.angleBins
+           || left.includeSecondary != right.includeSecondary;
+}
+
 // Top-level configuration loaded from path_tracer_config.json. All fields
 // have defaults so a missing config still produces a valid scene.
 struct RuntimeConfig
@@ -154,6 +190,7 @@ struct RuntimeConfig
     float maxPitchDegrees = 89.0f;
     float skyExposure = 1.35f;
     SkySpectralConfig skySpectral{};
+    RainbowConfig rainbow{};
 };
 
 // Resolve a runtime asset (config, SPIR-V blob, etc.) by checking the

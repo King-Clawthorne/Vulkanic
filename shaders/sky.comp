@@ -101,6 +101,16 @@ float SkyRayleighDepolarization()
     return sceneData.skyVrtParams.y;
 }
 
+int SkyScatteringOrders()
+{
+    return int(sceneData.skySampleCounts.w);
+}
+
+float SkyGroundAlbedo()
+{
+    return sceneData.skyVrtParams.w;
+}
+
 int SkyMieAngleBins()
 {
     return int(sceneData.skyVrtParams.z);
@@ -404,7 +414,7 @@ Stokes scatter_stokes(Stokes sIn, vec3 din, vec3 dout, float rhoR, float mieExt,
 // Single-scattering Stokes radiance seen from origin looking along viewDir
 // (sun direction L). Result is expressed in the meridian frame of the
 // outgoing (-viewDir) beam.
-Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps, int band)
+Stokes single_scatter_atmosphere(vec3 origin, vec3 viewDir, vec3 L, int steps, int band)
 {
     Stokes result = stokes_zero();
     vec2 t_atmos = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
@@ -414,10 +424,12 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps, int b
     }
     float t_start = max(t_atmos.x, 0.0);
     float t_end = t_atmos.y;
-    // The Earth is a black lower boundary. Never integrate atmospheric light
-    // through the planet or from the far side of it.
+    // Stop at the lower boundary. This atmosphere-only routine deliberately
+    // excludes surface radiance so it can be reused for diffuse-ground
+    // irradiance without recursively evaluating the ground.
     vec2 t_ground = ray_sphere(origin, viewDir, SkyEarthRadius());
-    if (t_ground.x > 0.0)
+    bool hitsGround = t_ground.x > 0.0;
+    if (hitsGround)
     {
         t_end = min(t_end, t_ground.x);
     }
@@ -456,6 +468,80 @@ Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps, int b
         }
         T_cam *= slabT;
     }
+
+    return stokes_make_physical(result);
+}
+
+// Transmittance over a finite segment, used from the visible surface point to
+// the observer. Unlike transmittance(), this does not continue to space.
+float segment_transmittance(vec3 origin, vec3 dir, float distance, int steps, int band)
+{
+    float stepSize = distance / float(steps);
+    float tau = 0.0;
+    for (int i = 0; i < steps; ++i)
+    {
+        vec3 pos = origin + dir * ((float(i) + 0.5) * stepSize);
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        tau += (SkyBetaR(band) * exp(-altitude / SkyScaleHeightRayleigh())
+                + mie_extinction(altitude)) * stepSize;
+    }
+    return exp(-tau);
+}
+
+// Cosine-weighted deterministic hemisphere quadrature for downwelling diffuse
+// skylight at the surface. For p(omega)=cos(theta)/pi, irradiance is simply
+// pi times the mean sampled radiance.
+float diffuse_ground_irradiance(vec3 groundPos, vec3 normal, vec3 L, int steps, int band)
+{
+    const int directionCount = 8;
+    const float goldenAngle = 2.39996322972865332;
+    vec3 tangent;
+    vec3 bitangent;
+    beam_basis(normal, tangent, bitangent);
+    float radianceSum = 0.0;
+    vec3 groundOrigin = groundPos + normal;
+    for (int i = 0; i < directionCount; ++i)
+    {
+        float u = (float(i) + 0.5) / float(directionCount);
+        float radius = sqrt(u);
+        float phi = goldenAngle * float(i);
+        vec3 direction = normalize(tangent * (radius * cos(phi))
+                                 + bitangent * (radius * sin(phi))
+                                 + normal * sqrt(max(1.0 - u, 0.0)));
+        radianceSum += single_scatter_atmosphere(groundOrigin, direction, L,
+                                                  max(steps, 4), band).I;
+    }
+    return PI * radianceSum / float(directionCount);
+}
+
+// Single-scattered atmosphere plus an unpolarized Lambertian lower boundary.
+// The ground reflects both attenuated direct sunlight and downwelling diffuse
+// single-scattered skylight. Calls from second_scatter_stokes therefore carry
+// this lower-boundary source into the polarized sky after one more event.
+Stokes single_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int steps, int band)
+{
+    Stokes result = single_scatter_atmosphere(origin, viewDir, L, steps, band);
+    if (SkyGroundAlbedo() <= 0.0) return result;
+
+    vec2 groundHit = ray_sphere(origin, viewDir, SkyEarthRadius());
+    if (groundHit.x <= 0.0) return result;
+
+    float distance = groundHit.x;
+    vec3 groundPos = origin + viewDir * distance;
+    vec3 normal = normalize(groundPos);
+    vec3 surfaceOrigin = groundPos + normal;
+    float sunCosine = max(dot(normal, L), 0.0);
+    float sunSolidAngle = 2.0 * PI * (1.0 - cos(SkySunRadius()));
+    float directIrradiance = 0.0;
+    if (sunCosine > 0.0)
+    {
+        directIrradiance = SkySunRadiance(band) * sunSolidAngle * sunCosine
+                         * transmittance(surfaceOrigin, L, 16, band);
+    }
+    float diffuseIrradiance = diffuse_ground_irradiance(groundPos, normal, L, steps, band);
+    float cameraT = segment_transmittance(surfaceOrigin, -viewDir,
+                                          max(distance - 1.0, 0.0), 8, band);
+    result.I += SkyGroundAlbedo() / PI * (directIrradiance + diffuseIrradiance) * cameraT;
     return stokes_make_physical(result);
 }
 
@@ -525,6 +611,84 @@ Stokes second_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int viewSteps,
     return stokes_make_physical(result);
 }
 
+// Third successive scattering order. It uses the same deterministic angular
+// quadrature as order two, but its incident field is the exactly-second-order
+// field rather than direct-sun single scattering.
+Stokes third_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int viewSteps,
+                            int directionSamples, int secondarySteps, int band)
+{
+    Stokes result = stokes_zero();
+    vec2 atmosphereHit = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
+    if (atmosphereHit.y < 0.0) return result;
+    float tStart = max(atmosphereHit.x, 0.0);
+    float tEnd = atmosphereHit.y;
+    vec2 groundHit = ray_sphere(origin, viewDir, SkyEarthRadius());
+    if (groundHit.x > 0.0) tEnd = min(tEnd, groundHit.x);
+    float stepSize = (tEnd - tStart) / float(viewSteps);
+    float cameraT = 1.0;
+    vec3 dout = -viewDir;
+    for (int i = 0; i < viewSteps; ++i)
+    {
+        vec3 pos = origin + viewDir * (tStart + (float(i) + 0.5) * stepSize);
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
+        float extM = mie_extinction(altitude);
+        float slabT = exp(-(SkyBetaR(band) * rhoR + extM) * stepSize);
+        Stokes angularIntegral = stokes_zero();
+        for (int j = 0; j < directionSamples; ++j)
+        {
+            vec3 din = secondary_direction(j, directionSamples, i);
+            Stokes incident = second_scatter_stokes(pos, -din, L, secondarySteps,
+                                                     directionSamples, secondarySteps, band);
+            angularIntegral = stokes_add(angularIntegral,
+                scatter_stokes(incident, din, dout, rhoR, extM, band));
+        }
+        float weight = cameraT * sqrt(slabT) * stepSize * (4.0 * PI / float(directionSamples));
+        result = stokes_add(result, stokes_scale(angularIntegral, weight));
+        cameraT *= slabT;
+    }
+    return stokes_make_physical(result);
+}
+
+// Fourth successive order. This explicit expansion avoids shader recursion
+// and lets SCATTERING_ORDERS remove all higher-order work through uniform
+// branches. Runtime grows approximately with secondarySamples^(order-1).
+Stokes fourth_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int viewSteps,
+                             int directionSamples, int secondarySteps, int band)
+{
+    Stokes result = stokes_zero();
+    vec2 atmosphereHit = ray_sphere(origin, viewDir, SkyAtmosphereRadius());
+    if (atmosphereHit.y < 0.0) return result;
+    float tStart = max(atmosphereHit.x, 0.0);
+    float tEnd = atmosphereHit.y;
+    vec2 groundHit = ray_sphere(origin, viewDir, SkyEarthRadius());
+    if (groundHit.x > 0.0) tEnd = min(tEnd, groundHit.x);
+    float stepSize = (tEnd - tStart) / float(viewSteps);
+    float cameraT = 1.0;
+    vec3 dout = -viewDir;
+    for (int i = 0; i < viewSteps; ++i)
+    {
+        vec3 pos = origin + viewDir * (tStart + (float(i) + 0.5) * stepSize);
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        float rhoR = exp(-altitude / SkyScaleHeightRayleigh());
+        float extM = mie_extinction(altitude);
+        float slabT = exp(-(SkyBetaR(band) * rhoR + extM) * stepSize);
+        Stokes angularIntegral = stokes_zero();
+        for (int j = 0; j < directionSamples; ++j)
+        {
+            vec3 din = secondary_direction(j, directionSamples, i);
+            Stokes incident = third_scatter_stokes(pos, -din, L, secondarySteps,
+                                                    directionSamples, secondarySteps, band);
+            angularIntegral = stokes_add(angularIntegral,
+                scatter_stokes(incident, din, dout, rhoR, extM, band));
+        }
+        float weight = cameraT * sqrt(slabT) * stepSize * (4.0 * PI / float(directionSamples));
+        result = stokes_add(result, stokes_scale(angularIntegral, weight));
+        cameraT *= slabT;
+    }
+    return stokes_make_physical(result);
+}
+
 // Full polarized sky radiance toward viewDir, returned in the natural beam
 // frame beam_basis(-viewDir). First- and second-order scattering are
 // deterministic and noise-free; the caller reframes into its Stokes frame.
@@ -533,11 +697,19 @@ Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band)
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
 
     Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps(), band);
-    sky = stokes_add(sky, second_scatter_stokes(origin, viewDir, L,
-                                                SkyViewSteps(), SkySecondarySamples(), SkySamples(), band));
+    int orders = SkyScatteringOrders();
+    if (orders >= 2)
+        sky = stokes_add(sky, second_scatter_stokes(origin, viewDir, L,
+                                                    SkyViewSteps(), SkySecondarySamples(), SkySamples(), band));
+    if (orders >= 3)
+        sky = stokes_add(sky, third_scatter_stokes(origin, viewDir, L,
+                                                   SkyViewSteps(), SkySecondarySamples(), SkySamples(), band));
+    if (orders >= 4)
+        sky = stokes_add(sky, fourth_scatter_stokes(origin, viewDir, L,
+                                                    SkyViewSteps(), SkySecondarySamples(), SkySamples(), band));
 
     // Direct sun disk (unpolarized). Visibility is evaluated along this
-    // pixel's view ray, not only along the disk centre L, so the black Earth
+    // pixel's view ray, not only along the disk centre L, so the Earth
     // clips the finite/anti-aliased disk correctly at the horizon.
     vec2 viewGround = ray_sphere(origin, viewDir, SkyEarthRadius());
     float disk = sun_disk(viewDir, L);
