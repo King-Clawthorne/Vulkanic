@@ -61,7 +61,8 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
 
 set(SHADER_SOURCES
-        shaders/path_tracer.comp)
+        shaders/path_tracer.comp
+        shaders/post_process.comp)
 
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"

@@ -94,8 +94,17 @@ void main()
         accumulatedRadiance += XyzToLinearSrgb(sampleXyz / max(yNormalization, 1.0e-6));
     }
 
-    // Average across SPP, scale by the exposure stop, and tonemap into
-    // display-referred space.
-    vec3 displayColour = ToneMap(accumulatedRadiance / max(1u, samplesPerPixel) * pc.displayParams.x);
-    imageStore(outputImage, ivec2(pixel), vec4(displayColour, 1.0));
+    // Persist a running average in linear HDR. cameraRightBounces.w is raised
+    // for one frame whenever the camera/analyzer or radiance config changes.
+    uint accumulationIndex = pixel.x + pixel.y * pc.imageSize.x;
+    vec3 frameRadiance = accumulatedRadiance / max(1u, samplesPerPixel);
+    vec4 previous = accumulationBuffer.pixels[accumulationIndex];
+    if (pc.cameraRightBounces.w > 0.5 || previous.w < 1.0)
+        accumulationBuffer.pixels[accumulationIndex] = vec4(frameRadiance, 1.0);
+    else
+    {
+        float count = min(previous.w + 1.0, 65536.0);
+        vec3 average = previous.xyz + (frameRadiance - previous.xyz) / count;
+        accumulationBuffer.pixels[accumulationIndex] = vec4(average, count);
+    }
 }

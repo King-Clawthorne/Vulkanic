@@ -6,8 +6,9 @@
 
 // CPU-baked polarized large-water-droplet phase table. The baker traces the
 // one- and two-internal-reflection Debye rays through a sphere, applies the
-// Fresnel s/p powers, and angularly broadens them by the finite solar disk and
-// an Airy-scale term. Entries use the same normalized Mueller convention as
+// Fresnel s/p powers, integrates a cross-section-weighted log-normal droplet
+// population, and broadens each radius by the finite solar disk and its own
+// Airy scale. Entries use the same normalized Mueller convention as
 // the atmospheric Mie table: integral(F11 dOmega) = 4*pi.
 struct RainbowScatteringParams
 {

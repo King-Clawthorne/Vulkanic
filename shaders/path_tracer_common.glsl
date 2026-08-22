@@ -44,17 +44,26 @@ layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer
     vec4 entries[];
 } rainbowMatrixBuffer;
 
+// Persistent linear-HDR running average. xyz = accumulated camera RGB,
+// w = accumulated frame count for the current stationary-camera epoch.
+layout(std430, set = 0, binding = 9) buffer AccumulationBuffer
+{
+    vec4 pixels[];
+} accumulationBuffer;
+
 layout(push_constant) uniform PushConstants
 {
     vec4 cameraPositionFrame;
     vec4 cameraForwardSamples;
     vec4 cameraRightBounces;
     vec4 cameraUpTanHalfFovY;
-    // x = exposure, y = viewport aspect ratio, z/w unused.
+    // x = exposure compensation, y = viewport aspect ratio,
+    // z/w unused.
     vec4 displayParams;
     // Camera polarization filter: x = enabled (0/1), y = major-axis angle
     // in radians (image plane, from the camera right axis), z = ellipticity
-    // angle in radians (-pi/4..pi/4; 0 = linear, +/-pi/4 = circular), w unused.
+    // angle in radians (-pi/4..pi/4; 0 = linear, +/-pi/4 = circular),
+    // w unused.
     vec4 polarizer;
     uvec2 imageSize;
 } pc;
@@ -123,15 +132,11 @@ vec3 XyzToLinearSrgb(vec3 xyz)
 }
 
 // Hue-preserving photographic shoulder. The curve is evaluated from the
-// brightest channel and the same scale is applied to all three channels, so
-// brightness changes across an anti-aliased solar edge cannot rotate its hue.
+// brightest channel and the same scale is applied to all three channels.
 vec3 HuePreservingToneMap(vec3 colour)
 {
     float peak = max(colour.r, max(colour.g, colour.b));
-    if (peak <= 0.0)
-    {
-        return vec3(0.0);
-    }
+    if (peak <= 0.0) return vec3(0.0);
     float mappedPeak = peak / (1.0 + peak);
     return colour * (mappedPeak / peak);
 }

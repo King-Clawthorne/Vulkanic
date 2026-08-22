@@ -1,0 +1,16 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "path_tracer_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main()
+{
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, pc.imageSize))) return;
+
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    uint index = uint(pixel.y) * pc.imageSize.x + uint(pixel.x);
+    vec3 radiance = max(accumulationBuffer.pixels[index].rgb, vec3(0.0));
+    imageStore(outputImage, pixel, vec4(ToneMap(radiance * pc.displayParams.x), 1.0));
+}

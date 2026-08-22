@@ -8,8 +8,8 @@
 //                        scene/Mie buffer upload, compute pipeline, the
 //                        render loop, and teardown.
 //
-// This is a polarized-sky simulator with no scene geometry: a single compute
-// shader evaluates the sky analytically per pixel. High-level flow when
+// This is a polarized-sky simulator with no scene geometry: one compute pass
+// evaluates sky radiance and another models the camera/display. High-level flow when
 // RunVulkanPathTracer() is called:
 //   1. Read path_tracer_config.json.
 //   2. Create a Win32 window, Vulkan instance, surface, device, queues.
@@ -17,8 +17,8 @@
 //   4. Create the swapchain (storage-image capable), descriptor sets, and the
 //      compute pipeline from path_tracer.comp.
 //   5. Drive the message loop: each frame integrates camera input and
-//      dispatches the compute shader, which writes the swapchain image
-//      directly and is then presented.
+//      dispatches transport into persistent HDR accumulation, then camera
+//      post-processing into the swapchain image for presentation.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -183,7 +183,7 @@ struct PushConstants
     float cameraUpTanHalfFovY[4];
     // x = exposure, y = viewport aspect ratio, z/w unused.
     float displayParams[4];
-    // x = filter enabled (0/1), y = filter axis angle in radians, z/w unused.
+    // x/y/z = polarization analyzer, w unused.
     float polarizer[4];
     uint32_t imageSize[2];
 };
@@ -442,7 +442,7 @@ private:
                 changed = true;
             }
             int scatteringOrders = static_cast<int>(next.skySpectral.scatteringOrders);
-            if (ImGui::SliderInt("Scattering orders", &scatteringOrders, 1, 4))
+            if (ImGui::SliderInt("Scattering orders", &scatteringOrders, 1, 3))
             {
                 next.skySpectral.scatteringOrders = static_cast<uint32_t>(scatteringOrders);
                 changed = true;
@@ -514,6 +514,10 @@ private:
     void CreateSceneBuffers()
     {
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        const VkDeviceSize accumulationSize = static_cast<VkDeviceSize>(m_config.width)
+                                            * static_cast<VkDeviceSize>(m_config.height)
+                                            * sizeof(float) * 4u;
+        m_accumulationBuffer = CreateBuffer(accumulationSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         CreateMieScatteringBuffer();
         CreateRainbowScatteringBuffer();
     }
@@ -576,6 +580,7 @@ private:
         DestroyBuffer(m_sceneDataBuffer);
         DestroyBuffer(m_mieScatteringBuffer);
         DestroyBuffer(m_rainbowScatteringBuffer);
+        DestroyBuffer(m_accumulationBuffer);
     }
 
     // Pack the current RuntimeConfig.skySpectral into a SceneData record and
@@ -602,14 +607,18 @@ private:
             const vk::DescriptorBufferInfo mieDataInfo{m_mieScatteringBuffer.buffer, 0, m_mieScatteringBuffer.size};
             const vk::DescriptorBufferInfo rainbowDataInfo{m_rainbowScatteringBuffer.buffer, 0,
                                                             m_rainbowScatteringBuffer.size};
+            const vk::DescriptorBufferInfo accumulationInfo{m_accumulationBuffer.buffer, 0,
+                                                             m_accumulationBuffer.size};
 
             vk::WriteDescriptorSet imageWrite{*m_descriptorSets[i], 0, 0, vk::DescriptorType::eStorageImage, imageInfo};
             vk::WriteDescriptorSet sceneWrite{*m_descriptorSets[i], 2, 0, vk::DescriptorType::eUniformBuffer, {}, sceneDataInfo};
             vk::WriteDescriptorSet mieWrite{*m_descriptorSets[i], 7, 0, vk::DescriptorType::eStorageBuffer, {}, mieDataInfo};
             vk::WriteDescriptorSet rainbowWrite{*m_descriptorSets[i], 8, 0,
                                                  vk::DescriptorType::eStorageBuffer, {}, rainbowDataInfo};
+            vk::WriteDescriptorSet accumulationWrite{*m_descriptorSets[i], 9, 0,
+                                                      vk::DescriptorType::eStorageBuffer, {}, accumulationInfo};
 
-            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite}, nullptr);
+            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite, accumulationWrite}, nullptr);
         }
     }
 
@@ -648,6 +657,9 @@ private:
         const bool rainbowChanged = config.rainbow != m_config.rainbow;
         const bool rainbowOpticsChanged = HasRainbowOpticsChanged(config.rainbow, m_config.rainbow)
                                            || config.skySpectral.sunRadius != m_config.skySpectral.sunRadius;
+        if (skySpectralChanged || rainbowChanged || config.samplesPerPixel != m_config.samplesPerPixel
+            || config.fovYDegrees != m_config.fovYDegrees)
+            m_accumulationResetRequested = true;
 
         if (!m_configPath.empty() && !resetCameraState)
         {
@@ -908,11 +920,11 @@ private:
     void CreateInstance()
     {
         auto instanceResult = vkb::InstanceBuilder{}
-                                  .set_app_name("Vulkan Path Tracer")
-                                  .set_engine_name("None")
-                                  .require_api_version(1, 2, 0)
-                                  .request_validation_layers()
-                                  .build();
+            .set_app_name("Vulkan Path Tracer")
+            .set_engine_name("None")
+            .require_api_version(1, 2, 0)
+            .request_validation_layers()
+            .build();
         if (!instanceResult)
         {
             throw std::runtime_error("Failed to create Vulkan instance: " + instanceResult.error().message());
@@ -1069,14 +1081,14 @@ private:
     // at least frameCount images are requested so per-frame resources line up.
     void CreateSwapchain()
     {
-        auto swapchainResult = vkb::SwapchainBuilder{m_vkbDevice}
-                                   .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-                                   .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
-                                   .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
-                                   .set_desired_extent(m_config.width, m_config.height)
-                                   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
-                                   .set_required_min_image_count(m_config.frameCount)
-                                   .build();
+        vkb::SwapchainBuilder builder{m_vkbDevice};
+        builder.set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+               .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+               .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
+               .set_desired_extent(m_config.width, m_config.height)
+               .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+               .set_required_min_image_count(m_config.frameCount);
+        auto swapchainResult = builder.build();
         if (!swapchainResult)
         {
             throw std::runtime_error("Failed to create Vulkan swapchain: " + swapchainResult.error().message());
@@ -1151,11 +1163,12 @@ private:
         // values (gaps are legal) so the shared sky header is untouched.
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 4> bindings = {
+        const std::array<vk::DescriptorSetLayoutBinding, 5> bindings = {
             vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
             vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{8, eStorageBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{9, eStorageBuffer, 1, compute},
         };
 
         vk::DescriptorSetLayoutCreateInfo createInfo{};
@@ -1177,6 +1190,7 @@ private:
     void CreatePipeline()
     {
         const vk::raii::ShaderModule computeModule = CreateShaderModule(LoadBinaryFile(L"path_tracer.comp.spv"));
+        const vk::raii::ShaderModule postModule = CreateShaderModule(LoadBinaryFile(L"post_process.comp.spv"));
 
         vk::PipelineShaderStageCreateInfo stageInfo{};
         stageInfo.stage = vk::ShaderStageFlagBits::eCompute;
@@ -1193,6 +1207,9 @@ private:
         pipelineInfo.stage = stageInfo;
         pipelineInfo.layout = *m_pipelineLayout;
         m_computePipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
+        stageInfo.module = *postModule;
+        pipelineInfo.stage = stageInfo;
+        m_postProcessPipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
     }
 
     // Allocate the descriptor pool and one descriptor set per layout
@@ -1205,7 +1222,7 @@ private:
         const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
             vk::DescriptorPoolSize{eStorageImage, count},
             vk::DescriptorPoolSize{eUniformBuffer, count},
-            vk::DescriptorPoolSize{eStorageBuffer, count * 2u},
+            vk::DescriptorPoolSize{eStorageBuffer, count * 3u},
         };
 
         vk::DescriptorPoolCreateInfo poolInfo{};
@@ -1257,30 +1274,46 @@ private:
         }
     }
 
-    PushConstants BuildPushConstants() const
+    PushConstants BuildPushConstants()
     {
+        const Vec3 position = m_camera.Position();
         const Vec3 forward = m_camera.Forward();
         const Vec3 right = Normalize(Cross({0.0f, 1.0f, 0.0f}, forward));
         const Vec3 up = Normalize(Cross(forward, right));
         const float aspect =
             static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+        const bool polarizerEnabled = m_camera.PolarizerEnabled();
+        const float polarizerAngle = m_camera.PolarizerAngleRadians();
+        const float polarizerEllipticity = m_camera.PolarizerEllipticityRadians();
+        if (!m_accumulationStateInitialized
+            || Length(position - m_previousAccumulationPosition) > 1.0e-6f
+            || Length(forward - m_previousAccumulationForward) > 1.0e-6f
+            || polarizerEnabled != m_previousPolarizerEnabled
+            || std::abs(polarizerAngle - m_previousPolarizerAngle) > 1.0e-6f
+            || std::abs(polarizerEllipticity - m_previousPolarizerEllipticity) > 1.0e-6f)
+            m_accumulationResetRequested = true;
 
         PushConstants constants{};
-        PackVec4(constants.cameraPositionFrame, m_camera.Position(), static_cast<float>(m_frameIndex));
+        PackVec4(constants.cameraPositionFrame, position, static_cast<float>(m_frameIndex));
         PackVec4(constants.cameraForwardSamples, forward, static_cast<float>(m_config.samplesPerPixel));
-        // w was max bounces; unused in the sky-only renderer.
-        PackVec4(constants.cameraRightBounces, right, 0.0f);
+        PackVec4(constants.cameraRightBounces, right, m_accumulationResetRequested ? 1.0f : 0.0f);
         PackVec4(constants.cameraUpTanHalfFovY, up, std::tan(m_config.fovYDegrees * 0.5f * kPi / 180.0f));
         constants.displayParams[0] = m_config.skyExposure;
         constants.displayParams[1] = aspect;
         PackVec4(constants.polarizer,
-                 std::array<float, 3>{m_camera.PolarizerEnabled() ? 1.0f : 0.0f,
-                                      m_camera.PolarizerAngleRadians(),
-                                      m_camera.PolarizerEllipticityRadians()},
+                 std::array<float, 3>{polarizerEnabled ? 1.0f : 0.0f,
+                                      polarizerAngle, polarizerEllipticity},
                  0.0f);
 
         constants.imageSize[0] = m_swapchainExtent.width;
         constants.imageSize[1] = m_swapchainExtent.height;
+        m_previousAccumulationPosition = position;
+        m_previousAccumulationForward = forward;
+        m_previousPolarizerEnabled = polarizerEnabled;
+        m_previousPolarizerAngle = polarizerAngle;
+        m_previousPolarizerEllipticity = polarizerEllipticity;
+        m_accumulationStateInitialized = true;
+        m_accumulationResetRequested = false;
         return constants;
     }
 
@@ -1309,6 +1342,20 @@ private:
                                       vk::PipelineStageFlagBits::eComputeShader,
                                       {}, nullptr, nullptr, toGeneral);
 
+        vk::BufferMemoryBarrier accumulationStartBarrier{};
+        accumulationStartBarrier.srcAccessMask = vk::AccessFlagBits::eShaderRead
+                                               | vk::AccessFlagBits::eShaderWrite;
+        accumulationStartBarrier.dstAccessMask = vk::AccessFlagBits::eShaderRead
+                                               | vk::AccessFlagBits::eShaderWrite;
+        accumulationStartBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        accumulationStartBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        accumulationStartBarrier.buffer = m_accumulationBuffer.buffer;
+        accumulationStartBarrier.offset = 0;
+        accumulationStartBarrier.size = m_accumulationBuffer.size;
+        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                      vk::PipelineStageFlagBits::eComputeShader,
+                                      {}, nullptr, accumulationStartBarrier, nullptr);
+
         const PushConstants pushConstants = BuildPushConstants();
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
@@ -1325,6 +1372,21 @@ private:
         constexpr uint32_t kTile = 8;
         const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
+        commandBuffer.dispatch(groupsX, groupsY, 1);
+
+        vk::BufferMemoryBarrier accumulationBarrier{};
+        accumulationBarrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+        accumulationBarrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        accumulationBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        accumulationBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        accumulationBarrier.buffer = m_accumulationBuffer.buffer;
+        accumulationBarrier.offset = 0;
+        accumulationBarrier.size = m_accumulationBuffer.size;
+        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                      vk::PipelineStageFlagBits::eComputeShader,
+                                      {}, nullptr, accumulationBarrier, nullptr);
+
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_postProcessPipeline);
         commandBuffer.dispatch(groupsX, groupsY, 1);
 
         vk::ImageMemoryBarrier toColorAttachment = toGeneral;
@@ -1487,6 +1549,7 @@ private:
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_mieScatteringBuffer{};
     BufferAllocation m_rainbowScatteringBuffer{};
+    BufferAllocation m_accumulationBuffer{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Format m_swapchainFormat = vk::Format::eUndefined;
@@ -1500,6 +1563,7 @@ private:
     vk::raii::DescriptorSetLayout m_descriptorSetLayout{nullptr};
     vk::raii::PipelineLayout m_pipelineLayout{nullptr};
     vk::raii::Pipeline m_computePipeline{nullptr};
+    vk::raii::Pipeline m_postProcessPipeline{nullptr};
     vk::raii::DescriptorPool m_descriptorPool{nullptr};
     std::vector<vk::raii::DescriptorSet> m_descriptorSets;
 
@@ -1508,6 +1572,13 @@ private:
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
+    bool m_accumulationResetRequested = true;
+    bool m_accumulationStateInitialized = false;
+    Vec3 m_previousAccumulationForward{};
+    Vec3 m_previousAccumulationPosition{};
+    bool m_previousPolarizerEnabled = false;
+    float m_previousPolarizerAngle = 0.0f;
+    float m_previousPolarizerEllipticity = 0.0f;
     RuntimeConfig m_config{};
     std::filesystem::path m_configPath;
     std::vector<std::filesystem::path> m_configFiles;

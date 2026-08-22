@@ -40,12 +40,15 @@ The repository implements the whole stack from the OS layer up:
 - **Spectral colour pipeline** — thirteen 25 nm bands drive wavelength-scaled Rayleigh extinction,
   wavelength-resolved Mie matrices, and a Planck solar spectrum. CIE 1931 XYZ integration and
   linear-sRGB conversion happen only after atmospheric transport and polarization analysis.
+- **Temporal accumulation** — stationary-camera linear-HDR accumulation reduces Monte Carlo noise
+  and resets whenever the view, analyzer, or radiance configuration changes.
 - **Physical sky details** — a binary earth-shadow test that puts twilight points behind the
   planet's limb into umbra, giving the sky its terminator. A configurable spectrally neutral
   Lambertian lower boundary reflects attenuated direct sunlight and feeds the polarized
   successive-order atmosphere.
 - **Polarized physical rainbow** — a CPU-baked, 13-band water-droplet Debye/Fresnel Mueller table
-  drives primary and secondary bow scattering through a finite ellipsoidal rain volume, including
+  integrates a cross-section-weighted log-normal droplet-size population and drives primary and
+  secondary bow scattering through a finite ellipsoidal rain volume, including
   rain/air attenuation and finite-solar-disk broadening. The result joins the sky as Stokes
   radiance before the camera analyzer and CIE conversion.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
@@ -56,10 +59,10 @@ The repository implements the whole stack from the OS layer up:
   tunable parameters.
 - **Hot config reload** — `path_tracer_config.json` is polled each frame; sky/aerosol edits apply
   live (aerosol changes rebuild the Mie table).
-- **Compute pipeline** — the renderer is a single compute shader, dispatched over an 8×8-tiled
-  grid, that evaluates the sky analytically per pixel and writes the swapchain image directly as a
-  storage image (no scene geometry, no acceleration structures, no graphics pipeline or blit). This
-  keeps the hardware requirement to plain Vulkan compute rather than RT-capable GPUs.
+- **Compute pipeline** — an 8×8-tiled transport pass evaluates the sky into a persistent HDR
+  accumulation buffer; a second compute pass applies camera exposure and the optical PSF before
+  writing the swapchain storage image. There is still no scene geometry, acceleration structure,
+  or RT-hardware requirement.
 
 ### Result
 
@@ -151,7 +154,8 @@ Most edits hot-reload while running. Width, height, and `frameCount` are read at
 
 - **Shaders (`glslc` → SPIR-V):**
   - `shaders/path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
-    tonemap → swapchain storage image (compute, 8×8 workgroups).
+    stationary-camera HDR accumulation (compute, 8×8 workgroups).
+  - `shaders/post_process.comp` — reads the accumulated HDR image, tone maps it, and writes swapchain output.
   - `shaders/sky.comp` — the polarized first-through-fourth-order atmosphere (Rayleigh/Mie, Stokes machinery).
   - `shaders/rainbow.comp` — finite-volume polarized water-droplet scattering and attenuation.
   - `shaders/path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
