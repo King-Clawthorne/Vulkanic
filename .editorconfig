@@ -1,0 +1,25 @@
+# https://editorconfig.org
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{cpp,h,hpp,cxx,cc}]
+indent_size = 4
+
+[CMakeLists.txt]
+indent_size = 2
+
+[*.cmake]
+indent_size = 2
+
+[*.{glsl,vert,frag,geom,comp}]
+indent_size = 4
+
+[*.md]
+trim_trailing_whitespace = false
