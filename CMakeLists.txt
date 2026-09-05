@@ -73,14 +73,19 @@ set(SHADER_SPV_OUTPUTS)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
     set(SHADER_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}")
     get_filename_component(SHADER_SOURCE_NAME "${SHADER_SOURCE}" NAME)
-    set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SHADER_SOURCE_NAME}.spv")
+    # Separate configurations so multi-config builds never reuse Debug shaders
+    # in Release (or vice versa).
+    set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>/${SHADER_SOURCE_NAME}.spv")
 
     add_custom_command(
             OUTPUT "${SHADER_OUTPUT}"
-            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -g -O0 -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>"
+            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2
+            "$<IF:$<CONFIG:Debug>,-O0,-O>" "$<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:-g>"
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
             -o "${SHADER_OUTPUT}" "${SHADER_INPUT}"
             DEPENDS "${SHADER_INPUT}" ${SHADER_SHARED_DEPENDENCIES}
-            VERBATIM)
+            VERBATIM COMMAND_EXPAND_LISTS)
 
     list(APPEND SHADER_SPV_OUTPUTS "${SHADER_OUTPUT}")
 endforeach()
@@ -95,17 +100,18 @@ add_executable(Vulkanic
         src/app/CameraController.cpp
         src/renderer/VmaUsage.cpp
         src/renderer/VulkanPathTracer.cpp)
-add_dependencies(Vulkanic vulkan_shader)
 target_include_directories(Vulkanic PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator imgui)
 
-foreach(SHADER_OUTPUT IN LISTS SHADER_SPV_OUTPUTS)
-    get_filename_component(SHADER_FILE_NAME "${SHADER_OUTPUT}" NAME)
-    add_custom_command(TARGET Vulkanic POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${SHADER_OUTPUT}"
-            "$<TARGET_FILE_DIR:Vulkanic>/${SHADER_FILE_NAME}")
-endforeach()
+# A POST_BUILD copy alone goes stale when only GLSL changes: shader rebuilds
+# do not require relinking the executable. Synchronize on every target build.
+add_custom_target(vulkan_runtime_shaders
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Vulkanic>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${SHADER_SPV_OUTPUTS} "$<TARGET_FILE_DIR:Vulkanic>"
+        DEPENDS vulkan_shader
+        VERBATIM COMMAND_EXPAND_LISTS)
+add_dependencies(Vulkanic vulkan_runtime_shaders)
 
 add_custom_command(TARGET Vulkanic POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

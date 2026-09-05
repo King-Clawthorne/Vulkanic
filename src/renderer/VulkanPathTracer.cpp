@@ -41,6 +41,7 @@
 #include <vk_mem_alloc.h>
 
 #include <array>
+#include <algorithm>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -289,6 +290,8 @@ static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
 class VulkanPathTracer
 {
 public:
+    explicit VulkanPathTracer(const BenchmarkOptions& benchmark) : m_benchmark(benchmark) {}
+
     // Default scene/render configuration file, resolved relative to the
     // executable by ResolveRuntimeFilePath().
     static constexpr const wchar_t* CONFIG_FILE_NAME = L"path_tracer_config.json";
@@ -345,8 +348,24 @@ public:
         CreateCommandBuffers();
         CreateSyncObjects();
         CreateGui();
+        if (m_benchmark.frames != 0)
+        {
+            m_showGui = false;
+            const auto properties = m_physicalDevice.getProperties();
+            const auto queueProperties = m_physicalDevice.getQueueFamilyProperties();
+            const uint32_t validBits = queueProperties[m_queueFamilies.graphicsFamily.value()].timestampValidBits;
+            if (validBits == 0) throw std::runtime_error("Selected queue does not support GPU timestamps.");
+            m_timestampMask = validBits == 64 ? UINT64_MAX : (uint64_t{1} << validBits) - 1;
+            m_timestampPeriodMs = properties.limits.timestampPeriod * 1.0e-6;
+            m_timestampPool = vk::raii::QueryPool(m_device,
+                vk::QueryPoolCreateInfo({}, vk::QueryType::eTimestamp, m_config.frameCount * 3));
+            std::println("[Benchmark] GPU: {}; {}x{}; warmup={}; frames={}",
+                         properties.deviceName.data(), m_swapchainExtent.width, m_swapchainExtent.height,
+                         m_benchmark.warmupFrames, m_benchmark.frames);
+        }
         MessageLoop();
         m_device.waitIdle();
+        if (m_benchmark.frames != 0) FinishBenchmark();
     }
 
 private:
@@ -359,12 +378,12 @@ private:
             app = static_cast<VulkanPathTracer*>(create->lpCreateParams);
             SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
         }
-        if (message == WM_KEYDOWN && wParam == VK_F1 && app != nullptr)
+        if (message == WM_KEYDOWN && wParam == VK_F1 && app != nullptr && app->m_benchmark.frames == 0)
         {
             app->m_showGui = !app->m_showGui;
             return 0;
         }
-        if (message == WM_KEYDOWN && app != nullptr && (lParam & (1LL << 30)) == 0)
+        if (message == WM_KEYDOWN && app != nullptr && app->m_benchmark.frames == 0 && (lParam & (1LL << 30)) == 0)
         {
             if (wParam == VK_F2)
             {
@@ -377,7 +396,8 @@ private:
                 return 0;
             }
         }
-        if (app != nullptr && app->m_imguiInitialized && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam))
+        if (app != nullptr && app->m_benchmark.frames == 0 && app->m_imguiInitialized
+            && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam))
         {
             return 1;
         }
@@ -393,6 +413,7 @@ private:
     {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        if (m_benchmark.frames != 0) ImGui::GetIO().IniFilename = nullptr;
         ImGui::StyleColorsDark();
         ImGui_ImplWin32_Init(m_window);
 
@@ -690,6 +711,8 @@ private:
     // can pick up live edits.
     void LoadInitialRuntimeConfig()
     {
+        if (!m_benchmark.configPath.empty())
+            m_configPath = std::filesystem::absolute(m_benchmark.configPath);
         // Prefer the editable source-tree config when launched from the repo.
         // The build also copies a deployment config beside the executable,
         // but choosing that copy first makes source edits appear to require a
@@ -700,6 +723,7 @@ private:
         };
         for (const auto& candidate : editableCandidates)
         {
+            if (!m_configPath.empty()) break;
             if (std::filesystem::exists(candidate))
             {
                 m_configPath = std::filesystem::absolute(candidate).lexically_normal();
@@ -1326,6 +1350,8 @@ private:
     void RecordCommandBuffer(const vk::raii::CommandBuffer& commandBuffer, uint32_t imageIndex)
     {
         commandBuffer.begin({});
+        const uint32_t queryBase = m_currentFrame * 3;
+        if (m_benchmark.frames != 0) commandBuffer.resetQueryPool(*m_timestampPool, queryBase, 3);
 
         const vk::ImageSubresourceRange colorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
         vk::ImageMemoryBarrier toGeneral{};
@@ -1372,7 +1398,11 @@ private:
         constexpr uint32_t kTile = 8;
         const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
+        if (m_benchmark.frames != 0)
+            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase);
         commandBuffer.dispatch(groupsX, groupsY, 1);
+        if (m_benchmark.frames != 0)
+            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase + 1);
 
         vk::BufferMemoryBarrier accumulationBarrier{};
         accumulationBarrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
@@ -1388,6 +1418,17 @@ private:
 
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_postProcessPipeline);
         commandBuffer.dispatch(groupsX, groupsY, 1);
+        if (m_benchmark.frames != 0)
+            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase + 2);
+
+        if (!m_benchmark.captureHdrPath.empty())
+        {
+            auto toHost = accumulationBarrier;
+            toHost.dstAccessMask = vk::AccessFlagBits::eHostRead;
+            commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                          vk::PipelineStageFlagBits::eHost,
+                                          {}, nullptr, toHost, nullptr);
+        }
 
         vk::ImageMemoryBarrier toColorAttachment = toGeneral;
         toColorAttachment.oldLayout = vk::ImageLayout::eGeneral;
@@ -1420,6 +1461,7 @@ private:
         while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
         {
         }
+        if (m_benchmark.frames != 0) CollectGpuTiming(m_currentFrame);
 
         const auto [acquireResult, imageIndex] = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable);
         if (acquireResult != vk::Result::eSuccess && acquireResult != vk::Result::eSuboptimalKHR)
@@ -1439,6 +1481,8 @@ private:
         submitInfo.setCommandBuffers(*commandBuffer);
         submitInfo.setSignalSemaphores(*frame.renderFinished);
         m_graphicsQueue.submit(submitInfo, *frame.inFlight);
+        frame.submittedFrame = m_frameIndex;
+        frame.hasGpuTiming = m_benchmark.frames != 0;
 
         vk::PresentInfoKHR presentInfo{};
         presentInfo.setWaitSemaphores(*frame.renderFinished);
@@ -1488,17 +1532,23 @@ private:
             }
 
             const auto frameStart = Clock::now();
-            ProcessConfigCommands();
-            ReloadRuntimeConfigIfNeeded();
+            if (m_benchmark.frames == 0)
+            {
+                ProcessConfigCommands();
+                ReloadRuntimeConfigIfNeeded();
+            }
             const double deltaSeconds = std::chrono::duration<double>(frameStart - previousFrameStart).count();
             previousFrameStart = frameStart;
             BuildGuiFrame();
             const ImGuiIO& io = ImGui::GetIO();
-            if (!io.WantCaptureMouse && !io.WantCaptureKeyboard)
+            if (m_benchmark.frames == 0 && !io.WantCaptureMouse && !io.WantCaptureKeyboard)
             {
                 m_camera.Update(deltaSeconds, m_window, m_config);
             }
             RenderFrame();
+            if (m_benchmark.frames != 0
+                && m_frameIndex >= uint64_t{m_benchmark.warmupFrames} + m_benchmark.frames)
+                return;
             const auto frameEnd = Clock::now();
 
             ++framesSinceUpdate;
@@ -1514,11 +1564,60 @@ private:
         }
     }
 
+    void CollectGpuTiming(uint32_t slot)
+    {
+        auto& frame = m_frames[slot];
+        if (!frame.hasGpuTiming) return;
+        std::array<uint64_t, 3> timestamps{};
+        ThrowVk(vkGetQueryPoolResults(static_cast<VkDevice>(*m_device),
+                                     static_cast<VkQueryPool>(*m_timestampPool), slot * 3, 3,
+                                     sizeof(timestamps), timestamps.data(), sizeof(uint64_t),
+                                     VK_QUERY_RESULT_64_BIT), "Failed to read GPU timestamps");
+        if (frame.submittedFrame >= m_benchmark.warmupFrames)
+            m_gpuTimings.push_back({
+                double((timestamps[1] - timestamps[0]) & m_timestampMask) * m_timestampPeriodMs,
+                double((timestamps[2] - timestamps[1]) & m_timestampMask) * m_timestampPeriodMs});
+        frame.hasGpuTiming = false;
+    }
+
+    void FinishBenchmark()
+    {
+        for (uint32_t slot = 0; slot < m_frames.size(); ++slot) CollectGpuTiming(slot);
+        if (m_gpuTimings.size() != m_benchmark.frames)
+            throw std::runtime_error("Benchmark interrupted before all requested frames completed.");
+        for (size_t pass = 0; pass < 2; ++pass)
+        {
+            std::vector<double> values;
+            double sum = 0.0;
+            for (const auto& timing : m_gpuTimings) { values.push_back(timing[pass]); sum += timing[pass]; }
+            std::ranges::sort(values);
+            const size_t middle = values.size() / 2;
+            const double median = values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) * 0.5;
+            std::println("[Benchmark] {}: mean={:.6f} ms median={:.6f} ms p95={:.6f} ms samples={}",
+                         pass == 0 ? "sky+rainbow" : "display", sum / values.size(), median,
+                         values[(values.size() * 95 - 1) / 100], values.size());
+        }
+        if (!m_benchmark.captureHdrPath.empty())
+        {
+            ThrowVk(vmaInvalidateAllocation(m_allocator, m_accumulationBuffer.allocation, 0,
+                                             m_accumulationBuffer.size), "Failed to invalidate HDR capture memory");
+            std::ofstream file(m_benchmark.captureHdrPath, std::ios::binary);
+            const std::array<uint32_t, 2> dimensions{m_swapchainExtent.width, m_swapchainExtent.height};
+            file.write(reinterpret_cast<const char*>(dimensions.data()), sizeof(dimensions));
+            file.write(static_cast<const char*>(m_accumulationBuffer.mapped),
+                       static_cast<std::streamsize>(m_accumulationBuffer.size));
+            if (!file) throw std::runtime_error("Failed to write HDR capture.");
+            std::println("[Benchmark] HDR capture: {}", m_benchmark.captureHdrPath.string());
+        }
+    }
+
     struct FrameResources
     {
         vk::raii::Semaphore imageAvailable{nullptr};
         vk::raii::Semaphore renderFinished{nullptr};
         vk::raii::Fence inFlight{nullptr};
+        uint64_t submittedFrame = 0;
+        bool hasGpuTiming = false;
     };
 
     HWND m_window = nullptr;
@@ -1539,6 +1638,7 @@ private:
     vk::raii::SurfaceKHR m_surface{nullptr};
     vk::raii::PhysicalDevice m_physicalDevice{nullptr};
     vk::raii::Device m_device{nullptr};
+    vk::raii::QueryPool m_timestampPool{nullptr};
     vk::raii::Queue m_graphicsQueue{nullptr};
     vk::raii::Queue m_presentQueue{nullptr};
     QueueFamilyIndices m_queueFamilies;
@@ -1572,6 +1672,10 @@ private:
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
+    BenchmarkOptions m_benchmark;
+    uint64_t m_timestampMask = UINT64_MAX;
+    double m_timestampPeriodMs = 0.0;
+    std::vector<std::array<double, 2>> m_gpuTimings;
     bool m_accumulationResetRequested = true;
     bool m_accumulationStateInitialized = false;
     Vec3 m_previousAccumulationForward{};
@@ -1597,8 +1701,8 @@ private:
 // Public C-style entry point exported by VulkanPathTracer.h. Constructs a
 // VulkanPathTracer instance on the stack and runs it; any throw escapes
 // upward to main().
-void RunVulkanPathTracer()
+void RunVulkanPathTracer(const BenchmarkOptions& benchmark)
 {
-    VulkanPathTracer app;
+    VulkanPathTracer app(benchmark);
     app.Run();
 }

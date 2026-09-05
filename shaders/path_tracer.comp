@@ -71,13 +71,14 @@ void main()
         // positive toward camera-down in the image (counterclockwise for an
         // observer facing the incoming beam).
         vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
+        RainbowPathWeights rainbowWeights = integrate_rainbow_path(viewDir, sun);
 
         vec3 sampleXyz = vec3(0.0);
         float yNormalization = 0.0;
         for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
             Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
-            Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+            Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band, rainbowWeights);
             sky = stokes_add(sky, rainbow);
             float radiance = sky.I;
             if (polarized)

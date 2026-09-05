@@ -91,30 +91,48 @@ Stokes scatter_rainbow(Stokes incoming, vec3 din, vec3 dout, int band)
     return stokes_reframe(result, outAxis, normal, aout, bout);
 }
 
-Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
-                                    vec3 frameX, vec3 segmentDirection, int band)
+// Ray geometry, rain density, and atmospheric density do not depend on
+// wavelength. March them once, accumulating only the spectral attenuation
+// per band. This avoids thirteen copies of the two sunlight marches.
+struct RainbowPathWeights
 {
-    Stokes result = stokes_zero();
-    if (!RainbowEnabled() || RainbowScattering() <= 0.0) return result;
+    float bands[SPECTRAL_BANDS];
+};
+
+vec2 rainbow_sun_air_depth(vec3 origin, vec3 dir)
+{
+    float distance = max(ray_sphere(origin, dir, SkyAtmosphereRadius()).y, 0.0);
+    float stepSize = distance / 8.0;
+    vec2 depth = vec2(0.0);
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 pos = origin + dir * ((float(i) + 0.5) * stepSize);
+        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
+        depth += vec2(exp(-altitude / SkyScaleHeightRayleigh()), mie_extinction(altitude)) * stepSize;
+    }
+    return depth;
+}
+
+RainbowPathWeights integrate_rainbow_path(vec3 viewDir, vec3 sunDirection)
+{
+    RainbowPathWeights weights;
+    for (int band = 0; band < SPECTRAL_BANDS; ++band) weights.bands[band] = 0.0;
+    if (!RainbowEnabled() || RainbowScattering() <= 0.0) return weights;
 
     vec2 rainHit = ray_ellipsoid(vec3(0.0), viewDir);
     float tStart = max(rainHit.x, 0.0);
     float tEnd = rainHit.y;
-    if (tEnd <= tStart) return result;
+    if (tEnd <= tStart) return weights;
 
     // The black Earth remains the lower boundary for the local rain march.
     vec3 earthOrigin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
     vec2 groundHit = ray_sphere(earthOrigin, viewDir, SkyEarthRadius());
     if (groundHit.x > 0.0) tEnd = min(tEnd, groundHit.x);
-    if (tEnd <= tStart) return result;
+    if (tEnd <= tStart) return weights;
 
     int steps = max(1, RainbowViewSteps());
     float stepSize = (tEnd - tStart) / float(steps);
     float cameraOpticalDepth = 0.0;
-    vec3 din = -sunDirection;
-    vec3 dout = -viewDir;
-    Stokes sunlight = stokes_zero();
-    sunlight.I = 1.0;
     float sunSolidAngle = 2.0 * PI * (1.0 - cos(SkySunRadius()));
 
     for (int i = 0; i < steps; ++i)
@@ -132,15 +150,31 @@ Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
         // Sun visibility and atmospheric attenuation to the droplet.
         vec2 shadow = ray_sphere(earthPosition, sunDirection, SkyEarthRadius());
         if (shadow.x > 0.0) continue;
-        float airSunT = transmittance(earthPosition, sunDirection, 8, band);
+        vec2 airDepth = rainbow_sun_air_depth(earthPosition, sunDirection);
         float rainSunT = exp(-rainbow_sun_optical_depth(localPosition, sunDirection));
 
-        Stokes scattered = scatter_rainbow(sunlight, din, dout, band);
-        float source = SkySunRadiance(band) * sunSolidAngle
-                     * RainbowScattering() * density / (4.0 * PI);
-        result = stokes_add(result, stokes_scale(scattered,
-                            source * stepSize * rainCameraT * rainSunT * airSunT));
+        float source = sunSolidAngle * RainbowScattering() * density / (4.0 * PI);
+        float weight = source * stepSize * rainCameraT * rainSunT;
+        for (int band = 0; band < SPECTRAL_BANDS; ++band)
+        {
+            float airSunT = exp(-(SkyBetaR(band) * airDepth.x + airDepth.y));
+            weights.bands[band] += weight * airSunT;
+        }
     }
+    return weights;
+}
+
+Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
+                                    vec3 frameX, vec3 segmentDirection, int band,
+                                    RainbowPathWeights weights)
+{
+    if (weights.bands[band] <= 0.0) return stokes_zero();
+    Stokes sunlight = stokes_zero();
+    sunlight.I = 1.0;
+    // Directional scattering and its Stokes-frame transforms are constant
+    // along the ray and linear in the integrated incident radiance.
+    Stokes result = stokes_scale(scatter_rainbow(sunlight, -sunDirection, -viewDir, band),
+                                 SkySunRadiance(band) * weights.bands[band]);
 
     vec3 naturalX; vec3 naturalY;
     beam_basis(-viewDir, naturalX, naturalY);

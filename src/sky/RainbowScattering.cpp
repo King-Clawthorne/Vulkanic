@@ -60,17 +60,20 @@ void Deposit(std::vector<double>& f11, std::vector<double>& f12,
     const int radius = std::max(2, static_cast<int>(std::ceil(4.0 * sigmaBins)));
     const int first = std::max(0, static_cast<int>(std::floor(centre)) - radius);
     const int last = std::min(bins - 1, static_cast<int>(std::floor(centre)) + radius);
+    // The Gaussian is nonnegative and shared by both polarizations. Factor
+    // it out so each deposited ray needs one square root, not one per bin.
+    const double weight11 = 0.5 * (weightS + weightP);
+    const double weight12 = 0.5 * (weightP - weightS);
+    const double weight33 = std::sqrt(std::max(weightS * weightP, 0.0));
     for (int bin = first; bin <= last; ++bin)
     {
         const double x = (static_cast<double>(bin) - centre) / sigmaBins;
         const double kernel = std::exp(-0.5 * x * x);
-        const double is = weightS * kernel;
-        const double ip = weightP * kernel;
-        f11[static_cast<size_t>(bin)] += 0.5 * (is + ip);
+        f11[static_cast<size_t>(bin)] += weight11 * kernel;
         // Match MieScattering.cpp and rayleigh_mueller(): Q is parallel minus
         // perpendicular intensity, so an s-dominated bow has negative F12.
-        f12[static_cast<size_t>(bin)] += 0.5 * (ip - is);
-        f33[static_cast<size_t>(bin)] += std::sqrt(std::max(is * ip, 0.0));
+        f12[static_cast<size_t>(bin)] += weight12 * kernel;
+        f33[static_cast<size_t>(bin)] += weight33 * kernel;
     }
 }
 } // namespace

@@ -1,0 +1,30 @@
+# Normalize text in Git and use LF in working-tree source, shaders, and docs.
+* text=auto eol=lf
+
+# Native Windows scripts use CRLF when checked out.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Compiled shaders, captures, and profiling data must remain byte-exact.
+*.spv binary
+*.hdrbin binary
+*.nsys-rep binary
+*.qdstrm binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Images, archives, and compiled Windows artifacts.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.pdb binary

@@ -112,6 +112,45 @@ cmake ..
 cmake --build .
 ```
 
+The build script defaults to Release. Shaders use `-O` outside Debug;
+Debug uses `-g -O0`, and RelWithDebInfo uses `-g -O`. Generated shaders live
+under `shaders/<configuration>` in the build directory and are copied beside
+the executable on every target build, including shader-only rebuilds.
+Use Release when comparing frame times, with identical
+camera and sampling settings and enough warm-up time for pipeline creation.
+
+## Benchmarking
+
+Use a fixed camera and config to compare GPU work independently of window-title FPS:
+
+```powershell
+.\cmake-build-ninja\Vulkanic.exe --benchmark 120 --warmup 120 --config .\config\path_tracer_config.json
+```
+
+This mode disables camera input, the GUI, config hot reload, and config save/cycle
+shortcuts. After warm-up it records Vulkan timestamps for the sky/rainbow and
+display passes, prints their mean, median and p95 in milliseconds, then exits.
+The selected GPU and actual render extent are printed with the results. Timestamp
+queries and their pipeline synchronization are enabled only in benchmark mode;
+these are per-pass GPU timings, not end-to-end frame times. Other GPU workloads
+and clock changes can affect them, so alternate baseline and candidate runs.
+
+Add `--capture-hdr frame.hdrbin` to save the final linear-HDR accumulation for
+numerical comparison. Use identical config, warm-up and measured frame counts
+for both runs; the accumulated image includes warm-up frames. The binary format
+is two little-endian `uint32` dimensions followed by row-major little-endian
+`float32` tuples `(R, G, B, accumulated sample-frame count)` per pixel, before
+exposure and tonemapping. Compare two captures with the standard-library-only tool:
+
+```powershell
+python .\scripts\compare-hdr.py baseline.hdrbin candidate.hdrbin
+```
+
+The tool rejects non-finite data, mismatched dimensions or accumulation counts,
+and RGB components outside `2e-6 + 2e-4 * abs(reference)` by default. It reports
+the actual errors and exits nonzero on failure. `--atol` and `--rtol` adjust
+the tolerances when a different validation criterion is needed.
+
 ## Runtime Controls
 
 - Hold right mouse button and move the mouse to look around the sky.
