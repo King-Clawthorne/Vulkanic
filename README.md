@@ -5,6 +5,13 @@ renders the daytime sky as a thirteen-band spectral Stokes-vector successive-ord
 problem — Rayleigh + Lorenz–Mie — then converts CIE XYZ to display RGB after a runtime camera
 analyzer that switches between linear and elliptical polarization.
 
+![Primary and secondary rainbows rendered above a warm, low-sun horizon](docs/images/rainbow.png)
+
+*Vulkanic render: primary and secondary bows through a finite rain volume.
+[Capture settings](docs/images/README.md).*
+
+[Build](#building) · [Controls](#runtime-controls) · [Configuration](#runtime-configuration) · [Benchmarking](#benchmarking)
+
 ---
 
 ## Project Overview (STAR)
