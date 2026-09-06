@@ -1188,6 +1188,15 @@ private:
             m_swapchainImageViews.emplace_back(m_device, viewInfo);
         }
         m_swapchainLayouts.assign(m_swapchainImages.size(), vk::ImageLayout::eUndefined);
+
+        // One render-finished semaphore per swapchain image: a present-wait
+        // semaphore stays in use until its image is re-acquired, so it cannot
+        // be tied to the frame-in-flight slot.
+        m_presentSemaphores.clear();
+        for (size_t i = 0; i < m_swapchainImages.size(); ++i)
+        {
+            m_presentSemaphores.emplace_back(m_device.createSemaphore({}));
+        }
     }
 
     void CreateGuiRenderTargets()
@@ -1345,8 +1354,9 @@ private:
         m_commandBuffers = vk::raii::CommandBuffers(m_device, allocInfo);
     }
 
-    // Allocate the per-frame semaphores (image-available, render-
-    // finished) and fences that gate command-buffer reuse.
+    // Allocate the per-frame image-available semaphores and the fences that
+    // gate command-buffer reuse. Render-finished semaphores are per swapchain
+    // image and live with the swapchain.
     void CreateSyncObjects()
     {
         const vk::FenceCreateInfo fenceInfo{vk::FenceCreateFlagBits::eSignaled};
@@ -1355,7 +1365,6 @@ private:
         for (uint32_t i = 0; i < m_config.frameCount; ++i)
         {
             FrameResources frame{
-                m_device.createSemaphore({}),
                 m_device.createSemaphore({}),
                 m_device.createFence(fenceInfo),
             };
@@ -1544,13 +1553,14 @@ private:
         submitInfo.setWaitSemaphores(*frame.imageAvailable);
         submitInfo.setWaitDstStageMask(waitStage);
         submitInfo.setCommandBuffers(*commandBuffer);
-        submitInfo.setSignalSemaphores(*frame.renderFinished);
+        const vk::raii::Semaphore& renderFinished = m_presentSemaphores[imageIndex];
+        submitInfo.setSignalSemaphores(*renderFinished);
         m_graphicsQueue.submit(submitInfo, *frame.inFlight);
         frame.submittedFrame = m_frameIndex;
         frame.hasGpuTiming = m_benchmark.frames != 0;
 
         vk::PresentInfoKHR presentInfo{};
-        presentInfo.setWaitSemaphores(*frame.renderFinished);
+        presentInfo.setWaitSemaphores(*renderFinished);
         presentInfo.setSwapchains(*m_swapchain);
         presentInfo.setImageIndices(imageIndex);
         const vk::Result present = m_presentQueue.presentKHR(presentInfo);
@@ -1679,7 +1689,6 @@ private:
     struct FrameResources
     {
         vk::raii::Semaphore imageAvailable{nullptr};
-        vk::raii::Semaphore renderFinished{nullptr};
         vk::raii::Fence inFlight{nullptr};
         uint64_t submittedFrame = 0;
         bool hasGpuTiming = false;
@@ -1723,6 +1732,7 @@ private:
     std::vector<vk::Image> m_swapchainImages;
     std::vector<vk::raii::ImageView> m_swapchainImageViews;
     std::vector<vk::ImageLayout> m_swapchainLayouts;
+    std::vector<vk::raii::Semaphore> m_presentSemaphores;
     vk::raii::RenderPass m_guiRenderPass{nullptr};
     std::vector<vk::raii::Framebuffer> m_guiFramebuffers;
 
