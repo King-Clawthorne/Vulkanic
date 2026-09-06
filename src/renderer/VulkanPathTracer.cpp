@@ -483,9 +483,7 @@ private:
                 float rainScattering = next.rainbow.scatteringCoefficient * 1.0e4f;
                 if (ImGui::SliderFloat("Rain scattering", &rainScattering, 0.0f, 5.0f, "%.2f"))
                 {
-                    next.rainbow.scatteringCoefficient = rainScattering * 1.0e-4f;
-                    next.rainbow.extinctionCoefficient = std::max(next.rainbow.extinctionCoefficient,
-                                                                   next.rainbow.scatteringCoefficient);
+                    SetRainbowScattering(next.rainbow, rainScattering * 1.0e-4f);
                     changed = true;
                 }
             }

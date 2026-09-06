@@ -8,6 +8,7 @@
 // the same Vec3 layout shared between the OBJ loader, config parser, and
 // the Vulkan front-end.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -164,6 +165,15 @@ struct RainbowConfig
 
     [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
 };
+
+// Keep absorption fixed when the GUI changes scattering. Otherwise raising
+// scattering permanently raises extinction, making the slider history-dependent.
+inline void SetRainbowScattering(RainbowConfig& rainbow, float scattering)
+{
+    const float absorption = std::max(0.0f, rainbow.extinctionCoefficient - rainbow.scatteringCoefficient);
+    rainbow.scatteringCoefficient = scattering;
+    rainbow.extinctionCoefficient = scattering + absorption;
+}
 
 inline bool HasRainbowOpticsChanged(const RainbowConfig& left, const RainbowConfig& right)
 {

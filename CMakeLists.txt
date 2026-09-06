@@ -117,3 +117,10 @@ add_custom_command(TARGET Vulkanic POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json"
         "$<TARGET_FILE_DIR:Vulkanic>/path_tracer_config.json")
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(VulkanicRainScatteringTests tests/RainScatteringTests.cpp)
+    target_include_directories(VulkanicRainScatteringTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME rain_scattering_slider COMMAND VulkanicRainScatteringTests)
+endif()
