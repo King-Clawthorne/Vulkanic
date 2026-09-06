@@ -29,6 +29,7 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 rainbowRadiiEdge;
     // x/y scattering/extinction (1/m), z angle bins, w view steps.
     vec4 rainbowOptical;
+    vec4 spectralBands[13]; // Rayleigh extinction, solar radiance
 } sceneData;
 
 // Precomputed Lorenz–Mie scattering matrix, baked on the CPU. Each entry is

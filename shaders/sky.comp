@@ -34,8 +34,7 @@ float wavelength_nm(int band)
 
 float SkyBetaR(int band)
 {
-    float ratio = 550.0 / wavelength_nm(band);
-    return sceneData.skySpectralParams.x * ratio * ratio * ratio * ratio;
+    return sceneData.spectralBands[band].x;
 }
 
 float SkyBetaM()
@@ -75,16 +74,7 @@ float SkySunAa()
 
 float SkySunRadiance(int band)
 {
-    // Planck spectral radiance, normalized at 550 nm so the configured
-    // radiance retains a simple scene-scale meaning.
-    float temperature = sceneData.skySpectralParams.z;
-    float lambda = wavelength_nm(band) * 1.0e-9;
-    float lambdaRef = 550.0e-9;
-    const float c2 = 1.4387769e-2;
-    float shape = pow(lambdaRef / lambda, 5.0)
-                * (exp(c2 / (lambdaRef * temperature)) - 1.0)
-                / (exp(c2 / (lambda * temperature)) - 1.0);
-    return sceneData.skySpectralParams.w * shape;
+    return sceneData.spectralBands[band].y;
 }
 
 int SkySecondarySamples()
@@ -444,6 +434,10 @@ Stokes single_scatter_atmosphere(vec3 origin, vec3 viewDir, vec3 L, int steps, i
     vec3 din = -L;        // sunlight propagation direction
     vec3 dout = -viewDir; // toward the observer
     float T_cam = 1.0;
+    // Directions and phase matrices are constant along this straight ray.
+    // Integrate the two species' source weights, then scatter only once.
+    float rayleighWeight = 0.0;
+    float mieWeight = 0.0;
 
     Stokes sSun = stokes_zero();
     sSun.I = 1.0;
@@ -468,14 +462,14 @@ Stokes single_scatter_atmosphere(vec3 origin, vec3 viewDir, vec3 L, int steps, i
         if (t_shadow.x <= 0.0)
         {
             float T_sun = transmittance(pos, L, 8, band);
-            Stokes scattered = scatter_stokes(sSun, din, dout, rhoR, extM, band);
             float w = SkySunRadiance(band) * sunSolidAngle * step_size * T_mid * T_sun;
-            result = stokes_add(result, stokes_scale(scattered, w));
+            rayleighWeight += rhoR * w;
+            mieWeight += extM * w;
         }
         T_cam *= slabT;
     }
 
-    return stokes_make_physical(result);
+    return stokes_make_physical(scatter_stokes(sSun, din, dout, rayleighWeight, mieWeight, band));
 }
 
 // Transmittance over a finite segment, used from the visible surface point to

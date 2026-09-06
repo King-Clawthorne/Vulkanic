@@ -172,9 +172,10 @@ struct alignas(16) SceneData
     float rainbowCenterEnabled[4];
     float rainbowRadiiEdge[4];
     float rainbowOptical[4];
+    float spectralBands[kSpectralBandCount][4]; // Rayleigh extinction, solar radiance
 };
 
-static_assert(sizeof(SceneData) == 128, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 336, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -527,6 +528,23 @@ private:
         sceneData.rainbowOptical[1] = r.extinctionCoefficient;
         sceneData.rainbowOptical[2] = static_cast<float>(r.angleBins);
         sceneData.rainbowOptical[3] = static_cast<float>(r.viewSteps);
+        // Cache the existing per-wavelength formulas on config upload. They
+        // depend on scene parameters, not the pixel, path or scattering order.
+        // Planck radiance remains normalized at 550 nm, with the same float
+        // wavelength grid and constants previously evaluated in sky.comp.
+        for (int band = 0; band < kSpectralBandCount; ++band)
+        {
+            const float wavelength = float(kSpectralLambdaMinNm + kSpectralLambdaStepNm * band);
+            const float ratio = 550.0f / wavelength;
+            const float lambda = wavelength * 1.0e-9f;
+            constexpr float reference = 550.0e-9f;
+            constexpr float c2 = 1.4387769e-2f;
+            const float shape = std::pow(reference / lambda, 5.0f)
+                * (std::exp(c2 / (reference * s.sunTemperatureKelvin)) - 1.0f)
+                / (std::exp(c2 / (lambda * s.sunTemperatureKelvin)) - 1.0f);
+            sceneData.spectralBands[band][0] = s.betaRayleigh550 * ratio * ratio * ratio * ratio;
+            sceneData.spectralBands[band][1] = s.sunRadiance550 * shape;
+        }
         return sceneData;
     }
 
