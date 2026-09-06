@@ -1,6 +1,5 @@
-// Polarized single scattering by a finite local volume of spherical water
-// droplets. The angular Mueller matrix is baked on the CPU from the primary
-// and optional secondary Debye ray families and normalized to integral F11=4pi.
+// Finite rain volume and spherical droplet Mueller table.
+// All scattering orders are evaluated by the shared transport solver.
 
 #ifndef RAINBOW_COMP_INCLUDED
 #define RAINBOW_COMP_INCLUDED
@@ -12,7 +11,8 @@ float RainbowEdgeSoftness() { return sceneData.rainbowRadiiEdge.w; }
 float RainbowScattering() { return sceneData.rainbowOptical.x; }
 float RainbowExtinction() { return sceneData.rainbowOptical.y; }
 int RainbowAngleBins() { return int(sceneData.rainbowOptical.z); }
-int RainbowViewSteps() { return int(sceneData.rainbowOptical.w); }
+int RainbowViewSteps() { return int(sceneData.rainbowSampleCounts.x); }
+int RainbowScatteringOrders() { return int(sceneData.rainbowSampleCounts.y); }
 
 vec2 ray_ellipsoid(vec3 origin, vec3 dir)
 {
@@ -36,36 +36,23 @@ float rainbow_density(vec3 localPosition)
     return 1.0 - smoothstep(1.0 - softness, 1.0, q);
 }
 
-float rainbow_sun_optical_depth(vec3 localPosition, vec3 sunDirection)
-{
-    vec2 hit = ray_ellipsoid(localPosition, sunDirection);
-    float distanceInRain = max(hit.y, 0.0);
-    if (distanceInRain <= 0.0) return 0.0;
-    const int steps = 8;
-    float stepSize = distanceInRain / float(steps);
-    float integral = 0.0;
-    for (int i = 0; i < steps; ++i)
-    {
-        integral += rainbow_density(localPosition + sunDirection * ((float(i) + 0.5) * stepSize));
-    }
-    return RainbowExtinction() * integral * stepSize;
-}
-
 Mueller rainbow_mueller(float cosTheta, int band)
 {
     int bins = max(16, RainbowAngleBins());
     float fbin = acos(clamp(cosTheta, -1.0, 1.0)) / PI * float(bins - 1);
     int i0 = clamp(int(floor(fbin)), 0, bins - 1);
     int i1 = min(i0 + 1, bins - 1);
-    vec4 entry = mix(rainbowMatrixBuffer.entries[band * bins + i0],
-                     rainbowMatrixBuffer.entries[band * bins + i1], fbin - float(i0));
+    RainbowMatrixEntry e0 = rainbowMatrixBuffer.entries[band * bins + i0];
+    RainbowMatrixEntry e1 = rainbowMatrixBuffer.entries[band * bins + i1];
+    vec4 a = mix(e0.a, e1.a, fbin - float(i0));
+    vec4 b = mix(e0.b, e1.b, fbin - float(i0));
     Mueller m;
-    m.m11 = entry.x;
-    m.m12 = entry.y;
-    m.m22 = entry.x;
-    m.m33 = entry.z;
-    m.m34 = entry.w;
-    m.m44 = entry.z;
+    m.m11 = a.x;
+    m.m12 = a.y;
+    m.m22 = a.z;
+    m.m33 = a.w;
+    m.m34 = b.x;
+    m.m44 = b.y;
     return m;
 }
 
@@ -91,107 +78,5 @@ Stokes scatter_rainbow(Stokes incoming, vec3 din, vec3 dout, int band)
     return stokes_reframe(result, outAxis, normal, aout, bout);
 }
 
-// Ray geometry, rain density, and atmospheric density do not depend on
-// wavelength. March them once, accumulating only the spectral attenuation
-// per band. This avoids thirteen copies of the two sunlight marches.
-struct RainbowPathWeights
-{
-    float bands[SPECTRAL_BANDS];
-};
-
-vec2 rainbow_sun_air_depth(vec3 origin, vec3 dir)
-{
-    float distance = max(ray_sphere(origin, dir, SkyAtmosphereRadius()).y, 0.0);
-    float stepSize = distance / 8.0;
-    vec2 depth = vec2(0.0);
-    for (int i = 0; i < 8; ++i)
-    {
-        vec3 pos = origin + dir * ((float(i) + 0.5) * stepSize);
-        float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
-        depth += vec2(exp(-altitude / SkyScaleHeightRayleigh()), mie_extinction(altitude)) * stepSize;
-    }
-    return depth;
-}
-
-RainbowPathWeights integrate_rainbow_path(vec3 viewDir, vec3 sunDirection)
-{
-    RainbowPathWeights weights;
-    for (int band = 0; band < SPECTRAL_BANDS; ++band) weights.bands[band] = 0.0;
-    if (!RainbowEnabled() || RainbowScattering() <= 0.0) return weights;
-
-    vec2 rainHit = ray_ellipsoid(vec3(0.0), viewDir);
-    float tStart = max(rainHit.x, 0.0);
-    float tEnd = rainHit.y;
-    if (tEnd <= tStart) return weights;
-
-    // The black Earth remains the lower boundary for the local rain march.
-    vec3 earthOrigin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
-    vec2 groundHit = ray_sphere(earthOrigin, viewDir, SkyEarthRadius());
-    if (groundHit.x > 0.0) tEnd = min(tEnd, groundHit.x);
-    if (tEnd <= tStart) return weights;
-
-    int steps = max(1, RainbowViewSteps());
-    float stepSize = (tEnd - tStart) / float(steps);
-    float cameraOpticalDepth = 0.0;
-    float sunSolidAngle = 2.0 * PI * (1.0 - cos(SkySunRadius()));
-
-    for (int i = 0; i < steps; ++i)
-    {
-        float t = tStart + (float(i) + 0.5) * stepSize;
-        vec3 localPosition = viewDir * t;
-        vec3 earthPosition = earthOrigin + localPosition;
-        float density = rainbow_density(localPosition);
-        if (density <= 0.0) continue;
-
-        float slabTau = RainbowExtinction() * density * stepSize;
-        float rainCameraT = exp(-(cameraOpticalDepth + 0.5 * slabTau));
-        cameraOpticalDepth += slabTau;
-
-        // Sun visibility and atmospheric attenuation to the droplet.
-        vec2 shadow = ray_sphere(earthPosition, sunDirection, SkyEarthRadius());
-        if (shadow.x > 0.0) continue;
-        vec2 airDepth = rainbow_sun_air_depth(earthPosition, sunDirection);
-        float rainSunT = exp(-rainbow_sun_optical_depth(localPosition, sunDirection));
-
-        float source = sunSolidAngle * RainbowScattering() * density / (4.0 * PI);
-        float weight = source * stepSize * rainCameraT * rainSunT;
-        for (int band = 0; band < SPECTRAL_BANDS; ++band)
-        {
-            float airSunT = exp(-(SkyBetaR(band) * airDepth.x + airDepth.y));
-            weights.bands[band] += weight * airSunT;
-        }
-    }
-    return weights;
-}
-
-// Unpolarized incident sunlight has Stokes (1,0,0,0), so its scattered
-// intensity is F11. Final basis rotations and polarization clamps cannot
-// change it. This shortcut is only for the camera with its analyzer off.
-float render_rainbow_intensity(vec3 viewDir, vec3 sunDirection, int band,
-                               RainbowPathWeights weights)
-{
-    if (weights.bands[band] <= 0.0) return 0.0;
-    float cosTheta = clamp(dot(-sunDirection, -viewDir), -1.0, 1.0);
-    return max(rainbow_mueller(cosTheta, band).m11
-               * (SkySunRadiance(band) * weights.bands[band]), 0.0);
-}
-
-Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
-                                    vec3 frameX, vec3 segmentDirection, int band,
-                                    RainbowPathWeights weights)
-{
-    if (weights.bands[band] <= 0.0) return stokes_zero();
-    Stokes sunlight = stokes_zero();
-    sunlight.I = 1.0;
-    // Directional scattering and its Stokes-frame transforms are constant
-    // along the ray and linear in the integrated incident radiance.
-    Stokes result = stokes_scale(scatter_rainbow(sunlight, -sunDirection, -viewDir, band),
-                                 SkySunRadiance(band) * weights.bands[band]);
-
-    vec3 naturalX; vec3 naturalY;
-    beam_basis(-viewDir, naturalX, naturalY);
-    vec3 frameY = cross(segmentDirection, frameX);
-    return stokes_make_physical(stokes_reframe(result, naturalX, naturalY, frameX, frameY));
-}
 
 #endif

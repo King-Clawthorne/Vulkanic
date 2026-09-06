@@ -1,0 +1,408 @@
+// Coupled finite-order polarized transport through air AND rain. A scattering
+// event uses the sum of all local species; recursively gathering that field
+// includes rain/rain, air/rain and rain/air paths without double counting.
+#ifndef TRANSPORT_COMP_INCLUDED
+#define TRANSPORT_COMP_INCLUDED
+
+vec3 transport_origin() { return vec3(0.0, SkyEarthRadius() + 1.0, 0.0); }
+float rain_density_at(vec3 p)
+{
+    return RainbowEnabled() ? rainbow_density(p - transport_origin()) : 0.0;
+}
+float air_index(vec3 p)
+{
+    float h = max(length(p) - SkyEarthRadius(), 0.0);
+    return 1.0 + sceneData.atmosphericRefraction.x * exp(-h / sceneData.atmosphericRefraction.y);
+}
+#include "refraction.glsl"
+
+struct MediumMarch
+{
+    vec3 position;
+    vec3 direction;
+    vec3 origin;
+    vec3 initialDirection;
+    AtmosphereLookup lookup;
+    float distance;
+    vec4 edges;
+    int steps;
+    int rainSteps;
+    float ground;
+};
+MediumMarch medium_march(vec3 origin, vec3 direction, int steps, bool primary)
+{
+    MediumMarch ray;
+    ray.position = origin; ray.direction = direction; ray.steps = max(1, steps);
+    ray.rainSteps = primary ? RainbowViewSteps() : ray.steps;
+    ray.origin=origin; ray.initialDirection=direction;
+    ray.lookup=atmosphere_lookup(origin,direction); ray.distance=0.0;
+    vec3 exitDirection;
+    vec2 boundary = medium_boundary(origin, direction, exitDirection);
+    ray.ground = boundary.y;
+    ray.edges = vec4(0.0, boundary.x, boundary.x, boundary.x);
+    if (RainbowEnabled() && RainbowExtinction() > 0.0)
+    {
+        vec2 rain = ray_ellipsoid(origin - transport_origin(), direction);
+        if (rain.y > 0.0)
+        {
+            // Resolve the small local rain volume separately from the much
+            // longer atmospheric segment. Primary rain intervals use their
+            // own view-step count. Padding covers weak refractive bends.
+            float padding = sceneData.atmosphericRefraction.x > 0.0 ? 250.0 : 0.0;
+            ray.edges.y = clamp(rain.x - padding, 0.0, boundary.x);
+            ray.edges.z = clamp(rain.y + padding, ray.edges.y, boundary.x);
+        }
+    }
+    return ray;
+}
+// The caller traverses intervals in order. No array of ray points or spectral
+// fields is allocated per invocation, keeping register / local-memory use low.
+void medium_sample(inout MediumMarch ray, float ds, out vec3 p, out vec3 d)
+{
+    atmosphere_point(ray.lookup,ray.origin,ray.initialDirection,ray.distance+0.5*ds,p,d);
+    ray.distance+=ds;
+}
+vec3 medium_endpoint(MediumMarch ray)
+{
+    vec3 p,d;
+    atmosphere_point(ray.lookup,ray.origin,ray.initialDirection,ray.edges.w,p,d);
+    return p;
+}
+vec3 medium_coefficients(vec3 p)
+{
+    float altitude = max(length(p) - SkyEarthRadius(), 0.0);
+    return vec3(exp(-altitude / SkyScaleHeightRayleigh()), mie_extinction(altitude), rain_density_at(p));
+}
+float medium_extinction(vec3 coefficients, int band)
+{
+    return SkyBetaR(band) * coefficients.x + coefficients.y + RainbowExtinction() * coefficients.z;
+}
+
+// Stable exact integral through a constant-coefficient slab; unlike midpoint
+// source*exp(-tau/2), this does not incorrectly extinguish thick first slabs.
+float slab_integral(float extinction, float ds)
+{
+    float tau = extinction * ds;
+    return tau < 0.001 ? ds * (1.0 - 0.5*tau + tau*tau/6.0)
+                      : (1.0 - exp(-tau)) / extinction;
+}
+
+// Parallel transport on a ray in a radial index profile: its plane is fixed,
+// so the minimal rotation between endpoint tangents transports the frame.
+Stokes transport_frame(Stokes s, vec3 from, vec3 to)
+{
+    vec3 a, b, targetA, targetB;
+    beam_basis(from, a, b); beam_basis(to, targetA, targetB);
+    vec3 v = cross(from, to);
+    float c = dot(from, to);
+    vec3 rotatedA = a + cross(v, a) + cross(v, cross(v, a)) / max(1.0+c, 1e-6);
+    vec3 rotatedB = cross(to, rotatedA);
+    return stokes_reframe(s, rotatedA, rotatedB, targetA, targetB);
+}
+Stokes medium_scatter(Stokes incident, vec3 din, vec3 dout, vec3 coefficients, int band, int order)
+{
+    Stokes result = order <= SkyScatteringOrders()
+        ? scatter_stokes(incident, din, dout, coefficients.x, coefficients.y, band) : stokes_zero();
+    if (order <= RainbowScatteringOrders() && coefficients.z > 0.0 && RainbowScattering() > 0.0)
+        result = stokes_add(result, stokes_scale(scatter_rainbow(incident, din, dout, band),
+                            coefficients.z * RainbowScattering() / (4.0*PI)));
+    return result;
+}
+
+// Shoot the local solar direction so its escaping tangent matches the sun
+// direction outside the atmosphere. A small upward seed avoids shooting into
+// Earth at the refracted horizon; three corrections converge for this weak n.
+vec3 local_sun_direction(vec3 origin, vec3 sun)
+{
+    if (sceneData.atmosphericRefraction.x == 0.0) return sun;
+    vec3 up = normalize(origin);
+    float elevation = asin(clamp(dot(up, sun), -1.0, 1.0));
+    float h = max(length(origin) - SkyEarthRadius(), 0.0);
+    float seed = 0.01 * exp(-h/sceneData.atmosphericRefraction.y)
+               * (sceneData.atmosphericRefraction.x / 0.000277)
+               * exp(-max(elevation, 0.0)*12.0);
+    vec3 local = normalize(sun + (up - sun*dot(up, sun))*seed);
+    for (int i = 0; i < 3; ++i)
+    {
+        vec3 escaped;
+        vec2 boundary = medium_boundary(origin, local, escaped);
+        if (boundary.y > 0.5) break;
+        local = normalize(local + sun - escaped);
+    }
+    return local;
+}
+float solar_solid_angle_jacobian(vec3 origin,vec3 localSun)
+{
+    if (sceneData.atmosphericRefraction.x==0.0) return 1.0;
+    vec3 up=normalize(origin);
+    float elevation=asin(clamp(dot(up,localSun),-1.0,1.0));
+    if (abs(elevation)>1.55) return 1.0;
+    vec3 tangent=normalize(localSun-up*dot(up,localSun));
+    const float delta=0.0001;
+    vec3 lowExit,highExit;
+    vec2 low=medium_boundary(origin,tangent*cos(elevation-delta)+up*sin(elevation-delta),lowExit);
+    vec2 high=medium_boundary(origin,tangent*cos(elevation+delta)+up*sin(elevation+delta),highExit);
+    if (low.y>0.5 || high.y>0.5) return 1.0;
+    float lowAngle=asin(clamp(dot(up,lowExit),-1.0,1.0));
+    float highAngle=asin(clamp(dot(up,highExit),-1.0,1.0));
+    // dOmega_local/dOmega_space for the radially symmetric ray mapping.
+    return cos(elevation)/max(cos(0.5*(lowAngle+highAngle)),1e-6)
+           *(2.0*delta/max(highAngle-lowAngle,1e-6));
+}
+vec4 medium_optical_depth(vec3 origin, vec3 direction)
+{
+    AtmosphereLookup lookup=atmosphere_lookup(origin,direction);
+    vec4 boundary=atmosphere_entry(lookup,0);
+    if (lookup.ground) return vec4(0.0);
+    vec3 depth=vec3(boundary.y,boundary.z,0.0);
+    if (RainbowEnabled() && RainbowExtinction()>0.0)
+    {
+        vec2 hit=ray_ellipsoid(origin-transport_origin(),direction);
+        float start=max(hit.x,0.0), end=min(hit.y,boundary.x);
+        if (end>start)
+        {
+            int steps=max(8,RainbowViewSteps());
+            float ds=(end-start)/float(steps), density=0.0;
+            for (int i=0;i<steps;++i)
+            {
+                vec3 p,d;
+                atmosphere_point(lookup,origin,direction,start+(float(i)+0.5)*ds,p,d);
+                density+=rain_density_at(p)*ds;
+            }
+            depth.z=density;
+        }
+    }
+    return vec4(depth,1.0);
+}
+
+#ifndef TRANSPORT_PACKET_WIDTH
+#define TRANSPORT_PACKET_WIDTH 4
+#endif
+uint transport_hash(uint x)
+{
+    x^=x>>16; x*=0x7feb352du; x^=x>>15; x*=0x846ca68bu; return x^(x>>16);
+}
+vec3 transport_randoms(uint seed)
+{
+    return (vec3(transport_hash(seed)&0x00ffffffu,
+                 transport_hash(seed+0x9e3779b9u)&0x00ffffffu,
+                 transport_hash(seed+0x3c6ef372u)&0x00ffffffu)+0.5)/16777216.0;
+}
+float rain_cdf(int index)
+{
+    return rainbowMatrixBuffer.entries[6*RainbowAngleBins()+index].b.z;
+}
+vec4 sample_incident_direction(vec3 dout,vec3 coefficients,int index,int count,uint seed)
+{
+    vec3 random=transport_randoms(seed);
+    float u=(float(index)+random.y)/float(count);
+    float rain=RainbowScattering()*coefficients.z;
+    float fraction=clamp(rain/max(rain+SkyBetaR(6)*coefficients.x+coefficients.y,1e-20),0.0,0.9);
+    int bins=RainbowAngleBins();
+    float theta;
+    if (random.x<fraction)
+    {
+        int lo=0,hi=bins-1;
+        while (hi-lo>1)
+        {
+            int mid=(lo+hi)/2;
+            if (rain_cdf(mid)<u) lo=mid; else hi=mid;
+        }
+        float c0=rain_cdf(lo),c1=rain_cdf(hi);
+        theta=(float(lo)+(u-c0)/max(c1-c0,1e-20))*PI/float(bins-1);
+    }
+    else theta=acos(1.0-2.0*u);
+    float mu=cos(theta),phi=2.0*PI*random.z;
+    vec3 a,b; beam_basis(dout,a,b);
+    vec3 direction=normalize(dout*mu+(a*cos(phi)+b*sin(phi))*sin(theta));
+    if (fraction==0.0) return vec4(direction,1.0/(4.0*PI));
+    int bin=min(int(theta/PI*float(bins-1)),bins-2);
+    // This is the density of the sampled piecewise-linear CDF, not an
+    // assumed phase value. The uniform component covers every wavelength.
+    float rainPdf=(rain_cdf(bin+1)-rain_cdf(bin))*float(bins-1)
+                 /(2.0*PI*PI*max(sin(theta),1e-8));
+    return vec4(direction,(1.0-fraction)/(4.0*PI)+fraction*rainPdf);
+}
+// Small spectral packets share geometry, solar shooting and optical depths.
+// Width 1 remains a build-time comparison mode for numerical / GPU profiling.
+struct SpectralPacket { Stokes bands[TRANSPORT_PACKET_WIDTH]; };
+SpectralPacket empty_packet()
+{
+    SpectralPacket packet;
+    for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) packet.bands[b]=stokes_zero();
+    return packet;
+}
+float spectral_transmittance(vec4 depth,int band)
+{
+    return depth.w*exp(-(SkyBetaR(band)*depth.x+SkyBetaM()*depth.y+RainbowExtinction()*depth.z));
+}
+SpectralPacket medium_order_1(vec3 origin,vec3 viewDir,vec3 sun,int steps,int firstBand,uint pathSeed,bool primary)
+{
+    MediumMarch ray=medium_march(origin,viewDir,steps,primary);
+    SpectralPacket result=empty_packet();
+    float cameraT[TRANSPORT_PACKET_WIDTH];
+    for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) cameraT[b]=1.0;
+    Stokes sunlight=stokes_zero(); sunlight.I=1.0;
+    float sunSolidAngle=2.0*PI*(1.0-cos(SkySunRadius()));
+    vec3 sunA,sunB; beam_basis(sun,sunA,sunB);
+    for (int segment=0;segment<3;++segment)
+    {
+        int segmentSteps = segment == 1 ? ray.rainSteps : ray.steps;
+        float ds=(ray.edges[segment+1]-ray.edges[segment])/float(segmentSteps);
+        if (ds<=0.0) continue;
+        for (int i=0;i<segmentSteps;++i)
+        {
+            vec3 p,d; medium_sample(ray,ds,p,d);
+            vec3 coefficients=medium_coefficients(p);
+            float n=air_index(p);
+            int sunSamples=SkySecondarySamples();
+            for (int j=0;j<sunSamples;++j)
+            {
+                // Equal-solid-angle integration of the solar disk. The
+                // material phase table never contains solar-disk blurring.
+                vec3 random=transport_randoms(pathSeed^uint(i+segment*segmentSteps)*1973u^uint(j)*9277u^0xa511e9b3u);
+                float u=(float(j)+random.x)/float(sunSamples);
+                float mu=1.0-u*(1.0-cos(SkySunRadius()));
+                float radial=sqrt(max(0.0,1.0-mu*mu)),phi=2.0*PI*random.y;
+                vec3 sampleSun=normalize(sun*mu+(sunA*cos(phi)+sunB*sin(phi))*radial);
+                vec3 localSun=local_sun_direction(p,sampleSun);
+                vec4 depth=medium_optical_depth(p,localSun);
+                float solidAngleJacobian=solar_solid_angle_jacobian(p,localSun);
+                for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b)
+                {
+                    if (firstBand+b>=SPECTRAL_BANDS) continue;
+                    int band=min(firstBand+b,SPECTRAL_BANDS-1);
+                    float extinction=medium_extinction(coefficients,band);
+                    float source=SkySunRadiance(band)*sunSolidAngle*spectral_transmittance(depth,band)
+                                *(n*n*solidAngleJacobian)/float(sunSamples);
+                    Stokes scattered=medium_scatter(sunlight,-localSun,-d,coefficients,band,1);
+                    scattered=transport_frame(scattered,-d,-viewDir);
+                    result.bands[b]=stokes_add(result.bands[b],stokes_scale(scattered,
+                        cameraT[b]*slab_integral(extinction,ds)*source/(n*n)));
+                }
+            }
+            for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b)
+                cameraT[b]*=exp(-medium_extinction(coefficients,min(firstBand+b,SPECTRAL_BANDS-1))*ds);
+        }
+    }
+    if (ray.ground>0.5 && SkyGroundAlbedo()>0.0)
+    {
+        vec3 normal=normalize(medium_endpoint(ray));
+        vec3 surface=normal*(SkyEarthRadius()+1.0);
+        vec3 localSun=local_sun_direction(surface,sun);
+        vec4 depth=medium_optical_depth(surface,localSun);
+        float n=air_index(surface);
+        float weight=SkyGroundAlbedo()*sunSolidAngle*max(dot(normal,localSun),0.0)
+                    *solar_solid_angle_jacobian(surface,localSun)/PI;
+        for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b)
+        {
+            if (firstBand+b>=SPECTRAL_BANDS) continue;
+            int band=min(firstBand+b,SPECTRAL_BANDS-1);
+            result.bands[b].I+=cameraT[b]*weight*SkySunRadiance(band)*spectral_transmittance(depth,band);
+        }
+    }
+    float observerN=air_index(origin);
+    for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b)
+        result.bands[b]=stokes_make_physical(stokes_scale(result.bands[b],observerN*observerN));
+    return result;
+}
+
+// GLSL has no recursion. Each generated kernel consumes exactly the previous
+// order. Surface reflection advances the order as well as volume scattering.
+#define DEFINE_MEDIUM_ORDER(NAME,PREVIOUS,ORDER) \
+SpectralPacket NAME(vec3 origin,vec3 viewDir,vec3 sun,int steps,int firstBand,uint pathSeed,bool primary) \
+{ \
+    MediumMarch ray=medium_march(origin,viewDir,steps,primary); \
+    SpectralPacket result=empty_packet(); \
+    float cameraT[TRANSPORT_PACKET_WIDTH]; \
+    for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) cameraT[b]=1.0; \
+    int directions=SkySecondarySamples(); \
+    for (int segment=0;segment<3;++segment) \
+    { \
+        int segmentSteps = segment == 1 ? ray.rainSteps : ray.steps; \
+        float ds=(ray.edges[segment+1]-ray.edges[segment])/float(segmentSteps); \
+        if (ds<=0.0) continue; \
+        for (int i=0;i<segmentSteps;++i) \
+        { \
+            vec3 p,d; medium_sample(ray,ds,p,d); \
+            vec3 coefficients=medium_coefficients(p); \
+            float n=air_index(p); \
+            for (int j=0;j<directions;++j) \
+            { \
+                uint childSeed=transport_hash(pathSeed^uint(i+segment*segmentSteps)*1973u^uint(j)*9277u^0x68bc21ebu); \
+                vec4 sampleDirection=sample_incident_direction(-d,coefficients,j,directions,childSeed); \
+                vec3 din=sampleDirection.xyz; \
+                SpectralPacket incident=PREVIOUS(p,-din,sun,SkySamples(),firstBand,childSeed,false); \
+                for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) \
+                { \
+                    if (firstBand+b>=SPECTRAL_BANDS) continue; \
+                    int band=min(firstBand+b,SPECTRAL_BANDS-1); \
+                    Stokes scattered=medium_scatter(incident.bands[b],din,-d,coefficients,band,ORDER); \
+                    scattered=transport_frame(scattered,-d,-viewDir); \
+                    float extinction=medium_extinction(coefficients,band); \
+                    result.bands[b]=stokes_add(result.bands[b],stokes_scale(scattered, \
+                        cameraT[b]*slab_integral(extinction,ds)/(float(directions)*sampleDirection.w*n*n))); \
+                } \
+            } \
+            for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) \
+                cameraT[b]*=exp(-medium_extinction(coefficients,min(firstBand+b,SPECTRAL_BANDS-1))*ds); \
+        } \
+    } \
+    if (ORDER <= SkyScatteringOrders() && ray.ground>0.5 && SkyGroundAlbedo()>0.0) \
+    { \
+        vec3 normal=normalize(medium_endpoint(ray)),a,basisB; beam_basis(normal,a,basisB); \
+        vec3 surface=normal*(SkyEarthRadius()+1.0); \
+        float n=air_index(surface); \
+        for (int j=0;j<directions;++j) \
+        { \
+            uint childSeed=transport_hash(pathSeed^uint(j)*9277u^0x967a889bu); \
+            vec3 random=transport_randoms(childSeed); \
+            float u=(float(j)+random.x)/float(directions),phi=2.0*PI*random.y; \
+            vec3 incoming=normalize(a*(sqrt(u)*cos(phi))+basisB*(sqrt(u)*sin(phi))+normal*sqrt(1.0-u)); \
+            SpectralPacket incident=PREVIOUS(surface,incoming,sun,SkySamples(),firstBand,childSeed,false); \
+            for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) \
+                result.bands[b].I+=cameraT[b]*SkyGroundAlbedo()*incident.bands[b].I/(float(directions)*n*n); \
+        } \
+    } \
+    float observerN=air_index(origin); \
+    for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b) \
+        result.bands[b]=stokes_make_physical(stokes_scale(result.bands[b],observerN*observerN)); \
+    return result; \
+}
+DEFINE_MEDIUM_ORDER(medium_order_2,medium_order_1,2)
+DEFINE_MEDIUM_ORDER(medium_order_3,medium_order_2,3)
+DEFINE_MEDIUM_ORDER(medium_order_4,medium_order_3,4)
+#undef DEFINE_MEDIUM_ORDER
+
+SpectralPacket add_packets(SpectralPacket a,SpectralPacket b)
+{
+    for (int band=0;band<TRANSPORT_PACKET_WIDTH;++band)
+        a.bands[band]=stokes_add(a.bands[band],b.bands[band]);
+    return a;
+}
+SpectralPacket render_medium_packet(vec3 viewDir,vec3 sun,int firstBand,uint pathSeed)
+{
+    vec3 origin=transport_origin();
+    SpectralPacket result=medium_order_1(origin,viewDir,sun,SkyViewSteps(),firstBand,pathSeed,true);
+    int orders=SkyScatteringOrders();
+    if (RainbowEnabled() && RainbowScattering()>0.0) orders=max(orders,RainbowScatteringOrders());
+    if (orders>=2) result=add_packets(result,medium_order_2(origin,viewDir,sun,SkyViewSteps(),firstBand,pathSeed,true));
+    if (orders>=3) result=add_packets(result,medium_order_3(origin,viewDir,sun,SkyViewSteps(),firstBand,pathSeed,true));
+    if (orders>=4) result=add_packets(result,medium_order_4(origin,viewDir,sun,SkyViewSteps(),firstBand,pathSeed,true));
+    vec3 exitDirection;
+    vec2 boundary=medium_boundary(origin,viewDir,exitDirection);
+    float disk=sun_disk(exitDirection,sun);
+    if (disk>0.0 && boundary.y<0.5)
+    {
+        vec4 depth=medium_optical_depth(origin,viewDir);
+        float n=air_index(origin);
+        for (int b=0;b<TRANSPORT_PACKET_WIDTH;++b)
+        {
+            if (firstBand+b>=SPECTRAL_BANDS) continue;
+            int band=min(firstBand+b,SPECTRAL_BANDS-1);
+            result.bands[b].I+=disk*SkySunRadiance(band)*spectral_transmittance(depth,band)*n*n;
+        }
+    }
+    return result;
+}
+#endif

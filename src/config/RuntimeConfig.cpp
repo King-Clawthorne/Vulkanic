@@ -580,6 +580,8 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonNumber(spectral, "RAYLEIGH_DEPOLARIZATION",
                                     config.skySpectral.rayleighDepolarization);
             ParseOptionalJsonNumber(spectral, "GROUND_ALBEDO", config.skySpectral.groundAlbedo);
+            ParseOptionalJsonNumber(spectral, "SEA_LEVEL_REFRACTIVITY", config.skySpectral.seaLevelRefractivity);
+            ParseOptionalJsonNumber(spectral, "REFRACTION_SCALE_HEIGHT", config.skySpectral.refractionScaleHeight);
             ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_REAL",
                                     config.skySpectral.aerosolRefractiveIndexReal);
             ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_IMAG",
@@ -606,6 +608,7 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
         ParseOptionalJsonNumber(rainbow, "effectiveVariance", config.rainbow.effectiveVariance);
         ParseOptionalJsonUint32(rainbow, "angleBins", config.rainbow.angleBins);
         ParseOptionalJsonUint32(rainbow, "viewSteps", config.rainbow.viewSteps);
+        ParseOptionalJsonUint32(rainbow, "scatteringOrders", config.rainbow.scatteringOrders);
         ParseOptionalJsonUint32(rainbow, "includeSecondary", config.rainbow.includeSecondary);
     }
 }
@@ -660,6 +663,12 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "\"RAYLEIGH_DEPOLARIZATION\" must be in [0, 1).");
     FailIf(sky.groundAlbedo < 0.0f || sky.groundAlbedo > 1.0f,
            "\"GROUND_ALBEDO\" must be in [0, 1].");
+    FailIf(sky.seaLevelRefractivity < 0.0f || sky.seaLevelRefractivity > 0.001f
+               || sky.refractionScaleHeight < 1000.0f,
+           "Refraction requires SEA_LEVEL_REFRACTIVITY in [0, 0.001] and REFRACTION_SCALE_HEIGHT >= 1000 m.");
+    FailIf(1.0 + sky.seaLevelRefractivity
+               - double(sky.earthRadius) * sky.seaLevelRefractivity / sky.refractionScaleHeight <= 0.0,
+           "The configured refractive atmosphere must have increasing n(r)*r (no trapped rays).");
     FailIf(sky.aerosolRefractiveIndexReal <= 0.0f || sky.aerosolRefractiveIndexImag < 0.0f,
            "Aerosol refractive index must have positive real part and non-negative imaginary part.");
     FailIf(sky.aerosolMeanRadiusMicrometers <= 0.0f || sky.aerosolSigma <= 1.0f,
@@ -677,7 +686,9 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "Rainbow coefficients must satisfy 0 <= scattering <= extinction.");
     FailIf(rainbow.effectiveRadiusMicrometers <= 0.0f || rainbow.effectiveVariance < 0.0f,
            "Rainbow effective radius must be positive and variance non-negative.");
-    FailIf(rainbow.angleBins < 16 || rainbow.viewSteps == 0,
-           "Rainbow angleBins must be at least 16 and viewSteps greater than 0.");
+    FailIf(rainbow.viewSteps == 0, "Rainbow viewSteps must be positive.");
+    FailIf(rainbow.scatteringOrders < 1 || rainbow.scatteringOrders > 4,
+           "Rainbow scatteringOrders must be in [1, 4].");
+    FailIf(rainbow.angleBins < 16, "Rainbow angleBins must be at least 16.");
     return config;
 }
