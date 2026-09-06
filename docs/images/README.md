@@ -32,15 +32,3 @@ The repository's default config was not edited. Temporary configs, raw HDR
 captures and renderer logs are retained locally under the ignored
 `cmake-build-ninja/readme-captures` directory. This image illustrates the
 renderer; it is not a default-settings screenshot or performance benchmark.
-
-The image has been re-rendered with atmospheric refraction enabled. The original
-saved capture configuration was recovered and reused without changing any of
-the settings above; only `SEA_LEVEL_REFRACTIVITY = 0.000277` and
-`REFRACTION_SCALE_HEIGHT = 8000` were added. The exact input is
-[rainbow-config.json](rainbow-config.json). Refraction capture HDR and logs are
-in `cmake-build-ninja/refraction-validation/rainbow.*`.
-
-```powershell
-.\cmake-build-ninja\Vulkanic.exe --benchmark 12 --warmup 12 --config docs/images/rainbow-config.json --capture-hdr cmake-build-ninja/refraction-validation/rainbow.hdrbin
-python scripts/preview-hdr.py cmake-build-ninja/refraction-validation/rainbow.hdrbin docs/images/rainbow.png --exposure 20
-```

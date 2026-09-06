@@ -97,8 +97,6 @@ struct SkySpectralConfig
     float atmosphereRadius = 6420e3f;
     float scaleHeightRayleigh = 7994.0f;
     float scaleHeightMie = 1200.0f;
-    float seaLevelRefractivity = 0.000277f;
-    float refractionScaleHeight = 8000.0f;
     float sunTemperatureKelvin = 5778.0f;
     // Disk radiance corresponding to the former 18.0-at-0.1-radian setup,
     // rescaled to preserve solar irradiance at the physical 0.00465 rad radius.

@@ -67,10 +67,7 @@ set(SHADER_SOURCES
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/refraction.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/refracted_sky.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/refracted_rainbow.glsl")
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp")
 
 set(SHADER_SPV_OUTPUTS)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
@@ -98,7 +95,6 @@ add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 add_executable(Vulkanic
         src/main.cpp
         src/config/RuntimeConfig.cpp
-        src/sky/AtmosphericOptics.cpp
         src/sky/MieScattering.cpp
         src/sky/RainbowScattering.cpp
         src/app/CameraController.cpp
@@ -121,11 +117,3 @@ add_custom_command(TARGET Vulkanic POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json"
         "$<TARGET_FILE_DIR:Vulkanic>/path_tracer_config.json")
-
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(VulkanicRefractionTests tests/RefractionTests.cpp
-        src/sky/AtmosphericOptics.cpp src/config/RuntimeConfig.cpp)
-    target_include_directories(VulkanicRefractionTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    add_test(NAME refraction COMMAND VulkanicRefractionTests)
-endif()

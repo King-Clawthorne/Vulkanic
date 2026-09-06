@@ -97,7 +97,6 @@ Stokes scatter_rainbow(Stokes incoming, vec3 din, vec3 dout, int band)
 struct RainbowPathWeights
 {
     float bands[SPECTRAL_BANDS];
-    vec4 refracted[SPECTRAL_BANDS];
 };
 
 vec2 rainbow_sun_air_depth(vec3 origin, vec3 dir)
@@ -114,11 +113,8 @@ vec2 rainbow_sun_air_depth(vec3 origin, vec3 dir)
     return depth;
 }
 
-#include "refracted_rainbow.glsl"
-
 RainbowPathWeights integrate_rainbow_path(vec3 viewDir, vec3 sunDirection)
 {
-    if (sceneData.atmosphericRefraction.x > 0.0) return integrate_refracted_rainbow(viewDir,sunDirection);
     RainbowPathWeights weights;
     for (int band = 0; band < SPECTRAL_BANDS; ++band) weights.bands[band] = 0.0;
     if (!RainbowEnabled() || RainbowScattering() <= 0.0) return weights;
@@ -174,7 +170,6 @@ RainbowPathWeights integrate_rainbow_path(vec3 viewDir, vec3 sunDirection)
 float render_rainbow_intensity(vec3 viewDir, vec3 sunDirection, int band,
                                RainbowPathWeights weights)
 {
-    if (sceneData.atmosphericRefraction.x > 0.0) return max(weights.refracted[band].x * SkySunRadiance(band),0.0);
     if (weights.bands[band] <= 0.0) return 0.0;
     float cosTheta = clamp(dot(-sunDirection, -viewDir), -1.0, 1.0);
     return max(rainbow_mueller(cosTheta, band).m11
@@ -185,13 +180,6 @@ Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
                                     vec3 frameX, vec3 segmentDirection, int band,
                                     RainbowPathWeights weights)
 {
-    if (sceneData.atmosphericRefraction.x > 0.0)
-    {
-        vec4 v=weights.refracted[band]*SkySunRadiance(band);
-        Stokes result;result.I=v.x;result.Q=v.y;result.U=v.z;result.V=v.w;
-        vec3 a,b;beam_basis(-viewDir,a,b);
-        return stokes_make_physical(stokes_reframe(result,a,b,frameX,cross(segmentDirection,frameX)));
-    }
     if (weights.bands[band] <= 0.0) return stokes_zero();
     Stokes sunlight = stokes_zero();
     sunlight.I = 1.0;

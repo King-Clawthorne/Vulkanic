@@ -29,7 +29,6 @@ layout(set = 0, binding = 2) uniform SceneData
     vec4 rainbowRadiiEdge;
     // x/y scattering/extinction (1/m), z angle bins, w view steps.
     vec4 rainbowOptical;
-    vec4 atmosphericRefraction; // sea-level n-1, scale height in metres
     vec4 spectralBands[13]; // Rayleigh extinction, solar radiance
 } sceneData;
 
@@ -69,11 +68,6 @@ layout(push_constant) uniform PushConstants
     vec4 polarizer;
     uvec2 imageSize;
 } pc;
-
-layout(std430, set = 0, binding = 10) readonly buffer AtmosphereRayBuffer
-{
-    vec4 entries[];
-} atmosphereRayBuffer;
 
 #include "sky.comp"
 #include "rainbow.comp"
