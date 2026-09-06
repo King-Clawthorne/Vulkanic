@@ -689,11 +689,14 @@ Stokes fourth_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int viewSteps,
     return stokes_make_physical(result);
 }
 
+#include "refracted_sky.glsl"
+
 // Full polarized sky radiance toward viewDir, returned in the natural beam
 // frame beam_basis(-viewDir). First- and second-order scattering are
 // deterministic and noise-free; the caller reframes into its Stokes frame.
 Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band)
 {
+    if (sceneData.atmosphericRefraction.x > 0.0) return render_refracted_sky(viewDir,L,band);
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
 
     Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps(), band);

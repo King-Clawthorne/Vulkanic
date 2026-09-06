@@ -30,6 +30,7 @@
 #include "config/RuntimeConfig.h"
 #include "sky/MieScattering.h"
 #include "sky/RainbowScattering.h"
+#include "sky/AtmosphericOptics.h"
 
 #include <windows.h>
 #include <vulkan/vulkan_raii.hpp>
@@ -172,10 +173,11 @@ struct alignas(16) SceneData
     float rainbowCenterEnabled[4];
     float rainbowRadiiEdge[4];
     float rainbowOptical[4];
+    float atmosphericRefraction[4];
     float spectralBands[kSpectralBandCount][4]; // Rayleigh extinction, solar radiance
 };
 
-static_assert(sizeof(SceneData) == 336, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 352, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -242,6 +244,8 @@ static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
         << "      \"BETA_R_550\": " << s.betaRayleigh550 << ",\n      \"BETA_M\": " << s.betaMie
         << ",\n      \"EARTH_R\": " << s.earthRadius << ",\n      \"ATMOS_R\": " << s.atmosphereRadius
         << ",\n      \"SCALE_H_R\": " << s.scaleHeightRayleigh << ",\n      \"SCALE_H_M\": " << s.scaleHeightMie
+        << ",\n      \"SEA_LEVEL_REFRACTIVITY\": " << s.seaLevelRefractivity
+        << ",\n      \"REFRACTION_SCALE_HEIGHT\": " << s.refractionScaleHeight
         << ",\n      \"SUN_TEMPERATURE_K\": " << s.sunTemperatureKelvin << ",\n      \"SUN_RADIANCE_550\": " << s.sunRadiance550
         << ",\n      \"SUN_DIRECTION\": [" << s.sunDirection[0] << ", " << s.sunDirection[1] << ", " << s.sunDirection[2] << "],\n"
         << "      \"SUN_RADIUS\": " << s.sunRadius << ",\n      \"SUN_AA\": " << s.sunAa
@@ -513,6 +517,8 @@ private:
         sceneData.skyRadiiScaleHeights[1] = s.atmosphereRadius;
         sceneData.skyRadiiScaleHeights[2] = s.scaleHeightRayleigh;
         sceneData.skyRadiiScaleHeights[3] = s.scaleHeightMie;
+        sceneData.atmosphericRefraction[0] = s.seaLevelRefractivity;
+        sceneData.atmosphericRefraction[1] = s.refractionScaleHeight;
         PackVec4(sceneData.skySunDirectionRadius, s.sunDirection, s.sunRadius);
         sceneData.skySampleCounts[0] = s.secondarySamples;
         sceneData.skySampleCounts[1] = s.viewSteps;
@@ -560,6 +566,7 @@ private:
         m_accumulationBuffer = CreateBuffer(accumulationSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         CreateMieScatteringBuffer();
         CreateRainbowScatteringBuffer();
+        CreateAtmosphereRayBuffer();
     }
 
     // Translate the aerosol fields of the live config into the Mie precompute
@@ -613,6 +620,14 @@ private:
                      params.angleBins, kSpectralBandCount);
     }
 
+    void CreateAtmosphereRayBuffer()
+    {
+        const auto table = ComputeAtmosphereRayTable(m_config.skySpectral);
+        m_atmosphereRayBuffer = CreateBuffer(table.size() * sizeof(AtmosphereRayEntry), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        UploadToBuffer(m_atmosphereRayBuffer, std::as_bytes(std::span{table}));
+        std::println("[Atmosphere] Calculated {} refracted ray-table entries.", table.size());
+    }
+
     // Release the uniform buffer created by CreateSceneBuffers(). Safe to
     // call when the buffer was never created (no-op).
     void DestroySceneBuffers()
@@ -621,6 +636,7 @@ private:
         DestroyBuffer(m_mieScatteringBuffer);
         DestroyBuffer(m_rainbowScatteringBuffer);
         DestroyBuffer(m_accumulationBuffer);
+        DestroyBuffer(m_atmosphereRayBuffer);
     }
 
     // Pack the current RuntimeConfig.skySpectral into a SceneData record and
@@ -658,14 +674,17 @@ private:
             vk::WriteDescriptorSet accumulationWrite{*m_descriptorSets[i], 9, 0,
                                                       vk::DescriptorType::eStorageBuffer, {}, accumulationInfo};
 
-            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite, accumulationWrite}, nullptr);
+            const vk::DescriptorBufferInfo atmosphereInfo{m_atmosphereRayBuffer.buffer, 0, m_atmosphereRayBuffer.size};
+            vk::WriteDescriptorSet atmosphereWrite{*m_descriptorSets[i], 10, 0,
+                                                   vk::DescriptorType::eStorageBuffer, {}, atmosphereInfo};
+            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite, accumulationWrite, atmosphereWrite}, nullptr);
         }
     }
 
     // Re-apply the current m_config's sky parameters to live GPU resources.
     // Rebuilds the Mie scattering table when the aerosol model changed, then
     // re-uploads the scene UBO.
-    void RefreshSceneFromConfig(bool rebuildMieTable, bool rebuildRainbowTable)
+    void RefreshSceneFromConfig(bool rebuildMieTable, bool rebuildRainbowTable, bool rebuildAtmosphere)
     {
         if (m_sceneDataBuffer.buffer == VK_NULL_HANDLE)
         {
@@ -685,6 +704,12 @@ private:
             CreateRainbowScatteringBuffer();
             UpdateDescriptorSetContents();
         }
+        if (rebuildAtmosphere)
+        {
+            DestroyBuffer(m_atmosphereRayBuffer);
+            CreateAtmosphereRayBuffer();
+            UpdateDescriptorSetContents();
+        }
         UploadSceneDataFromConfig();
     }
 
@@ -697,6 +722,7 @@ private:
             || config.skySpectral.samples != m_config.skySpectral.samples
             || config.skySpectral.secondarySamples != m_config.skySpectral.secondarySamples;
         const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
+        const bool atmosphereChanged = HasAtmosphereGeometryChanged(config.skySpectral, m_config.skySpectral);
         const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
         const bool rainbowChanged = config.rainbow != m_config.rainbow;
         const bool rainbowOpticsChanged = HasRainbowOpticsChanged(config.rainbow, m_config.rainbow)
@@ -725,7 +751,7 @@ private:
 
         if (skySpectralChanged || rainbowChanged)
         {
-            RefreshSceneFromConfig(mieAerosolChanged, rainbowOpticsChanged);
+            RefreshSceneFromConfig(mieAerosolChanged, rainbowOpticsChanged, atmosphereChanged);
             if (pipelineChanged) CreatePipeline();
         }
     }
@@ -1211,12 +1237,13 @@ private:
         // values (gaps are legal) so the shared sky header is untouched.
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 5> bindings = {
+        const std::array<vk::DescriptorSetLayoutBinding, 6> bindings = {
             vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
             vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{8, eStorageBuffer, 1, compute},
             vk::DescriptorSetLayoutBinding{9, eStorageBuffer, 1, compute},
+            vk::DescriptorSetLayoutBinding{10, eStorageBuffer, 1, compute},
         };
 
         vk::DescriptorSetLayoutCreateInfo createInfo{};
@@ -1284,7 +1311,7 @@ private:
         const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
             vk::DescriptorPoolSize{eStorageImage, count},
             vk::DescriptorPoolSize{eUniformBuffer, count},
-            vk::DescriptorPoolSize{eStorageBuffer, count * 3u},
+            vk::DescriptorPoolSize{eStorageBuffer, count * 4u},
         };
 
         vk::DescriptorPoolCreateInfo poolInfo{};
@@ -1687,6 +1714,7 @@ private:
     BufferAllocation m_sceneDataBuffer{};
     BufferAllocation m_mieScatteringBuffer{};
     BufferAllocation m_rainbowScatteringBuffer{};
+    BufferAllocation m_atmosphereRayBuffer{};
     BufferAllocation m_accumulationBuffer{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};

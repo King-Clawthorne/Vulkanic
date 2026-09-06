@@ -226,3 +226,5 @@ restart the renderer after changing them.
   - `CMakeLists.txt` — CMake project; fetches `vk-bootstrap`/VMA and drives GLSL → SPIR-V
     compilation.
   - `config/path_tracer_config.json` — sky parameters, camera, input, render settings.
+
+Atmospheric refraction is configured through JSON; see [the refraction model and validation](docs/refraction.md).

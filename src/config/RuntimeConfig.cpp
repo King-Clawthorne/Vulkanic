@@ -566,6 +566,8 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
             ParseOptionalJsonNumber(spectral, "ATMOS_R", config.skySpectral.atmosphereRadius);
             ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
             ParseOptionalJsonNumber(spectral, "SCALE_H_M", config.skySpectral.scaleHeightMie);
+            ParseOptionalJsonNumber(spectral, "SEA_LEVEL_REFRACTIVITY", config.skySpectral.seaLevelRefractivity);
+            ParseOptionalJsonNumber(spectral, "REFRACTION_SCALE_HEIGHT", config.skySpectral.refractionScaleHeight);
             ParseOptionalJsonNumber(spectral, "SUN_TEMPERATURE_K", config.skySpectral.sunTemperatureKelvin);
             ParseOptionalJsonNumber(spectral, "SUN_RADIANCE_550", config.skySpectral.sunRadiance550);
             ParseOptionalJsonFloat3(spectral, "SUN_DIRECTION", config.skySpectral.sunDirection);
@@ -679,5 +681,9 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "Rainbow effective radius must be positive and variance non-negative.");
     FailIf(rainbow.angleBins < 16 || rainbow.viewSteps == 0,
            "Rainbow angleBins must be at least 16 and viewSteps greater than 0.");
+    FailIf(sky.seaLevelRefractivity < 0 || sky.seaLevelRefractivity > 0.001f
+               || sky.refractionScaleHeight < 1000.0f
+               || 1.0 + sky.seaLevelRefractivity - double(sky.earthRadius) * sky.seaLevelRefractivity / sky.refractionScaleHeight <= 0,
+           "Invalid atmospheric refractivity or trapped-ray profile.");
     return config;
 }
