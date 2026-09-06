@@ -67,16 +67,9 @@ set(SHADER_SOURCES
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/transport.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/refraction.glsl")
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp")
 
 set(SHADER_SPV_OUTPUTS)
-set(VULKANIC_SPECTRAL_PACKET_WIDTH "4" CACHE STRING "Spectral lanes sharing transport geometry (1, 2, or 4)")
-set_property(CACHE VULKANIC_SPECTRAL_PACKET_WIDTH PROPERTY STRINGS 1 2 4)
-if(NOT VULKANIC_SPECTRAL_PACKET_WIDTH MATCHES "^(1|2|4)$")
-  message(FATAL_ERROR "VULKANIC_SPECTRAL_PACKET_WIDTH must be 1, 2, or 4")
-endif()
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
     set(SHADER_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}")
     get_filename_component(SHADER_SOURCE_NAME "${SHADER_SOURCE}" NAME)
@@ -88,7 +81,6 @@ foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
             OUTPUT "${SHADER_OUTPUT}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>"
             COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2
-            "-DTRANSPORT_PACKET_WIDTH=${VULKANIC_SPECTRAL_PACKET_WIDTH}"
             "$<IF:$<CONFIG:Debug>,-O0,-O>" "$<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:-g>"
             -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
             -o "${SHADER_OUTPUT}" "${SHADER_INPUT}"
@@ -105,7 +97,6 @@ add_executable(Vulkanic
         src/config/RuntimeConfig.cpp
         src/sky/MieScattering.cpp
         src/sky/RainbowScattering.cpp
-        src/sky/AtmosphericOptics.cpp
         src/app/CameraController.cpp
         src/renderer/VmaUsage.cpp
         src/renderer/VulkanPathTracer.cpp)
@@ -126,11 +117,3 @@ add_custom_command(TARGET Vulkanic POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json"
         "$<TARGET_FILE_DIR:Vulkanic>/path_tracer_config.json")
-
-include(CTest)
-if(BUILD_TESTING)
-  add_executable(VulkanicOpticsTests tests/OpticsTests.cpp src/config/RuntimeConfig.cpp
-    src/sky/RainbowScattering.cpp src/sky/AtmosphericOptics.cpp)
-  target_include_directories(VulkanicOpticsTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  add_test(NAME optics COMMAND VulkanicOpticsTests)
-endif()

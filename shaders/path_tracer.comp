@@ -6,7 +6,7 @@
 //   1. Seed an LCG-style RNG from the pixel coords + frame number.
 //   2. Take samplesPerPixel stratified sub-pixel directions through the camera.
 //   3. Evaluate the full polarized vector-radiative-transfer sky along each
-//      direction (render_medium_packet), expressed in the camera image
+//      direction (render_sky_stokes_framed), expressed in the camera image
 //      plane so the analyzer can read it directly.
 //   4. Apply the camera polarization filter (an ideal elliptical analyzer),
 //      average, tonemap, and store into the swapchain image.
@@ -72,27 +72,33 @@ void main()
         // observer facing the incoming beam).
         vec3 frameX = polarized
             ? normalize(cameraRight - viewDir * dot(cameraRight, viewDir)) : vec3(0.0);
+        RainbowPathWeights rainbowWeights = integrate_rainbow_path(viewDir, sun);
 
         vec3 sampleXyz = vec3(0.0);
         float yNormalization = 0.0;
-        for (int firstBand=0;firstBand<SPECTRAL_BANDS;firstBand+=TRANSPORT_PACKET_WIDTH)
+        for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
-            SpectralPacket packet=render_medium_packet(viewDir,sun,firstBand,rngState);
-            for (int lane=0;lane<TRANSPORT_PACKET_WIDTH && firstBand+lane<SPECTRAL_BANDS;++lane)
+            float radiance;
+            if (polarized)
             {
-                int band=firstBand+lane;
-                Stokes sky=packet.bands[lane];
-                float radiance=sky.I;
-                if (polarized)
-                {
-                    vec3 a,b; beam_basis(-viewDir,a,b);
-                    sky=stokes_reframe(sky,a,b,frameX,cross(-viewDir,frameX));
-                    radiance=0.5*(sky.I+analyzer.x*sky.Q+analyzer.y*sky.U+analyzer.z*sky.V);
-                }
-                vec3 xyzWeight=CieXyz(wavelength_nm(band));
-                sampleXyz+=max(radiance,0.0)*xyzWeight;
-                yNormalization+=xyzWeight.y;
+                Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+                Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band, rainbowWeights);
+                sky = stokes_add(sky, rainbow);
+                radiance = 0.5 * (sky.I
+                                  + analyzer.x * sky.Q
+                                  + analyzer.y * sky.U
+                                  + analyzer.z * sky.V);
             }
+            else
+            {
+                // Keep full polarized transport between scattering events.
+                // Only the final camera-frame polarization is unnecessary.
+                radiance = render_sky_stokes(viewDir, sun, band).I
+                         + render_rainbow_intensity(viewDir, sun, band, rainbowWeights);
+            }
+            vec3 xyzWeight = CieXyz(wavelength_nm(band));
+            sampleXyz += max(radiance, 0.0) * xyzWeight;
+            yNormalization += xyzWeight.y;
         }
         accumulatedRadiance += XyzToLinearSrgb(sampleXyz / max(yNormalization, 1.0e-6));
     }

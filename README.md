@@ -5,9 +5,9 @@ renders the daytime sky as a thirteen-band spectral Stokes-vector successive-ord
 problem — Rayleigh + Lorenz–Mie — then converts CIE XYZ to display RGB after a runtime camera
 analyzer that switches between linear and elliptical polarization.
 
-![Primary and secondary rainbows from spherical droplets in a refracting atmosphere](docs/images/rainbow.png)
+![Primary and secondary rainbows rendered above a warm, low-sun horizon](docs/images/rainbow.png)
 
-*Vulkanic dawn/dusk render: coupled air/rain multiple scattering, atmospheric refraction and spherical droplets.
+*Vulkanic render: primary and secondary bows through a finite rain volume.
 [Capture settings](docs/images/README.md).*
 
 [Build](#building) · [Controls](#runtime-controls) · [Configuration](#runtime-configuration) · [Benchmarking](#benchmarking)
@@ -40,26 +40,24 @@ Build a complete, runnable real-time simulator that:
 
 The repository implements the whole stack from the OS layer up:
 
-- **Polarized vector radiative transfer** (`shaders/transport.comp`) — Rayleigh scattering with molecular
+- **Polarized vector radiative transfer** (`shaders/sky.comp`) — Rayleigh scattering with molecular
   depolarization and a CPU-baked **Lorenz–Mie** aerosol scattering matrix (boundary-layer haze,
   conservative scattering). Everything is transported as Stokes vectors with proper Mueller
-  matrices and frame rotations through up to four scattering events, including rain-to-rain
-  and mixed air/rain paths under the same atmosphere integration controls.
+  matrices and frame rotations through up to four scattering events.
 - **Spectral colour pipeline** — thirteen 25 nm bands drive wavelength-scaled Rayleigh extinction,
   wavelength-resolved Mie matrices, and a Planck solar spectrum. CIE 1931 XYZ integration and
   linear-sRGB conversion happen only after atmospheric transport and polarization analysis.
 - **Temporal accumulation** — stationary-camera linear-HDR accumulation reduces Monte Carlo noise
-  from subpixel and scattering-direction sampling, and resets whenever the view, analyzer,
-  or radiance configuration changes.
-- **Atmospheric refraction** — numerically integrated rays through a height-dependent refractive
-  index, cached in a CPU-calculated ray table and reused for camera, solar and scattered paths.
-  Refracted sunlight and Earth occlusion follow those trajectories. A configurable spectrally neutral
+  and resets whenever the view, analyzer, or radiance configuration changes.
+- **Physical sky details** — a binary earth-shadow test that puts twilight points behind the
+  planet's limb into umbra, giving the sky its terminator. A configurable spectrally neutral
   Lambertian lower boundary reflects attenuated direct sunlight and feeds the polarized
   successive-order atmosphere.
-- **Polarized rainbow** — ray-traced spherical water droplets, a six-component
-  Mueller table, and a cross-section-weighted log-normal size population. Primary and secondary
-  bows, reflection and transmission participate in the coupled air/rain transport. The solar
-  disk is integrated as illumination instead of being repeatedly blurred into the phase table.
+- **Polarized physical rainbow** — a CPU-baked, 13-band water-droplet Debye/Fresnel Mueller table
+  integrates a cross-section-weighted log-normal droplet-size population and drives primary and
+  secondary bow scattering through a finite ellipsoidal rain volume, including
+  rain/air attenuation and finite-solar-disk broadening. The result joins the sky as Stokes
+  radiance before the camera analyzer and CIE conversion.
 - **Runtime polarization analyzer** — an ideal elliptical analyzer applied per band in the
   compute shader; `P` enables it, `C` switches linear/elliptical, `[` / `]` rotate the axis
   or sweep ellipticity.
@@ -69,8 +67,7 @@ The repository implements the whole stack from the OS layer up:
 - **Hot config reload** — `path_tracer_config.json` is polled each frame; sky/aerosol edits apply
   live (aerosol changes rebuild the Mie table).
 - **Compute pipeline** — an 8×8-tiled transport pass evaluates the sky into a persistent HDR
-  accumulation buffer; four-wavelength packets share geometric work without dropping spectral bands.
-  A second compute pass applies camera exposure and tone mapping before
+  accumulation buffer; a second compute pass applies camera exposure and the optical PSF before
   writing the swapchain storage image. There is still no scene geometry, acceleration structure,
   or RT-hardware requirement.
 
@@ -190,25 +187,17 @@ reloads the running simulation without rebuilding:
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
   depolarization, aerosol (Lorenz–Mie) parameters, and Mie table resolution.
   - `GROUND_ALBEDO` — Lambertian lower-boundary reflectance in `[0,1]`; `0` restores black Earth.
-  - `VIEW_STEPS` — primary integration steps for **both air and rain**. `secondarySamples` controls
-    incident-direction and solar-disk samples; `Samples` controls continuation-ray steps.
-  - `SCATTERING_ORDERS` — atmosphere polarized scattering orders from `1` through `4`. Orders
+  - `VIEW_STEPS` — primary view-ray march steps. `secondarySamples` controls equal-area angular
+    samples for polarized second-order scattering; `Samples` controls each secondary ray's steps.
+  - `SCATTERING_ORDERS` — successive polarized scattering orders from `1` through `4`. Orders
     three and four are much more expensive; select `1` or `2` for realtime tuning.
-  - `SEA_LEVEL_REFRACTIVITY` — sea-level `n - 1`, default `0.000277`; `0` disables refraction.
-    `REFRACTION_SCALE_HEIGHT` controls its exponential decay with altitude (default 8000 metres).
 - `rainbow` — enables the local rain ellipsoid and controls its centre/radii, edge softness,
   scattering/extinction coefficients, effective droplet radius/variance, angular table resolution,
-  and the secondary bow. Optical/distribution edits
-  rebuild the CPU table; spatial/density edits update only the scene buffer. The rain
-  `viewSteps` and `scatteringOrders` settings now belong to the rainbow independently.
-  Air/rain light transport remains coupled; see [control semantics](docs/transport.md).
+  view-ray integration steps, and the secondary bow. Optical/distribution edits rebuild the CPU
+  table; spatial/density edits update only the scene buffer.
 
 Most edits hot-reload while running. Width, height, `frameCount`, and `vsync` are read at startup;
 restart the renderer after changing them.
-
-See [transport model, numerical limits and validation](docs/transport.md). The droplet model
-averages orientations and uses approximate Airy-scale smoothing; it is not an exact wave-optics
-solver or a model of aligned falling drops. Realtime quality settings are not convergence proof.
 
 ## Project Structure
 
@@ -216,10 +205,8 @@ solver or a model of aligned falling drops. Realtime quality settings are not co
   - `shaders/path_tracer.comp` — the whole renderer: view direction per pixel → polarized sky → analyzer →
     stationary-camera HDR accumulation (compute, 8×8 workgroups).
   - `shaders/post_process.comp` — reads the accumulated HDR image, tone maps it, and writes swapchain output.
-  - `shaders/sky.comp` — atmosphere coefficients and Rayleigh/Mie polarization primitives.
-  - `shaders/rainbow.comp` — finite rain density and spherical droplet Mueller lookup.
-  - `shaders/transport.comp` — shared first-through-fourth-order air/rain transport.
-  - `shaders/refraction.glsl` — lookup and interpolation of calculated atmospheric ray trajectories.
+  - `shaders/sky.comp` — the polarized first-through-fourth-order atmosphere (Rayleigh/Mie, Stokes machinery).
+  - `shaders/rainbow.comp` — finite-volume polarized water-droplet scattering and attenuation.
   - `shaders/path_tracer_common.glsl` — global descriptor bindings, push constants, RNG, tonemap.
 - **C++ Core:**
   - `src/renderer/VulkanPathTracer.h` / `.cpp` — Vulkan setup, swapchain, compute pipeline, Win32 window +
@@ -228,9 +215,7 @@ solver or a model of aligned falling drops. Realtime quality settings are not co
     raw Win32 keyboard/mouse input that drives them; the renderer reads the resulting camera basis
     and analyzer parameters when building push constants.
   - `src/sky/MieScattering.h` / `.cpp` — CPU Lorenz–Mie scattering-matrix precompute for the polarized sky.
-  - `src/sky/RainbowScattering.h` / `.cpp` — CPU spherical-droplet phase table precompute.
-  - `src/sky/DropOptics.h` — sphere intersections, Snell refraction and polarized Fresnel ray transport.
-  - `src/sky/AtmosphericOptics.h` / `.cpp` — RK4 atmospheric trajectories and optical-depth tables.
+  - `src/sky/RainbowScattering.h` / `.cpp` — CPU water-droplet Debye/Fresnel rainbow table precompute.
   - `src/config/RuntimeConfig.h` / `.cpp` — JSON parser + runtime configuration.
   - `config/path_tracer_config.json` — runtime render, camera, input, and sky settings.
   - `scripts/build.ps1` — Windows configure-and-build helper.

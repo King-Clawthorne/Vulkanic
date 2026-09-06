@@ -8,7 +8,6 @@
 // the same Vec3 layout shared between the OBJ loader, config parser, and
 // the Vulkan front-end.
 
-#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -105,9 +104,9 @@ struct SkySpectralConfig
     std::array<float, 3> sunDirection{0.35f, 0.3f, 0.25f};
     float sunRadius = 0.00465f;
     float sunAa = 0.0005f;
-    // All air/rain orders use secondarySamples incident directions at each
-    // interaction, with a uniform / droplet-phase importance mixture. Each
-    // continuation ray is integrated with samples steps.
+    // Second-order multiple scattering uses secondarySamples uniformly
+    // distributed incident directions at every primary view-ray point. Each
+    // secondary ray is integrated with samples steps.
     uint32_t secondarySamples = 4;
     uint32_t viewSteps = 5;
     uint32_t samples = 3;
@@ -122,10 +121,6 @@ struct SkySpectralConfig
     // Spectrally neutral Lambertian lower-boundary reflectance. Zero restores
     // the former black-Earth model; typical soil/vegetation is roughly 0.1-0.3.
     float groundAlbedo = 0.18f;
-    // n(h) = 1 + seaLevelRefractivity * exp(-h / refractionScaleHeight).
-    // Zero refractivity is the straight-ray reference mode.
-    float seaLevelRefractivity = 0.000277f;
-    float refractionScaleHeight = 8000.0f;
     // Aerosol model for the precomputed Lorenz–Mie scattering matrix.
     float aerosolRefractiveIndexReal = 1.33f;
     float aerosolRefractiveIndexImag = 0.0f;
@@ -164,20 +159,11 @@ struct RainbowConfig
     float effectiveRadiusMicrometers = 500.0f;
     float effectiveVariance = 0.08f;
     uint32_t angleBins = 4097;
+    uint32_t viewSteps = 24;
     uint32_t includeSecondary = 1;
-    uint32_t viewSteps = 5;
-    uint32_t scatteringOrders = 1;
 
     [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
 };
-
-// Change scattering without accumulating hidden absorption as the slider moves.
-inline void SetRainbowScattering(RainbowConfig& rainbow, float scattering)
-{
-    const float absorption = std::max(0.0f, rainbow.extinctionCoefficient - rainbow.scatteringCoefficient);
-    rainbow.scatteringCoefficient = scattering;
-    rainbow.extinctionCoefficient = scattering + absorption;
-}
 
 inline bool HasRainbowOpticsChanged(const RainbowConfig& left, const RainbowConfig& right)
 {

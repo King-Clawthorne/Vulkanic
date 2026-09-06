@@ -41,8 +41,3 @@ _deps
 
 # Compiled shaders
 *.spv
-
-# Local UI state and profiling captures
-imgui.ini
-*.nsys-rep
-*.sqlite

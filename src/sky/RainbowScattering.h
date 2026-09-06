@@ -4,26 +4,19 @@
 
 #include <vector>
 
-// Geometric-optics Mueller table for a population of
-// spherical droplets. Includes external reflection, transmission, and primary /
-// optional secondary internal-reflection families. Airy-scale broadening is
-// an approximation; this is not a full-wave diffraction solver.
+// CPU-baked polarized large-water-droplet phase table. The baker traces the
+// one- and two-internal-reflection Debye rays through a sphere, applies the
+// Fresnel s/p powers, integrates a cross-section-weighted log-normal droplet
+// population, and broadens each radius by the finite solar disk and its own
+// Airy scale. Entries use the same normalized Mueller convention as
+// the atmospheric Mie table: integral(F11 dOmega) = 4*pi.
 struct RainbowScatteringParams
 {
     double effectiveRadiusMicrometers = 500.0;
     double effectiveVariance = 0.08;
+    double solarAngularRadiusRadians = 0.00465;
     int angleBins = 4097;
-    int raySamples = 65536;
     bool includeSecondary = true;
 };
 
-// Store the spherical Mueller matrix in the shared six-component layout.
-// Spheres satisfy F22 = F11 and F44 = F33.
-struct RainbowMatrixEntry
-{
-    float f11, f12, f22, f33;
-    float f34, f44, cdf = 0.0f, unused = 0.0f;
-};
-static_assert(sizeof(RainbowMatrixEntry) == 32);
-
-std::vector<RainbowMatrixEntry> ComputeRainbowScatteringTable(const RainbowScatteringParams &params);
+std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowScatteringParams& params);

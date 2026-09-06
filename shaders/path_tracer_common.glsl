@@ -27,10 +27,8 @@ layout(set = 0, binding = 2) uniform SceneData
     // Local rain ellipsoid and optical/table integration parameters.
     vec4 rainbowCenterEnabled;
     vec4 rainbowRadiiEdge;
-    // x/y scattering/extinction (1/m), z angle bins, w reserved.
+    // x/y scattering/extinction (1/m), z angle bins, w view steps.
     vec4 rainbowOptical;
-    uvec4 rainbowSampleCounts; // view steps, scattering orders, reserved, reserved
-    vec4 atmosphericRefraction; // sea-level n-1, density scale height (m)
     vec4 spectralBands[13]; // Rayleigh extinction, solar radiance
 } sceneData;
 
@@ -42,16 +40,10 @@ layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer
     vec4 entries[];
 } mieMatrixBuffer;
 
-struct RainbowMatrixEntry { vec4 a; vec4 b; };
 layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer
 {
-    RainbowMatrixEntry entries[];
-} rainbowMatrixBuffer;
-
-layout(std430, set = 0, binding = 10) readonly buffer AtmosphereRayBuffer
-{
     vec4 entries[];
-} atmosphereRayBuffer;
+} rainbowMatrixBuffer;
 
 // Persistent linear-HDR running average. xyz = accumulated camera RGB,
 // w = accumulated frame count for the current stationary-camera epoch.
@@ -79,7 +71,6 @@ layout(push_constant) uniform PushConstants
 
 #include "sky.comp"
 #include "rainbow.comp"
-#include "transport.comp"
 
 // Wang hash — seeds per-pixel RNG state from a tile-friendly integer so
 // neighbouring pixels diverge after one mix.

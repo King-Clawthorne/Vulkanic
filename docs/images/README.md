@@ -1,47 +1,34 @@
-# README renderer capture
+# README renderer captures
 
-`rainbow.png` is a 960 x 540 Vulkanic render of the coupled air/rain transport,
-with atmospheric refraction, spherical droplets, and two scattering orders.
-The sun is about 0.47 degrees above the geometric horizon, giving a warm
-dawn/dusk background. The image contains 128 accumulated frames. It is not generated artwork or an upscaled
-preview. The conversion applies the renderer's hue-preserving tone map and
-linear-to-sRGB transfer at the configured exposure, without extra grading.
+`rainbow.png` is an actual Vulkanic render output, captured
+with the local Release executable using `--capture-hdr`. It is not generated
+artwork. The PNG preview applies the renderer's hue-preserving tone map and
+linear-to-sRGB conversion to the captured RGB values, at exposure 20. No colour
+grading, compositing, sharpening or image upscaling was applied.
 
-The complete input is committed as [rainbow-config.json](rainbow-config.json).
-It is a showcase scene, separate from the editable default config.
+The image is 960×540. Its temporary capture config was based on
+`config/path_tracer_config.json`, with these showcase overrides:
 
-| Setting | Capture value |
+| Setting | Value |
 | --- | --- |
-| Camera position / look-at | `[0, 2, -10]` / `[-0.35, 2.16, -10.25]` |
+| Camera position | `[0, 2, -10]` |
+| Camera look-at | `[-0.35, 2.16, -10.25]` |
 | Vertical field of view | 65 degrees |
-| Exposure | 100 |
-| Atmosphere / rain primary view steps | 4 / 4 |
-| Shared continuation steps (`Samples`) | 2 |
-| Incident-direction / solar-disk samples (`secondarySamples`) | 4 |
-| Atmosphere / rain scattering orders | 2 / 2 |
-| Samples per pixel per frame | 1 |
-| Warm-up / measured frames | 16 / 112 |
+| Exposure | 20 |
+| Primary sky steps (`VIEW_STEPS`) | 4 |
+| Secondary ray steps (`Samples`) | 2 |
+| Secondary directions (`secondarySamples`) | 2 |
+| Scattering orders | 2 |
+| Samples per pixel | 1 |
+| Warm-up / measured frames | 12 / 12 (24 accumulated frames) |
 | Analyzer | Off |
-| Sun direction | `[0.35, 0.0035, 0.25]` |
-| Aerosol extinction (`BETA_M`) | `0.000006` per metre |
-| Sea-level refractivity / scale height | `0.000277` / 8000 metres |
-| Rain centre / radii | `[-2500, 1800, -1800]` / `[3000, 3000, 3000]` metres |
-| Rain scattering / extinction | Both `0.00012` per metre |
-| Effective droplet radius / variance | 1000 micrometres / 0.08 |
-| Angular table / secondary bow | 4097 bins / enabled |
+| Rainbow sun direction | `[0.35, 0.01, 0.25]` |
 
-Reproduce from the repository root after building:
+Rain settings remain those in the default config, including both bows, 24 rain
+view steps, 4097 angular bins, 500 micrometre effective droplet radius and 0.08
+effective variance.
 
-```powershell
-New-Item -ItemType Directory -Force cmake-build-ninja/readme-captures
-.\cmake-build-ninja\Vulkanic.exe --benchmark 112 --warmup 16 --config .\docs\images\rainbow-config.json --capture-hdr .\cmake-build-ninja\readme-captures\rainbow.hdrbin
-python .\scripts\preview-hdr.py .\cmake-build-ninja\readme-captures\rainbow.hdrbin .\docs\images\rainbow.png --exposure 100
-```
-
-The PNG converter requires Pillow. The capture used the Release build on an
-RTX 5060 Ti; raw HDR and logs from this run are retained under the ignored
-`cmake-build-ninja/transport-validation/readme-dusk.*` paths. This higher-count
-capture took about 814 ms per transport frame, not realtime. Realtime timings
-use the lower-count profile documented in the [validation report](../transport-validation.md).
-
-See [transport model and limitations](../transport.md) for the finite scattering orders, numerical integration and wave-optics limits.
+The repository's default config was not edited. Temporary configs, raw HDR
+captures and renderer logs are retained locally under the ignored
+`cmake-build-ninja/readme-captures` directory. This image illustrates the
+renderer; it is not a default-settings screenshot or performance benchmark.

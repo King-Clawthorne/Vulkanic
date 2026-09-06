@@ -27,8 +27,7 @@
     "effectiveRadiusMicrometers": 500.0,
     "effectiveVariance": 0.08,
     "angleBins": 4097,
-    "viewSteps": 1,
-    "scatteringOrders": 1,
+    "viewSteps": 24,
     "includeSecondary": 1
   },
   "sky": {
@@ -51,8 +50,6 @@
       "SCATTERING_ORDERS": 1,
       "RAYLEIGH_DEPOLARIZATION": 0.0279,
       "GROUND_ALBEDO": 0.18,
-      "SEA_LEVEL_REFRACTIVITY": 0.000277,
-      "REFRACTION_SCALE_HEIGHT": 8000.0,
       "AEROSOL_IOR_REAL": 1.33,
       "AEROSOL_IOR_IMAG": 0.0,
       "AEROSOL_MEAN_RADIUS_UM": 0.2,
