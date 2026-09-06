@@ -180,6 +180,7 @@ struct RuntimeConfig
     uint32_t width = 960;
     uint32_t height = 540;
     uint32_t frameCount = 2;
+    bool vsync = false;
     uint32_t samplesPerPixel = 1;
     Vec3 initialPosition{0.0f, 0.35f, -6.5f};
     Vec3 initialLookAt{0.0f, -0.1f, 3.8f};

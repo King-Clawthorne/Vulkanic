@@ -526,6 +526,12 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
         ParseOptionalJsonUint32(render, "width", config.width);
         ParseOptionalJsonUint32(render, "height", config.height);
         ParseOptionalJsonUint32(render, "frameCount", config.frameCount);
+        if (const JsonValue* value = FindMember(render, "vsync"))
+        {
+            const bool* vsync = std::get_if<bool>(&value->data);
+            if (!vsync) throw std::runtime_error("\"vsync\" must be a boolean.");
+            config.vsync = *vsync;
+        }
         ParseOptionalJsonUint32(render, "samplesPerPixel", config.samplesPerPixel);
     }
 

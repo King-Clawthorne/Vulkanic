@@ -179,7 +179,9 @@ the tolerances when a different validation criterion is needed.
 source-tree file is preferred over the deployment copy beside the executable, so saving it hot
 reloads the running simulation without rebuilding:
 
-- `render` — resolution, swapchain frame count, samples per pixel.
+- `render` — resolution, swapchain frame count, samples per pixel, and `vsync` (`true` to enable,
+  `false` to disable; defaults to `false`). Disabling prefers immediate presentation, with
+  mailbox/FIFO fallback when unsupported.
 - `camera` — startup view and vertical field of view.
 - `input` — look speed, mouse sensitivity, analyzer rotation speed.
 - `sky.spectralConstants` — the atmospheric model: Rayleigh/Mie coefficients, sun, Rayleigh
@@ -194,7 +196,8 @@ reloads the running simulation without rebuilding:
   view-ray integration steps, and the secondary bow. Optical/distribution edits rebuild the CPU
   table; spatial/density edits update only the scene buffer.
 
-Most edits hot-reload while running. Width, height, and `frameCount` are read at startup.
+Most edits hot-reload while running. Width, height, `frameCount`, and `vsync` are read at startup;
+restart the renderer after changing them.
 
 ## Project Structure
 

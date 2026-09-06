@@ -222,6 +222,7 @@ static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
     out << "{\n  \"render\": {\n"
         << "    \"width\": " << c.width << ",\n    \"height\": " << c.height
         << ",\n    \"frameCount\": " << c.frameCount << ",\n    \"samplesPerPixel\": " << c.samplesPerPixel
+        << ",\n    \"vsync\": " << c.vsync
         << "\n  },\n  \"camera\": {\n"
         << "    \"initialPosition\": [" << c.initialPosition.x << ", " << c.initialPosition.y << ", " << c.initialPosition.z << "],\n"
         << "    \"initialLookAt\": [" << c.initialLookAt.x << ", " << c.initialLookAt.y << ", " << c.initialLookAt.z << "],\n"
@@ -707,9 +708,9 @@ private:
         if (!m_configPath.empty() && !resetCameraState)
         {
             if (config.width != m_config.width || config.height != m_config.height
-                || config.frameCount != m_config.frameCount)
+                || config.frameCount != m_config.frameCount || config.vsync != m_config.vsync)
             {
-                std::println("[Config] width/height/frameCount changes apply on the next launch.");
+                std::println("[Config] width/height/frameCount/vsync changes apply on the next launch.");
             }
         }
 
@@ -954,7 +955,7 @@ private:
         ShowWindow(m_window, SW_SHOWDEFAULT);
         UpdateWindow(m_window);
         std::println("[Config] Edit {} and save to hot-reload tuning.", m_configPath.string());
-        std::println("[Config] width, height, and frameCount are loaded from JSON at startup.");
+        std::println("[Config] width, height, frameCount, and vsync are loaded from JSON at startup.");
         std::println("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
         std::println("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
         std::println("[Controls] Linear: [ ] rotate the filter axis. Elliptical: [ ] adjust ellipticity.");
@@ -1124,14 +1125,14 @@ private:
     // Create the swapchain and its image views via vk-bootstrap. The images
     // are created with VK_IMAGE_USAGE_STORAGE_BIT and written directly by the
     // compute shader (no separate offscreen image or blit). Present-mode
-    // priority is IMMEDIATE → MAILBOX → FIFO (FIFO is the guaranteed fallback);
+    // is FIFO with VSync, otherwise IMMEDIATE → MAILBOX → FIFO;
     // at least frameCount images are requested so per-frame resources line up.
     void CreateSwapchain()
     {
         vkb::SwapchainBuilder builder{m_vkbDevice};
         builder.set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-               .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
-               .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
+               .set_desired_present_mode(m_config.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR)
+               .add_fallback_present_mode(m_config.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR)
                .set_desired_extent(m_config.width, m_config.height)
                .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
                .set_required_min_image_count(m_config.frameCount);
