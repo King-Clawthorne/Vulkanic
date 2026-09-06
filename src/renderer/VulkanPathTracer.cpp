@@ -673,6 +673,10 @@ private:
     // valid refresh (camera reset, Mie rebuild, sky UBO re-upload).
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
+        const bool pipelineChanged = config.skySpectral.scatteringOrders != m_config.skySpectral.scatteringOrders
+            || config.skySpectral.viewSteps != m_config.skySpectral.viewSteps
+            || config.skySpectral.samples != m_config.skySpectral.samples
+            || config.skySpectral.secondarySamples != m_config.skySpectral.secondarySamples;
         const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
         const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
         const bool rainbowChanged = config.rainbow != m_config.rainbow;
@@ -703,6 +707,7 @@ private:
         if (skySpectralChanged || rainbowChanged)
         {
             RefreshSceneFromConfig(mieAerosolChanged, rainbowOpticsChanged);
+            if (pipelineChanged) CreatePipeline();
         }
     }
 
@@ -1220,6 +1225,19 @@ private:
         stageInfo.stage = vk::ShaderStageFlagBits::eCompute;
         stageInfo.module = *computeModule;
         stageInfo.pName = "main";
+        // Specialize loop bounds without changing the requested quality. The
+        // config refresh waits for in-flight work before rebuilding pipelines.
+        const std::array<uint32_t, 4> settings = {m_config.skySpectral.scatteringOrders,
+            m_config.skySpectral.viewSteps, m_config.skySpectral.samples,
+            m_config.skySpectral.secondarySamples};
+        const std::array<vk::SpecializationMapEntry, 4> entries = {{
+            {0, 0, sizeof(uint32_t)}, {1, 4, sizeof(uint32_t)},
+            {2, 8, sizeof(uint32_t)}, {3, 12, sizeof(uint32_t)}}};
+        vk::SpecializationInfo specialization{};
+        specialization.setMapEntries(entries);
+        specialization.dataSize = sizeof(settings);
+        specialization.pData = settings.data();
+        stageInfo.pSpecializationInfo = &specialization;
 
         const vk::PushConstantRange pushRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants)};
         vk::PipelineLayoutCreateInfo layoutInfo{};
@@ -1232,6 +1250,7 @@ private:
         pipelineInfo.layout = *m_pipelineLayout;
         m_computePipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
         stageInfo.module = *postModule;
+        stageInfo.pSpecializationInfo = nullptr;
         pipelineInfo.stage = stageInfo;
         m_postProcessPipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
     }

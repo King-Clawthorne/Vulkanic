@@ -12,6 +12,12 @@
 #ifndef SKY_COMP_INCLUDED
 #define SKY_COMP_INCLUDED
 
+// Zero retains the uniform-driven reference path for standalone shader users.
+layout(constant_id = 0) const uint SpecializedOrders = 0;
+layout(constant_id = 1) const uint SpecializedViewSteps = 0;
+layout(constant_id = 2) const uint SpecializedSamples = 0;
+layout(constant_id = 3) const uint SpecializedSecondarySamples = 0;
+
 const float PI = 3.14159265358979323846;
 const int SPECTRAL_BANDS = 13;
 const float LAMBDA_MIN_NM = 400.0;
@@ -83,17 +89,17 @@ float SkySunRadiance(int band)
 
 int SkySecondarySamples()
 {
-    return int(sceneData.skySampleCounts.x);
+    return int(SpecializedSecondarySamples != 0 ? SpecializedSecondarySamples : sceneData.skySampleCounts.x);
 }
 
 int SkyViewSteps()
 {
-    return int(sceneData.skySampleCounts.y);
+    return int(SpecializedViewSteps != 0 ? SpecializedViewSteps : sceneData.skySampleCounts.y);
 }
 
 int SkySamples()
 {
-    return int(sceneData.skySampleCounts.z);
+    return int(SpecializedSamples != 0 ? SpecializedSamples : sceneData.skySampleCounts.z);
 }
 
 float SkyRayleighDepolarization()
@@ -103,7 +109,7 @@ float SkyRayleighDepolarization()
 
 int SkyScatteringOrders()
 {
-    return int(sceneData.skySampleCounts.w);
+    return int(SpecializedOrders != 0 ? SpecializedOrders : sceneData.skySampleCounts.w);
 }
 
 float SkyGroundAlbedo()
