@@ -164,6 +164,18 @@ RainbowPathWeights integrate_rainbow_path(vec3 viewDir, vec3 sunDirection)
     return weights;
 }
 
+// Unpolarized incident sunlight has Stokes (1,0,0,0), so its scattered
+// intensity is F11. Final basis rotations and polarization clamps cannot
+// change it. This shortcut is only for the camera with its analyzer off.
+float render_rainbow_intensity(vec3 viewDir, vec3 sunDirection, int band,
+                               RainbowPathWeights weights)
+{
+    if (weights.bands[band] <= 0.0) return 0.0;
+    float cosTheta = clamp(dot(-sunDirection, -viewDir), -1.0, 1.0);
+    return max(rainbow_mueller(cosTheta, band).m11
+               * (SkySunRadiance(band) * weights.bands[band]), 0.0);
+}
+
 Stokes render_rainbow_stokes_framed(vec3 viewDir, vec3 sunDirection,
                                     vec3 frameX, vec3 segmentDirection, int band,
                                     RainbowPathWeights weights)

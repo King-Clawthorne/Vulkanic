@@ -70,23 +70,31 @@ void main()
         // Resulting convention: polarizer.y is measured from camera-right,
         // positive toward camera-down in the image (counterclockwise for an
         // observer facing the incoming beam).
-        vec3 frameX = normalize(cameraRight - viewDir * dot(cameraRight, viewDir));
+        vec3 frameX = polarized
+            ? normalize(cameraRight - viewDir * dot(cameraRight, viewDir)) : vec3(0.0);
         RainbowPathWeights rainbowWeights = integrate_rainbow_path(viewDir, sun);
 
         vec3 sampleXyz = vec3(0.0);
         float yNormalization = 0.0;
         for (int band = 0; band < SPECTRAL_BANDS; ++band)
         {
-            Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
-            Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band, rainbowWeights);
-            sky = stokes_add(sky, rainbow);
-            float radiance = sky.I;
+            float radiance;
             if (polarized)
             {
+                Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+                Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band, rainbowWeights);
+                sky = stokes_add(sky, rainbow);
                 radiance = 0.5 * (sky.I
                                   + analyzer.x * sky.Q
                                   + analyzer.y * sky.U
                                   + analyzer.z * sky.V);
+            }
+            else
+            {
+                // Keep full polarized transport between scattering events.
+                // Only the final camera-frame polarization is unnecessary.
+                radiance = render_sky_stokes(viewDir, sun, band).I
+                         + render_rainbow_intensity(viewDir, sun, band, rainbowWeights);
             }
             vec3 xyzWeight = CieXyz(wavelength_nm(band));
             sampleXyz += max(radiance, 0.0) * xyzWeight;
