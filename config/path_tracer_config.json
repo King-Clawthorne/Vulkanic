@@ -28,6 +28,9 @@
     "effectiveVariance": 0.08,
     "angleBins": 4097,
     "viewSteps": 24,
+    "scatteringOrders": 2,
+    "multipleScatteringSamples": 1,
+    "multipleScatteringSteps": 8,
     "includeSecondary": 1
   },
   "sky": {

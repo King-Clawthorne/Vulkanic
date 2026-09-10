@@ -202,3 +202,18 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowScatterin
         throw std::runtime_error("Rainbow table failed primary-bow spectral ordering.");
     return table;
 }
+
+void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins)
+{
+    if (bins < 16 || table.size() != static_cast<size_t>(kSpectralBandCount * bins))
+        throw std::runtime_error("Invalid rainbow phase table for sampling.");
+    std::vector<double> cdf(bins, 0.0);
+    for (int i = 1; i < bins; ++i)
+    {
+        const double a = table[6 * bins + i - 1].f11 * std::sin(kPi * (i - 1) / (bins - 1));
+        const double b = table[6 * bins + i].f11 * std::sin(kPi * i / (bins - 1));
+        cdf[i] = cdf[i - 1] + std::max(0.0, a + b);
+    }
+    if (!(cdf.back() > 0.0)) throw std::runtime_error("Empty rainbow phase CDF.");
+    for (double value : cdf) table.push_back({static_cast<float>(value / cdf.back()), 0, 0, 0});
+}

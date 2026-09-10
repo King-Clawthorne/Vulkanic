@@ -162,6 +162,9 @@ struct RainbowConfig
     uint32_t angleBins = 4097;
     uint32_t viewSteps = 24;
     uint32_t includeSecondary = 1;
+    uint32_t scatteringOrders = 2;
+    uint32_t multipleScatteringSamples = 1;
+    uint32_t multipleScatteringSteps = 8;
 
     [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
 };

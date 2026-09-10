@@ -20,3 +20,6 @@ struct RainbowScatteringParams
 };
 
 std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowScatteringParams& params);
+
+// Append a normalized 550 nm angular CDF without altering the phase entries.
+void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins);

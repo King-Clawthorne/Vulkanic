@@ -689,14 +689,23 @@ Stokes fourth_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int viewSteps,
     return stokes_make_physical(result);
 }
 
+#include "ground_lighting.glsl"
+
 // Full polarized sky radiance toward viewDir, returned in the natural beam
 // frame beam_basis(-viewDir). First- and second-order scattering are
 // deterministic and noise-free; the caller reframes into its Stokes frame.
-Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band)
+Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band, float groundRadiance)
 {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
 
-    Stokes sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps(), band);
+    Stokes sky;
+    if (SkyScatteringOrders()==1)
+    {
+        sky = single_scatter_atmosphere(origin, viewDir, L, SkyViewSteps(), band);
+        sky.I += groundRadiance;
+        sky = stokes_make_physical(sky);
+    }
+    else sky = single_scatter_stokes(origin, viewDir, L, SkyViewSteps(), band);
     int orders = SkyScatteringOrders();
     if (orders >= 2)
         sky = stokes_add(sky, second_scatter_stokes(origin, viewDir, L,
@@ -729,9 +738,9 @@ Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band)
 // segDir must be the beam's propagation direction (-viewDir for camera rays):
 // stokes_reframe only handles pure rotations, so (frameX, frameY, segDir) has
 // to be right-handed about the same axis as beam_basis(-viewDir).
-Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, vec3 frameX, vec3 segDir, int band)
+Stokes render_sky_stokes_framed(vec3 viewDir, vec3 L, vec3 frameX, vec3 segDir, int band, float groundRadiance)
 {
-    Stokes sky = render_sky_stokes(viewDir, L, band);
+    Stokes sky = render_sky_stokes(viewDir, L, band, groundRadiance);
     vec3 na;
     vec3 nb;
     beam_basis(-viewDir, na, nb);

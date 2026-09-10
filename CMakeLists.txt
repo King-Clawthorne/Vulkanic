@@ -67,7 +67,9 @@ set(SHADER_SOURCES
 set(SHADER_SHARED_DEPENDENCIES
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow_multiple.glsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ground_lighting.glsl")
 
 set(SHADER_SPV_OUTPUTS)
 foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
@@ -123,4 +125,8 @@ if(BUILD_TESTING)
     add_executable(VulkanicRainScatteringTests tests/RainScatteringTests.cpp)
     target_include_directories(VulkanicRainScatteringTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     add_test(NAME rain_scattering_slider COMMAND VulkanicRainScatteringTests)
+    add_executable(VulkanicRainMultipleTests tests/RainMultipleTests.cpp
+        src/config/RuntimeConfig.cpp src/sky/RainbowScattering.cpp)
+    target_include_directories(VulkanicRainMultipleTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME rain_multiple COMMAND VulkanicRainMultipleTests)
 endif()

@@ -72,7 +72,13 @@ void main()
         // observer facing the incoming beam).
         vec3 frameX = polarized
             ? normalize(cameraRight - viewDir * dot(cameraRight, viewDir)) : vec3(0.0);
+        GroundSpectrum groundLighting;
+        for (int band=0;band<SPECTRAL_BANDS;++band) groundLighting.bands[band]=0.0;
+        // Deep scattering kernels need the lower-register per-band path.
+        // The specialized order makes this a compile-time choice on the GPU.
+        if (SkyScatteringOrders()==1) groundLighting=primary_ground_lighting(viewDir,sun);
         RainbowPathWeights rainbowWeights = integrate_rainbow_path(viewDir, sun);
+        RainbowMultipleRadiance rainMultiple = integrate_rainbow_multiple(viewDir, sun, rngState);
 
         vec3 sampleXyz = vec3(0.0);
         float yNormalization = 0.0;
@@ -81,9 +87,13 @@ void main()
             float radiance;
             if (polarized)
             {
-                Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band);
+                Stokes sky = render_sky_stokes_framed(viewDir, sun, frameX, -viewDir, band, groundLighting.bands[band]);
                 Stokes rainbow = render_rainbow_stokes_framed(viewDir, sun, frameX, -viewDir, band, rainbowWeights);
-                sky = stokes_add(sky, rainbow);
+                vec4 v=rainMultiple.bands[band];
+                Stokes extra;extra.I=v.x;extra.Q=v.y;extra.U=v.z;extra.V=v.w;
+                vec3 a,b;beam_basis(-viewDir,a,b);
+                extra=stokes_reframe(extra,a,b,frameX,cross(-viewDir,frameX));
+                sky = stokes_add(sky, stokes_add(rainbow,extra));
                 radiance = 0.5 * (sky.I
                                   + analyzer.x * sky.Q
                                   + analyzer.y * sky.U
@@ -93,8 +103,9 @@ void main()
             {
                 // Keep full polarized transport between scattering events.
                 // Only the final camera-frame polarization is unnecessary.
-                radiance = render_sky_stokes(viewDir, sun, band).I
-                         + render_rainbow_intensity(viewDir, sun, band, rainbowWeights);
+                radiance = render_sky_stokes(viewDir, sun, band, groundLighting.bands[band]).I
+                         + render_rainbow_intensity(viewDir, sun, band, rainbowWeights)
+                         + rainMultiple.bands[band].x;
             }
             vec3 xyzWeight = CieXyz(wavelength_nm(band));
             sampleXyz += max(radiance, 0.0) * xyzWeight;

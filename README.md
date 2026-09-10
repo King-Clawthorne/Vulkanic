@@ -226,3 +226,5 @@ restart the renderer after changing them.
   - `CMakeLists.txt` — CMake project; fetches `vk-bootstrap`/VMA and drives GLSL → SPIR-V
     compilation.
   - `config/path_tracer_config.json` — sky parameters, camera, input, render settings.
+
+Rainbow multiple scattering has independent JSON controls; see [settings, method and validation](docs/rain-multiple-scattering.md).

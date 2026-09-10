@@ -607,6 +607,9 @@ void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
         ParseOptionalJsonUint32(rainbow, "angleBins", config.rainbow.angleBins);
         ParseOptionalJsonUint32(rainbow, "viewSteps", config.rainbow.viewSteps);
         ParseOptionalJsonUint32(rainbow, "includeSecondary", config.rainbow.includeSecondary);
+        ParseOptionalJsonUint32(rainbow, "scatteringOrders", config.rainbow.scatteringOrders);
+        ParseOptionalJsonUint32(rainbow, "multipleScatteringSamples", config.rainbow.multipleScatteringSamples);
+        ParseOptionalJsonUint32(rainbow, "multipleScatteringSteps", config.rainbow.multipleScatteringSteps);
     }
 }
 
@@ -679,5 +682,9 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "Rainbow effective radius must be positive and variance non-negative.");
     FailIf(rainbow.angleBins < 16 || rainbow.viewSteps == 0,
            "Rainbow angleBins must be at least 16 and viewSteps greater than 0.");
+    FailIf(rainbow.scatteringOrders < 1 || rainbow.scatteringOrders > 4
+               || rainbow.multipleScatteringSamples < 1 || rainbow.multipleScatteringSamples > 64
+               || rainbow.multipleScatteringSteps < 1 || rainbow.multipleScatteringSteps > 64,
+           "Rain orders must be 1-4; multiple scattering samples and steps must be 1-64.");
     return config;
 }

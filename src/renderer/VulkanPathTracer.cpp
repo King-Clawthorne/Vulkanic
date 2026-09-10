@@ -172,10 +172,11 @@ struct alignas(16) SceneData
     float rainbowCenterEnabled[4];
     float rainbowRadiiEdge[4];
     float rainbowOptical[4];
+    uint32_t rainbowMultiple[4];
     float spectralBands[kSpectralBandCount][4]; // Rayleigh extinction, solar radiance
 };
 
-static_assert(sizeof(SceneData) == 336, "Scene data layout must stay 16-byte aligned.");
+static_assert(sizeof(SceneData) == 352, "Scene data layout must stay 16-byte aligned.");
 
 struct PushConstants
 {
@@ -238,6 +239,9 @@ static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
         << ",\n    \"effectiveRadiusMicrometers\": " << r.effectiveRadiusMicrometers
         << ",\n    \"effectiveVariance\": " << r.effectiveVariance << ",\n    \"angleBins\": " << r.angleBins
         << ",\n    \"viewSteps\": " << r.viewSteps << ",\n    \"includeSecondary\": " << r.includeSecondary
+        << ",\n    \"scatteringOrders\": " << r.scatteringOrders
+        << ",\n    \"multipleScatteringSamples\": " << r.multipleScatteringSamples
+        << ",\n    \"multipleScatteringSteps\": " << r.multipleScatteringSteps
         << "\n  },\n  \"sky\": {\n    \"exposure\": " << c.skyExposure << ",\n    \"spectralConstants\": {\n"
         << "      \"BETA_R_550\": " << s.betaRayleigh550 << ",\n      \"BETA_M\": " << s.betaMie
         << ",\n      \"EARTH_R\": " << s.earthRadius << ",\n      \"ATMOS_R\": " << s.atmosphereRadius
@@ -527,6 +531,9 @@ private:
         sceneData.rainbowOptical[1] = r.extinctionCoefficient;
         sceneData.rainbowOptical[2] = static_cast<float>(r.angleBins);
         sceneData.rainbowOptical[3] = static_cast<float>(r.viewSteps);
+        sceneData.rainbowMultiple[0] = r.scatteringOrders;
+        sceneData.rainbowMultiple[1] = r.multipleScatteringSamples;
+        sceneData.rainbowMultiple[2] = r.multipleScatteringSteps;
         // Cache the existing per-wavelength formulas on config upload. They
         // depend on scene parameters, not the pixel, path or scattering order.
         // Planck radiance remains normalized at 550 nm, with the same float
@@ -603,7 +610,8 @@ private:
     void CreateRainbowScatteringBuffer()
     {
         const RainbowScatteringParams params = BuildRainbowScatteringParams();
-        const std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(params);
+        std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(params);
+        AppendRainbowSamplingCdf(table, params.angleBins);
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_rainbowScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         UploadToBuffer(m_rainbowScatteringBuffer, std::as_bytes(std::span{table}));
