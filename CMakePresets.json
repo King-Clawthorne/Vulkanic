@@ -1,0 +1,15 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default",
+      "description": "Uses CMake's default generator, which finds the installed compiler itself.",
+      "binaryDir": "${sourceDir}/build"
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "default", "configuration": "Debug" },
+    { "name": "release", "configurePreset": "default", "configuration": "Release" }
+  ]
+}
