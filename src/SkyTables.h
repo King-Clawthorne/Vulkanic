@@ -42,7 +42,7 @@ struct SkySpectralConfig {
 };
 
 struct RainbowConfig {
-    uint32_t enabled = 0;
+    uint32_t enabled = 1;
     Vec3 center{0.0f, 1200.0f, 0.0f};
     Vec3 radii{5000.0f, 1800.0f, 5000.0f};
     float edgeSoftness = 0.15f;
