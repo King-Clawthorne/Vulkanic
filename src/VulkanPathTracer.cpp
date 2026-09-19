@@ -4,7 +4,9 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <VkBootstrap.h>
+#ifndef __clang_analyzer__
 #define VMA_IMPLEMENTATION
+#endif
 #include <vk_mem_alloc_raii.hpp>
 #include <array>
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <span>
 #include <vector>
 #include <cmath>
+#include <cstdio>
 
 class CameraController {
 public:
@@ -55,7 +58,7 @@ namespace {
     float MaxPitchRadians(const RuntimeConfig& config) { return config.camera.maxPitchDegrees * kPi / 180.0f; }
 
     float Axis(GLFWwindow* window, int negativeKey, int positiveKey) {
-        return float(glfwGetKey(window, positiveKey) == GLFW_PRESS) - float(glfwGetKey(window, negativeKey) == GLFW_PRESS);
+        return static_cast<float>(glfwGetKey(window, positiveKey) == GLFW_PRESS) - static_cast<float>(glfwGetKey(window, negativeKey) == GLFW_PRESS);
     }
 }
 
@@ -83,12 +86,13 @@ void CameraController::Update(double deltaSeconds, GLFWwindow* window, const Run
     }
     const float dt = static_cast<float>(std::min(deltaSeconds, 0.1));
 
-    double cursorX = 0.0, cursorY = 0.0;
+    double cursorX = 0.0;
+    double cursorY = 0.0;
     glfwGetCursorPos(window, &cursorX, &cursorY);
     const bool mouseLook = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
     if (mouseLook && m_mouseLookActive) {
-        m_yaw += float(cursorX - m_lastMouseX) * config.input.mouseSensitivity;
-        m_pitch -= float(cursorY - m_lastMouseY) * config.input.mouseSensitivity;
+        m_yaw += static_cast<float>(cursorX - m_lastMouseX) * config.input.mouseSensitivity;
+        m_pitch -= static_cast<float>(cursorY - m_lastMouseY) * config.input.mouseSensitivity;
     }
     m_mouseLookActive = mouseLook;
     m_lastMouseX = cursorX;
@@ -105,7 +109,7 @@ void CameraController::Update(double deltaSeconds, GLFWwindow* window, const Run
 }
 
 CameraController::View CameraController::GetView() const {
-    return {m_yaw, m_pitch, m_polarizerEnabled, m_polarizerAngle, m_polarizerElliptical ? m_polarizerEllipticity : 0.0f};
+    return {.yaw = m_yaw, .pitch = m_pitch, .polarizerEnabled = m_polarizerEnabled, .polarizerAngle = m_polarizerAngle, .polarizerEllipticity = m_polarizerElliptical ? m_polarizerEllipticity : 0.0f};
 }
 
 constexpr uint32_t kFramesInFlight = 2;
@@ -126,6 +130,7 @@ struct alignas(16) SceneData {
     uint32_t rainbowMultiple[4];
     float spectralBands[kSpectralBandCount][4];
     float cieXyz[kSpectralBandCount][4];
+    float sunDisk[4];
 };
 
 struct PushConstants {
@@ -141,7 +146,7 @@ class VulkanPathTracer {
 public:
     ~VulkanPathTracer() {
         if (*m_device) {
-            m_device.waitIdle();
+            vkDeviceWaitIdle(*m_device);
         }
         if (m_window != nullptr) {
             glfwDestroyWindow(m_window);
@@ -168,7 +173,7 @@ public:
     }
 
 private:
-    static void KeyCallback(GLFWwindow* window, int key, int, int action, int) {
+    static void KeyCallback(GLFWwindow* window, int key, int /*unused*/, int action, int /*unused*/) {
         auto* app = static_cast<VulkanPathTracer*>(glfwGetWindowUserPointer(window));
         if (app == nullptr || action != GLFW_PRESS) {
             return;
@@ -176,7 +181,7 @@ private:
         app->m_camera.OnKeyPress(key, app->m_config);
     }
 
-    SceneData BuildSceneData() const {
+    [[nodiscard]] SceneData BuildSceneData() const {
         const SkySpectralConfig& s = m_config.sky.spectral;
         const RainbowConfig& r = m_config.rainbow;
         SceneData sceneData{
@@ -184,15 +189,15 @@ private:
             .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.scaleHeightMie},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
             .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
-            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, float(s.mieTableAngleBins), 0.0f},
-            .rainbowCenterEnabled = {r.center.x, r.center.y, r.center.z, float(r.enabled)},
+            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), 0.0f},
+            .rainbowCenterEnabled = {r.center.x, r.center.y, r.center.z, static_cast<float>(r.enabled)},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
-            .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, float(r.angleBins), float(r.viewSteps)},
+            .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
         float ySum = 0.0f;
         for (int band = 0; band < kSpectralBandCount; ++band) {
-            const float wavelength = float(kSpectralLambdaMinNm + kSpectralLambdaStepNm * band);
+            const auto wavelength = static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band));
             const float ratio = 550.0f / wavelength;
             const float lambda = wavelength * 1.0e-9f;
             constexpr float reference = 550.0e-9f;
@@ -205,13 +210,16 @@ private:
                 return std::exp(-0.5f * x * x);
             };
             float* xyz = sceneData.cieXyz[band];
-            xyz[0] = std::max(0.0f, 1.056f * g(599.8f, 0.0264f, 0.0323f) + 0.362f * g(442.0f, 0.0624f, 0.0374f) - 0.065f * g(501.1f, 0.0490f, 0.0382f));
-            xyz[1] = std::max(0.0f, 0.821f * g(568.8f, 0.0213f, 0.0247f) + 0.286f * g(530.9f, 0.0613f, 0.0322f));
-            xyz[2] = std::max(0.0f, 1.217f * g(437.0f, 0.0845f, 0.0278f) + 0.681f * g(459.0f, 0.0385f, 0.0725f));
+            xyz[0] = std::max(0.0f, (1.056f * g(599.8f, 0.0264f, 0.0323f)) + (0.362f * g(442.0f, 0.0624f, 0.0374f)) - (0.065f * g(501.1f, 0.0490f, 0.0382f)));
+            xyz[1] = std::max(0.0f, (0.821f * g(568.8f, 0.0213f, 0.0247f)) + (0.286f * g(530.9f, 0.0613f, 0.0322f)));
+            xyz[2] = std::max(0.0f, (1.217f * g(437.0f, 0.0845f, 0.0278f)) + (0.681f * g(459.0f, 0.0385f, 0.0725f)));
             ySum += xyz[1];
         }
         for (auto& xyz : sceneData.cieXyz)
             for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
+        sceneData.sunDisk[0] = 2.0f * kPi * (1.0f - std::cos(s.sunRadius));
+        sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
+        sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
         return sceneData;
     }
 
@@ -219,19 +227,22 @@ private:
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
         CreateMieScatteringBuffer();
         CreateRainbowScatteringBuffer();
+        const std::vector<std::array<float, 2>> table = ComputeTransmittanceTable(m_config.sky.spectral);
+        m_transmittanceBuffer = CreateBuffer(table.size() * sizeof(table[0]), vk::BufferUsageFlagBits::eStorageBuffer);
+        UploadToBuffer(m_transmittanceBuffer, std::as_bytes(std::span{table}));
     }
 
     void CreateMieScatteringBuffer() {
         const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral);
-        const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
+        const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
     }
 
     void CreateRainbowScatteringBuffer() {
         std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(m_config.rainbow, m_config.sky.spectral.sunRadius);
-        AppendRainbowSamplingCdf(table, int(m_config.rainbow.angleBins));
-        const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
+        AppendRainbowSamplingCdf(table, static_cast<int>(m_config.rainbow.angleBins));
+        const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_rainbowScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_rainbowScatteringBuffer, std::as_bytes(std::span{table}));
     }
@@ -277,12 +288,12 @@ private:
     vkb::PhysicalDevice PickPhysicalDevice(const vkb::Instance& vkbInstance) {
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-        VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceVulkan13Features features13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         features13.synchronization2 = VK_TRUE;
-        VkPhysicalDeviceVulkan14Features features14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+        VkPhysicalDeviceVulkan14Features features14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
         features14.pushDescriptor = VK_TRUE;
         VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchainMaintenance{
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR};
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR};
         swapchainMaintenance.swapchainMaintenance1 = VK_TRUE;
 
         auto deviceResult = vkb::PhysicalDeviceSelector{vkbInstance}
@@ -315,7 +326,7 @@ private:
                                            vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
     }
 
-    vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage) const {
+    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage) const {
         return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage},
                                  vma::AllocationCreateInfo{vma::AllocationCreateFlagBits::eHostAccessSequentialWrite, vma::MemoryUsage::eAuto});
     }
@@ -331,7 +342,7 @@ private:
 
     void CreateSwapchain() {
         vkb::SwapchainBuilder builder{*m_physicalDevice, *m_device, *m_surface, m_queueFamily, m_queueFamily};
-        builder.set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+        builder.set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
             .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
             .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
             .set_desired_extent(m_config.render.width, m_config.render.height)
@@ -353,11 +364,12 @@ private:
     void CreateDescriptorSetLayout() {
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 4> layoutBindings{{
+        const std::array<vk::DescriptorSetLayoutBinding, 5> layoutBindings{{
             {0, eStorageImage, 1, compute},
             {2, eUniformBuffer, 1, compute},
             {7, eStorageBuffer, 1, compute},
             {8, eStorageBuffer, 1, compute},
+            {9, eStorageBuffer, 1, compute},
         }};
         vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
         createInfo.setBindings(layoutBindings);
@@ -365,17 +377,17 @@ private:
     }
 
     vk::raii::ShaderModule CreateShaderModule(std::span<const uint32_t> spirv) {
-        return vk::raii::ShaderModule(m_device, vk::ShaderModuleCreateInfo{{}, spirv.size_bytes(), spirv.data()});
+        return {m_device, vk::ShaderModuleCreateInfo{{}, spirv.size_bytes(), spirv.data()}};
     }
 
     void CreatePipeline() {
         const vk::raii::ShaderModule computeModule = CreateShaderModule(kPathTracerSpirv);
 
-        const std::array<uint32_t, 4> settings = {m_config.sky.spectral.scatteringOrders,
+        const std::array<uint32_t, 5> settings = {std::max(1u, m_config.sky.spectral.scatteringOrders),
                                                   m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples,
-                                                  m_config.sky.spectral.secondarySamples};
-        const std::array<vk::SpecializationMapEntry, 4> entries = {{{0, 0, sizeof(uint32_t)}, {1, 4, sizeof(uint32_t)}, {2, 8, sizeof(uint32_t)}, {3, 12, sizeof(uint32_t)}}};
-        const vk::SpecializationInfo specialization{uint32_t(entries.size()), entries.data(), sizeof(settings), settings.data()};
+                                                  m_config.sky.spectral.secondarySamples, (m_config.rainbow.enabled != 0u) ? 1u : 0u};
+        const std::array<vk::SpecializationMapEntry, 5> entries = {{{0, 0, 4}, {1, 4, 4}, {2, 8, 4}, {3, 12, 4}, {4, 16, 4}}};
+        const vk::SpecializationInfo specialization{static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data()};
 
         const vk::PushConstantRange pushRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants)};
         vk::PipelineLayoutCreateInfo layoutInfo{};
@@ -398,8 +410,7 @@ private:
         const vk::FenceCreateInfo signaled{vk::FenceCreateFlagBits::eSignaled};
         m_frames.clear();
         for (uint32_t i = 0; i < count; ++i) {
-            m_frames.push_back({std::move(commandBuffers[i]), m_device.createSemaphore({}), m_device.createSemaphore({}),
-                                m_device.createFence(signaled), m_device.createFence(signaled)});
+            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .renderFinished = m_device.createSemaphore({}), .presentDone = m_device.createFence(signaled), .inFlight = m_device.createFence(signaled)});
         }
     }
 
@@ -407,14 +418,17 @@ private:
         const CameraController::View view = m_camera.GetView();
 
         const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
-        const float aspect = float(m_swapchainExtent.width) / float(m_swapchainExtent.height);
-        const float fx = std::sin(view.yaw) * std::cos(view.pitch), fy = std::sin(view.pitch), fz = std::cos(view.yaw) * std::cos(view.pitch);
-        const float rx = std::cos(view.yaw), rz = -std::sin(view.yaw);
+        const float aspect = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+        const float fx = std::sin(view.yaw) * std::cos(view.pitch);
+        const float fy = std::sin(view.pitch);
+        const float fz = std::cos(view.yaw) * std::cos(view.pitch);
+        const float rx = std::cos(view.yaw);
+        const float rz = -std::sin(view.yaw);
         const PushConstants constants{
-            .forward = {fx, fy, fz, float(m_config.render.samplesPerPixel)},
+            .forward = {fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel)},
             .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
-            .up = {fy * rz * tanHalfFov, (fz * rx - fx * rz) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
-            .frame = {float(m_frameIndex), m_config.sky.exposure, 0.0f, 0.0f},
+            .up = {fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
+            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, 0.0f, 0.0f},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
         };
@@ -442,12 +456,13 @@ private:
         const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral};
         const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo{*b, 0, vk::WholeSize}; };
         const std::array bufferInfos{bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer),
-                                     bufferInfo(m_rainbowScatteringBuffer)};
+                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer)};
         const std::array writes{
             vk::WriteDescriptorSet{{}, 0, 0, eStorageImage, imageInfo},
             vk::WriteDescriptorSet{{}, 2, 0, eUniformBuffer, {}, bufferInfos[0]},
             vk::WriteDescriptorSet{{}, 7, 0, eStorageBuffer, {}, bufferInfos[1]},
             vk::WriteDescriptorSet{{}, 8, 0, eStorageBuffer, {}, bufferInfos[2]},
+            vk::WriteDescriptorSet{{}, 9, 0, eStorageBuffer, {}, bufferInfos[3]},
         };
         commandBuffer.pushDescriptorSet(vk::PipelineBindPoint::eCompute, *m_pipelineLayout, 0, writes);
         commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
@@ -501,7 +516,7 @@ private:
         auto titleUpdate = previousFrame;
         uint32_t frames = 0;
 
-        while (!glfwWindowShouldClose(m_window)) {
+        while (glfwWindowShouldClose(m_window) == 0) {
             glfwPollEvents();
 
             const auto now = Clock::now();
@@ -544,6 +559,7 @@ private:
     vma::raii::Buffer m_sceneDataBuffer{nullptr};
     vma::raii::Buffer m_mieScatteringBuffer{nullptr};
     vma::raii::Buffer m_rainbowScatteringBuffer{nullptr};
+    vma::raii::Buffer m_transmittanceBuffer{nullptr};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Extent2D m_swapchainExtent{};
@@ -564,6 +580,11 @@ private:
 };
 
 int main() {
-    VulkanPathTracer app;
-    app.Run();
+    try {
+        VulkanPathTracer app;
+        app.Run();
+    } catch (const std::exception& e) {
+        std::fputs(e.what(), stderr);
+        return 1;
+    }
 }

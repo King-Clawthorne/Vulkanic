@@ -42,9 +42,9 @@ struct SkySpectralConfig {
 };
 
 struct RainbowConfig {
-    uint32_t enabled = 1;
-    Vec3 center{0.0f, 1200.0f, 0.0f};
-    Vec3 radii{5000.0f, 1800.0f, 5000.0f};
+    uint32_t enabled = 0;
+    Vec3 center{.x = 0.0f, .y = 1200.0f, .z = 0.0f};
+    Vec3 radii{.x = 5000.0f, .y = 1800.0f, .z = 5000.0f};
     float edgeSoftness = 0.15f;
     float scatteringCoefficient = 1.2e-4f;
     float extinctionCoefficient = 2.0e-4f;
@@ -67,8 +67,8 @@ struct RenderConfig {
 };
 
 struct CameraConfig {
-    Vec3 initialPosition{0.0f, 2.0f, -10.0f};
-    Vec3 initialLookAt{0.0f, 0.5f, 0.0f};
+    Vec3 initialPosition{.x = 0.0f, .y = 2.0f, .z = -10.0f};
+    Vec3 initialLookAt{.x = 0.0f, .y = 0.5f, .z = 0.0f};
     float fovYDegrees = 40.0f;
     float maxPitchDegrees = 89.0f;
 };
@@ -108,10 +108,15 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
 
 void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins);
 
+inline constexpr int kTransmittanceAltitudeBins = 64;
+inline constexpr int kTransmittanceMuBins = 256;
+
+std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralConfig& sky);
+
 inline double PhaseNormalization(const std::vector<double>& f11) {
-    const int bins = int(f11.size());
+    const int bins = static_cast<int>(f11.size());
     const double dTheta = std::numbers::pi / (bins - 1);
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i) integral += 0.5 * (f11[i] * std::sin(i * dTheta) + f11[i + 1] * std::sin((i + 1) * dTheta)) * dTheta;
+    for (int i = 0; i + 1 < bins; ++i) integral += 0.5 * ((f11[i] * std::sin(i * dTheta)) + (f11[i + 1] * std::sin((i + 1) * dTheta))) * dTheta;
     return 0.5 * integral;
 }
