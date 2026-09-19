@@ -111,7 +111,7 @@ CameraController::View CameraController::GetView() const {
 constexpr uint32_t kFramesInFlight = 2;
 
 constexpr uint32_t kPathTracerSpirv[] = {
-#include "path_tracer.comp.spv.inc"
+#include "pathTracer.comp.spv.inc"
 };
 
 struct alignas(16) SceneData {
@@ -129,7 +129,9 @@ struct alignas(16) SceneData {
 };
 
 struct PushConstants {
-    float camera[4];
+    float forward[4];
+    float right[4];
+    float up[4];
     float frame[4];
     float polarizer[4];
     uint32_t imageSize[2];
@@ -404,8 +406,14 @@ private:
     PushConstants BuildPushConstants() {
         const CameraController::View view = m_camera.GetView();
 
+        const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
+        const float aspect = float(m_swapchainExtent.width) / float(m_swapchainExtent.height);
+        const float fx = std::sin(view.yaw) * std::cos(view.pitch), fy = std::sin(view.pitch), fz = std::cos(view.yaw) * std::cos(view.pitch);
+        const float rx = std::cos(view.yaw), rz = -std::sin(view.yaw);
         const PushConstants constants{
-            .camera = {view.yaw, view.pitch, std::tan(m_config.camera.fovYDegrees * kPi / 360.0f), float(m_config.render.samplesPerPixel)},
+            .forward = {fx, fy, fz, float(m_config.render.samplesPerPixel)},
+            .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
+            .up = {fy * rz * tanHalfFov, (fz * rx - fx * rz) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
             .frame = {float(m_frameIndex), m_config.sky.exposure, 0.0f, 0.0f},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},

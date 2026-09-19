@@ -19,7 +19,9 @@ layout(set = 0, binding = 2) uniform SceneData {
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer;
 layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer { vec4 entries[]; } rainbowMatrixBuffer;
 layout(push_constant) uniform PushConstants {
-    vec4 camera;
+    vec4 forward;
+    vec4 right;
+    vec4 up;
     vec4 frame;
     vec4 polarizer;
     uvec2 imageSize;
@@ -42,7 +44,6 @@ float SkySunRadiance(int band) { return sceneData.spectralBands[band].y; }
 float SkyEarthRadius() { return sceneData.skyRadiiScaleHeights.x; }
 float SkyAtmosphereRadius() { return sceneData.skyRadiiScaleHeights.y; }
 float SkySunRadius() { return sceneData.skySunDirectionRadius.w; }
-float SkySunAa() { return sceneData.skyVrtParams.x; }
 float SkySunSolidAngle() { return 2.0 * PI * (1.0 - cos(SkySunRadius())); }
 int SkySecondarySamples() { return int(SpecializedSecondarySamples != 0 ? SpecializedSecondarySamples : sceneData.skySampleCounts.x); }
 int SkyViewSteps() { return int(SpecializedViewSteps != 0 ? SpecializedViewSteps : sceneData.skySampleCounts.y); }
@@ -56,12 +57,9 @@ int RainbowAngleBins() { return int(sceneData.rainbowOptical.z); }
 bool RainbowActive() { return sceneData.rainbowCenterEnabled.w > 0.5 && RainbowScattering() > 0.0; }
 
 uint Hash(uint x) {
-    x ^= 2747636419u;
-    x *= 2654435769u;
-    x ^= x >> 16;
-    x *= 2654435769u;
-    x ^= x >> 16;
-    return x * 2654435769u;
+    x = x * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    return (x >> 22u) ^ x;
 }
 
 float NextFloat(inout uint state) {
@@ -69,11 +67,9 @@ float NextFloat(inout uint state) {
     return float(state & 0x00FFFFFFu) / 16777216.0;
 }
 
-float mie_extinction(float altitude) { return sceneData.skySpectralParams.y * exp(-altitude / sceneData.skyRadiiScaleHeights.w); }
-
 vec2 air_density(vec3 pos) {
     float altitude = max(length(pos) - SkyEarthRadius(), 0.0);
-    return vec2(exp(-altitude / sceneData.skyRadiiScaleHeights.z), mie_extinction(altitude));
+    return vec2(1.0, sceneData.skySpectralParams.y) * exp(-altitude / sceneData.skyRadiiScaleHeights.zw);
 }
 
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
@@ -122,12 +118,6 @@ Stokes stokes_reframe(Stokes s, vec3 oldA, vec3 oldB, vec3 newA, vec3 newB) {
     return Stokes(s.x, s.y * c2 + s.z * s2, -s.y * s2 + s.z * c2, s.w);
 }
 
-Stokes stokes_to_frame(Stokes s, vec3 viewDir, vec3 frameX) {
-    vec3 a, b;
-    beam_basis(-viewDir, a, b);
-    return stokes_reframe(s, a, b, frameX, cross(-viewDir, frameX));
-}
-
 mat4 table_mueller(bool rainbow, float cosTheta, int band) {
     int bins = rainbow ? max(16, RainbowAngleBins()) : max(2, int(sceneData.skyVrtParams.z));
     float fbin = acos(clamp(cosTheta, -1.0, 1.0)) / PI * float(bins - 1);
@@ -171,100 +161,69 @@ Stokes scatter_rainbow(Stokes sIn, vec3 din, vec3 dout, int band) {
     return scatter_mueller(table_mueller(true, dot(din, dout), band), sIn, din, dout);
 }
 
-Stokes single_scatter_atmosphere(vec3 origin, vec3 viewDir, vec3 L, int steps, int band) {
-    float tStart, tEnd;
-    if (!view_segment(origin, viewDir, tStart, tEnd)) return Stokes(0.0);
-    float stepSize = (tEnd - tStart) / float(steps);
-    float cameraT = 1.0, rayleighWeight = 0.0, mieWeight = 0.0;
-    for (int i = 0; i < steps; ++i) {
-        vec3 pos = origin + viewDir * (tStart + (float(i) + 0.5) * stepSize);
-        vec2 air = air_density(pos);
-        float slabT = exp(-(SkyBetaR(band) * air.x + air.y) * stepSize);
-        if (ray_sphere(pos, L, SkyEarthRadius()).x <= 0.0) {
-            float w = SkySunRadiance(band) * SkySunSolidAngle() * stepSize * cameraT * sqrt(slabT) * band_transmittance(sun_air_depth(pos, L, 8), band);
-            rayleighWeight += air.x * w;
-            mieWeight += air.y * w;
-        }
-        cameraT *= slabT;
-    }
-    return stokes_make_physical(scatter_stokes(Stokes(1.0, 0.0, 0.0, 0.0), -L, -viewDir, rayleighWeight, mieWeight, band));
-}
-
-vec3 secondary_direction(int index, int count, int primaryStep) {
-    float z = 1.0 - 2.0 * (float(index) + 0.5) / float(count);
-    float phi = GOLDEN_ANGLE * float(index + primaryStep * count);
-    float r = sqrt(max(0.0, 1.0 - z * z));
-    return vec3(r * cos(phi), z, r * sin(phi));
-}
-
-const int STACK = MAX_SCATTER_ORDER - 1;
-vec3 gOrg[STACK], gDir[STACK], gPos[STACK];
-vec2 gAir[STACK];
-float gDt[STACK], gCamT[STACK], gSlab[STACK], gStart[STACK];
-int gStep[STACK], gSample[STACK];
-Stokes gResult[STACK], gAngular[STACK];
+struct Level { vec3 org, dir, pos; vec2 air, sun; float dt, camT, slab, start; int stepIndex, sampleIndex; Stokes result, angular; };
+Level S[MAX_SCATTER_ORDER];
 
 void begin_step(int d, int band) {
-    gPos[d] = gOrg[d] + gDir[d] * (gStart[d] + (float(gStep[d]) + 0.5) * gDt[d]);
-    gAir[d] = air_density(gPos[d]);
-    gSlab[d] = exp(-(SkyBetaR(band) * gAir[d].x + gAir[d].y) * gDt[d]);
-    gAngular[d] = Stokes(0.0);
-    gSample[d] = 0;
+    S[d].pos = S[d].org + S[d].dir * (S[d].start + (float(S[d].stepIndex) + 0.5) * S[d].dt);
+    S[d].air = air_density(S[d].pos);
+    S[d].slab = exp(-(SkyBetaR(band) * S[d].air.x + S[d].air.y) * S[d].dt);
+    S[d].angular = Stokes(0.0);
+    S[d].sampleIndex = 0;
 }
 
-Stokes multiple_scatter_stokes(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int samples, int secondarySteps, int band) {
-    int last = clamp(order, 2, MAX_SCATTER_ORDER) - 2, d = 0;
-    gOrg[0] = origin;
-    gDir[0] = viewDir;
+Stokes scatter_order_stokes(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int samples, int secondarySteps, int band) {
+    int last = clamp(order, 1, MAX_SCATTER_ORDER) - 1, d = 0;
+    S[0].org = origin;
+    S[0].dir = viewDir;
     bool entering = true;
     while (true) {
         int steps = d == 0 ? viewSteps : secondarySteps;
         if (entering) {
             entering = false;
             float tEnd;
-            if (!view_segment(gOrg[d], gDir[d], gStart[d], tEnd)) {
+            if (!view_segment(S[d].org, S[d].dir, S[d].start, tEnd)) {
                 if (d-- == 0) return Stokes(0.0);
-                ++gSample[d];
+                ++S[d].sampleIndex;
                 continue;
             }
-            gDt[d] = (tEnd - gStart[d]) / float(steps);
-            gCamT[d] = 1.0;
-            gResult[d] = Stokes(0.0);
-            gStep[d] = 0;
+            S[d].dt = (tEnd - S[d].start) / float(steps);
+            S[d].camT = 1.0;
+            S[d].result = Stokes(0.0);
+            S[d].sun = vec2(0.0);
+            S[d].stepIndex = 0;
             begin_step(d, band);
         }
-        if (gSample[d] < samples) {
-            vec3 din = secondary_direction(gSample[d], samples, gStep[d]);
-            if (d < last) {
-                gOrg[d + 1] = gPos[d];
-                gDir[++d] = -din;
-                entering = true;
-                continue;
-            }
-            gAngular[d] += scatter_stokes(single_scatter_atmosphere(gPos[d], -din, L, secondarySteps, band), din, -gDir[d], gAir[d].x, gAir[d].y, band);
-            ++gSample[d];
+        if (d < last && S[d].sampleIndex < samples) {
+            float z = 1.0 - 2.0 * (float(S[d].sampleIndex) + 0.5) / float(samples), phi = GOLDEN_ANGLE * float(S[d].sampleIndex + S[d].stepIndex * samples);
+            S[d + 1].org = S[d].pos;
+            S[++d].dir = -vec3(sqrt(max(0.0, 1.0 - z * z)) * vec2(cos(phi), sin(phi)), z).xzy;
+            entering = true;
             continue;
         }
-        gResult[d] += gAngular[d] * (gCamT[d] * sqrt(gSlab[d]) * gDt[d] * (4.0 * PI / float(samples)));
-        gCamT[d] *= gSlab[d];
-        if (++gStep[d] < steps) {
+        float weight = S[d].camT * sqrt(S[d].slab) * S[d].dt;
+        if (d < last) S[d].result += S[d].angular * (weight * 4.0 * PI / float(samples));
+        else if (ray_sphere(S[d].pos, L, SkyEarthRadius()).x <= 0.0)
+            S[d].sun += S[d].air * (weight * SkySunRadiance(band) * SkySunSolidAngle() * band_transmittance(sun_air_depth(S[d].pos, L, 8), band));
+        S[d].camT *= S[d].slab;
+        if (++S[d].stepIndex < steps) {
             begin_step(d, band);
             continue;
         }
-        Stokes value = stokes_make_physical(gResult[d]);
+        Stokes value = stokes_make_physical(d < last ? S[d].result : scatter_stokes(Stokes(1.0, 0.0, 0.0, 0.0), -L, -S[d].dir, S[d].sun.x, S[d].sun.y, band));
         if (d-- == 0) return value;
-        gAngular[d] += scatter_stokes(value, -gDir[d + 1], -gDir[d], gAir[d].x, gAir[d].y, band);
-        ++gSample[d];
+        S[d].angular += scatter_stokes(value, -S[d + 1].dir, -S[d].dir, S[d].air.x, S[d].air.y, band);
+        ++S[d].sampleIndex;
     }
 }
 
 Stokes render_sky_stokes(vec3 viewDir, vec3 L, int band) {
     vec3 origin = vec3(0.0, SkyEarthRadius() + 1.0, 0.0);
     int orders = SkyScatteringOrders(), steps = SkyViewSteps(), samples = SkySecondarySamples(), secondary = SkySamples();
-    Stokes sky = single_scatter_atmosphere(origin, viewDir, L, steps, band);
-    for (int order = 2; order <= orders; ++order)
-        sky += multiple_scatter_stokes(origin, viewDir, L, order, steps, samples, secondary, band);
-    float disk = smoothstep(cos(SkySunRadius() + SkySunAa()), cos(SkySunRadius() - SkySunAa()), dot(viewDir, L));
+    Stokes sky = Stokes(0.0);
+    for (int order = 1; order <= orders; ++order)
+        sky += scatter_order_stokes(origin, viewDir, L, order, steps, samples, secondary, band);
+    float disk = smoothstep(cos(SkySunRadius() + sceneData.skyVrtParams.x), cos(SkySunRadius() - sceneData.skyVrtParams.x), dot(viewDir, L));
     if (disk > 0.0 && ray_sphere(origin, viewDir, SkyEarthRadius()).x <= 0.0)
         sky.x += disk * SkySunRadiance(band) * band_transmittance(sun_air_depth(origin, viewDir, 16), band);
     return stokes_make_physical(sky);
@@ -300,12 +259,9 @@ vec2 rain_segment(vec3 origin, vec3 direction) {
     return hit;
 }
 
-struct Spectrum { float bands[SPECTRAL_BANDS]; };
-struct StokesSpectrum { Stokes bands[SPECTRAL_BANDS]; };
-
-Spectrum integrate_rainbow_path(vec3 viewDir, vec3 sunDirection) {
-    Spectrum weights;
-    for (int band = 0; band < SPECTRAL_BANDS; ++band) weights.bands[band] = 0.0;
+float[SPECTRAL_BANDS] integrate_rainbow_path(vec3 viewDir, vec3 sunDirection) {
+    float weights[SPECTRAL_BANDS];
+    for (int band = 0; band < SPECTRAL_BANDS; ++band) weights[band] = 0.0;
     if (!RainbowActive()) return weights;
     vec2 hit = rain_segment(vec3(0.0), viewDir);
     if (hit.y <= hit.x) return weights;
@@ -323,7 +279,7 @@ Spectrum integrate_rainbow_path(vec3 viewDir, vec3 sunDirection) {
         vec2 airDepth = sun_air_depth(earthPosition, sunDirection, 8);
         float rainSunT = exp(-rain_segment_tau(localPosition, sunDirection, 0.0, max(ray_ellipsoid(localPosition, sunDirection).y, 0.0), 8));
         float weight = SkySunSolidAngle() * RainbowScattering() * density / (4.0 * PI) * stepSize * rainCameraT * rainSunT;
-        for (int band = 0; band < SPECTRAL_BANDS; ++band) weights.bands[band] += weight * band_transmittance(airDepth, band);
+        for (int band = 0; band < SPECTRAL_BANDS; ++band) weights[band] += weight * band_transmittance(airDepth, band);
     }
     return weights;
 }
@@ -351,9 +307,9 @@ vec4 rain_sample_direction(vec3 outgoing, inout uint state) {
     return vec4(normalize(outgoing * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta)), 0.9 * phasePdf + 0.1 / (4.0 * PI));
 }
 
-StokesSpectrum integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint seed) {
-    StokesSpectrum result;
-    for (int b = 0; b < SPECTRAL_BANDS; ++b) result.bands[b] = Stokes(0.0);
+Stokes[SPECTRAL_BANDS] integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint seed) {
+    Stokes result[SPECTRAL_BANDS];
+    for (int b = 0; b < SPECTRAL_BANDS; ++b) result[b] = Stokes(0.0);
     int orders = min(int(sceneData.rainbowMultiple.x), MAX_SCATTER_ORDER), samples = int(sceneData.rainbowMultiple.y), tauSteps = int(sceneData.rainbowMultiple.z);
     if (!RainbowActive() || orders <= 1) return result;
     float extinction = RainbowExtinction();
@@ -383,7 +339,7 @@ StokesSpectrum integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint seed) {
                     Stokes s = scatter_rainbow(Stokes(1.0, 0.0, 0.0, 0.0), -sun, -direction, band) / (4.0 * PI);
                     for (int previous = vertex - 1; previous >= 0; --previous)
                         s = scatter_rainbow(s, -pathDirections[previous + 1], -pathDirections[previous], band) / (4.0 * PI);
-                    result.bands[band] += s * (throughput * SkySunSolidAngle() * sunT * band_transmittance(air, band) * SkySunRadiance(band) / float(samples));
+                    result[band] += s * (throughput * SkySunSolidAngle() * sunT * band_transmittance(air, band) * SkySunRadiance(band) / float(samples));
                 }
             }
             if (vertex + 1 < orders) {
@@ -397,25 +353,12 @@ StokesSpectrum integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint seed) {
     return result;
 }
 
-vec3 ToneMap(vec3 colour) {
-    colour = max(colour, vec3(0.0));
-    colour /= 1.0 + max(colour.r, max(colour.g, colour.b));
-    vec3 srgb = mix(1.055 * pow(colour, vec3(1.0 / 2.4)) - 0.055, 12.92 * colour, lessThanEqual(colour, vec3(0.0031308)));
-    return clamp(srgb, 0.0, 1.0);
-}
-
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
     uint rngState = Hash(pixel.x + pixel.y * 9781u + uint(pc.frame.x) * 6271u + 1u);
 
-    float cosPitch = cos(pc.camera.y);
-    vec3 cameraForward = vec3(sin(pc.camera.x) * cosPitch, sin(pc.camera.y), cos(pc.camera.x) * cosPitch);
-    vec3 cameraRight = normalize(cross(vec3(0.0, 1.0, 0.0), cameraForward));
-    vec3 cameraUp = cross(cameraForward, cameraRight);
-    float tanHalfFovY = pc.camera.z;
-    uint samplesPerPixel = uint(pc.camera.w);
-    float aspectRatio = float(pc.imageSize.x) / float(pc.imageSize.y);
+    uint samplesPerPixel = uint(pc.forward.w);
     bool polarized = pc.polarizer.x > 0.5;
     float linAmp = cos(2.0 * pc.polarizer.z);
     vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
@@ -426,21 +369,24 @@ void main() {
         vec2 jitter = vec2(NextFloat(rngState), NextFloat(rngState));
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-        vec3 viewDir = normalize(cameraForward + cameraRight * (screen.x * aspectRatio * tanHalfFovY) + cameraUp * (screen.y * tanHalfFovY));
-        vec3 frameX = polarized ? normalize(cameraRight - viewDir * dot(cameraRight, viewDir)) : vec3(0.0);
-        Spectrum rainbowWeights = integrate_rainbow_path(viewDir, sun);
-        StokesSpectrum rainMultiple = integrate_rainbow_multiple(viewDir, sun, rngState);
+        vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
+        vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
+        beam_basis(-viewDir, na, nb);
+        float rainbowWeights[SPECTRAL_BANDS] = integrate_rainbow_path(viewDir, sun);
+        Stokes rainMultiple[SPECTRAL_BANDS] = integrate_rainbow_multiple(viewDir, sun, rngState);
 
         vec3 sampleXyz = vec3(0.0);
         for (int band = 0; band < SPECTRAL_BANDS; ++band) {
-            Stokes rainbow = rainbowWeights.bands[band] > 0.0
-                ? stokes_make_physical(scatter_rainbow(Stokes(1.0, 0.0, 0.0, 0.0), -sun, -viewDir, band) * (SkySunRadiance(band) * rainbowWeights.bands[band]))
+            Stokes rainbow = rainbowWeights[band] > 0.0
+                ? stokes_make_physical(scatter_rainbow(Stokes(1.0, 0.0, 0.0, 0.0), -sun, -viewDir, band) * (SkySunRadiance(band) * rainbowWeights[band]))
                 : Stokes(0.0);
-            Stokes total = render_sky_stokes(viewDir, sun, band) + rainbow + rainMultiple.bands[band];
-            float radiance = polarized ? 0.5 * dot(analyzer, stokes_to_frame(total, viewDir, frameX)) : total.x;
+            Stokes total = render_sky_stokes(viewDir, sun, band) + rainbow + rainMultiple[band];
+            float radiance = polarized ? 0.5 * dot(analyzer, stokes_reframe(total, na, nb, frameX, cross(-viewDir, frameX))) : total.x;
             sampleXyz += max(radiance, 0.0) * sceneData.cieXyz[band].xyz;
         }
         accumulatedRadiance += mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * sampleXyz;
     }
-    imageStore(outputImage, ivec2(pixel), vec4(ToneMap(accumulatedRadiance / max(1u, samplesPerPixel) * pc.frame.y), 1.0));
+    vec3 c = max(accumulatedRadiance / float(max(1u, samplesPerPixel)) * pc.frame.y, vec3(0.0));
+    c /= 1.0 + max(c.r, max(c.g, c.b));
+    imageStore(outputImage, ivec2(pixel), vec4(clamp(mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308))), 0.0, 1.0), 1.0));
 }

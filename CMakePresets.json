@@ -5,17 +5,16 @@
       "name": "default",
       "displayName": "Default",
       "description": "Ninja + clang-cl (LLVM 20+)",
-      "generator": "Ninja Multi-Config",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "clang-cl",
-        "CMAKE_CXX_COMPILER": "clang-cl",
-        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+        "CMAKE_CXX_COMPILER": "clang-cl"
       }
     }
   ],
   "buildPresets": [
-    { "name": "debug", "configurePreset": "default", "configuration": "Debug" },
-    { "name": "release", "configurePreset": "default", "configuration": "Release" }
+    { "name": "default", "configurePreset": "default" }
   ]
 }
