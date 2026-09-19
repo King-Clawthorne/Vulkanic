@@ -4,8 +4,14 @@
     {
       "name": "default",
       "displayName": "Default",
-      "description": "Uses CMake's default generator, which finds the installed compiler itself.",
-      "binaryDir": "${sourceDir}/build"
+      "description": "Ninja + clang-cl (LLVM 20+)",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
     }
   ],
   "buildPresets": [
