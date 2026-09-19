@@ -136,6 +136,7 @@ struct alignas(16) SceneData {
     float mieBands[kSpectralBandCount][4];
     float rainbowAxisX[4];
     float rainbowAxisZ[4];
+    float apparentSun[4];
 };
 
 struct PushConstants {
@@ -190,41 +191,43 @@ private:
         const SkySpectralConfig& s = m_config.sky.spectral;
         const RainbowConfig& r = m_config.rainbow;
         SceneData sceneData{
-            .skySpectralParams = {s.betaRayleigh550, s.betaMie, s.sunTemperatureKelvin, s.sunRadiance550},
+            .skySpectralParams = {s.betaRayleigh550, s.betaMie, 0.0f, s.sunRadiance550},
             .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.scaleHeightMie},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
             .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
-            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), 0.0f},
+            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.scaleHeightMie2},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
         float ySum = 0.0f;
+        const double sun550 = ComputeSpectralBand(6).sunIrradianceScale;
         for (int band = 0; band < kSpectralBandCount; ++band) {
             const SpectralBand spectral = ComputeSpectralBand(band);
             sceneData.spectralBands[band][0] = static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale);
-            const auto wavelength = static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band));
-            const float lambda = wavelength * 1.0e-9f;
-            constexpr float reference = 550.0e-9f;
-            constexpr float c2 = 1.4387769e-2f;
-            const float shape = std::pow(reference / lambda, 5.0f) * (std::exp(c2 / (reference * s.sunTemperatureKelvin)) - 1.0f) / (std::exp(c2 / (lambda * s.sunTemperatureKelvin)) - 1.0f);
-            sceneData.spectralBands[band][1] = s.sunRadiance550 * shape;
+            sceneData.spectralBands[band][1] = static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550);
             sceneData.spectralBands[band][2] = static_cast<float>(spectral.limbDarkening);
-            const auto g = [&](float mean, float left, float right) {
-                const float x = (wavelength - mean) * (wavelength < mean ? left : right);
-                return std::exp(-0.5f * x * x);
-            };
-            float* xyz = sceneData.cieXyz[band];
-            xyz[0] = std::max(0.0f, (1.056f * g(599.8f, 0.0264f, 0.0323f)) + (0.362f * g(442.0f, 0.0624f, 0.0374f)) - (0.065f * g(501.1f, 0.0490f, 0.0382f)));
-            xyz[1] = std::max(0.0f, (0.821f * g(568.8f, 0.0213f, 0.0247f)) + (0.286f * g(530.9f, 0.0613f, 0.0322f)));
-            xyz[2] = std::max(0.0f, (1.217f * g(437.0f, 0.0845f, 0.0278f)) + (0.681f * g(459.0f, 0.0385f, 0.0725f)));
-            ySum += xyz[1];
+            sceneData.spectralBands[band][3] = static_cast<float>(spectral.ozoneCrossSection * s.ozoneDobsonUnits * 2.687e20 / 15000.0);
+            for (size_t i = 0; i < 3; ++i) sceneData.cieXyz[band][i] = static_cast<float>(spectral.cie[i]);
+            ySum += sceneData.cieXyz[band][1];
         }
         for (auto& xyz : sceneData.cieXyz)
             for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
         sceneData.sunDisk[0] = 2.0f * kPi * (1.0f - std::cos(s.sunRadius));
         sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
         sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
+        const float sunNorm = std::hypot(s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
+        const float trueAltitude = std::asin(s.sunDirection[1] / sunNorm) * 180.0f / kPi;
+        const auto refraction = [](float altitude) {
+            const float h = std::max(altitude, -1.0f);
+            return 1.02f / 60.0f / std::tan((h + (10.3f / (h + 5.11f))) * kPi / 180.0f);
+        };
+        const float apparentAltitude = (trueAltitude + refraction(trueAltitude)) * kPi / 180.0f;
+        const float horizontal = std::hypot(s.sunDirection[0], s.sunDirection[2]);
+        sceneData.apparentSun[0] = std::cos(apparentAltitude) * s.sunDirection[0] / horizontal;
+        sceneData.apparentSun[1] = std::sin(apparentAltitude);
+        sceneData.apparentSun[2] = std::cos(apparentAltitude) * s.sunDirection[2] / horizontal;
+        sceneData.apparentSun[3] = 1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f);
 
         const float sunLength = std::hypot(s.sunDirection[0], s.sunDirection[2]);
         const float ax = -s.sunDirection[0] / sunLength;
@@ -237,11 +240,14 @@ private:
         sceneData.rainbowAxisX[2] = -ax;
         sceneData.rainbowAxisZ[0] = ax;
         sceneData.rainbowAxisZ[2] = az;
-        const double reference = m_mieCrossSections[6].extinction;
-        for (int band = 0; band < kSpectralBandCount; ++band) {
-            const MieCrossSection& cross = m_mieCrossSections[static_cast<size_t>(band)];
-            sceneData.mieBands[band][0] = static_cast<float>(s.betaMie * cross.extinction / reference);
-            sceneData.mieBands[band][1] = static_cast<float>(s.betaMie * cross.scattering / reference);
+        for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
+            const double beta = aerosol == 0 ? s.betaMie : s.betaMie2;
+            const double reference = m_mieCrossSections[aerosol][6].extinction;
+            for (int band = 0; band < kSpectralBandCount; ++band) {
+                const MieCrossSection& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
+                sceneData.mieBands[band][2 * aerosol] = static_cast<float>(beta * cross.extinction / reference);
+                sceneData.mieBands[band][(2 * aerosol) + 1] = static_cast<float>(beta * cross.scattering / reference);
+            }
         }
         return sceneData;
     }
@@ -250,13 +256,14 @@ private:
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
         CreateMieScatteringBuffer();
         CreateRainbowScatteringBuffer();
-        const std::vector<std::array<float, 2>> table = ComputeTransmittanceTable(m_config.sky.spectral);
+        const std::vector<std::array<float, 4>> table = ComputeTransmittanceTable(m_config.sky.spectral);
         m_transmittanceBuffer = CreateBuffer(table.size() * sizeof(table[0]), vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_transmittanceBuffer, std::as_bytes(std::span{table}));
     }
 
     void CreateMieScatteringBuffer() {
-        const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral, m_mieCrossSections);
+        std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral, 0, m_mieCrossSections[0]);
+        std::ranges::copy(ComputeMieScatteringTable(m_config.sky.spectral, 1, m_mieCrossSections[1]), std::back_inserter(table));
         const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
@@ -593,7 +600,7 @@ private:
     vma::raii::Buffer m_rainbowScatteringBuffer{nullptr};
     vma::raii::Buffer m_transmittanceBuffer{nullptr};
     vma::raii::Buffer m_accumulationBuffer{nullptr};
-    std::array<MieCrossSection, kSpectralBandCount> m_mieCrossSections{};
+    std::array<std::array<MieCrossSection, kSpectralBandCount>, 2> m_mieCrossSections{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Extent2D m_swapchainExtent{};

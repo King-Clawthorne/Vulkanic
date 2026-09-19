@@ -1,4 +1,5 @@
 #include "SkyTables.h"
+#include "SpectralData.h"
 
 #include <algorithm>
 #include <cmath>
@@ -68,16 +69,18 @@ namespace {
     }
 }
 
-std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, std::array<MieCrossSection, kSpectralBandCount>& crossSections) {
+std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<MieCrossSection, kSpectralBandCount>& crossSections) {
     const int bins = std::max(2, static_cast<int>(sky.mieTableAngleBins));
-    const Complex m(sky.aerosolRefractiveIndexReal, std::max(0.0, static_cast<double>(sky.aerosolRefractiveIndexImag)));
+    const bool coarse = aerosol == 1;
+    const Complex m(coarse ? sky.aerosol2RefractiveIndexReal : sky.aerosolRefractiveIndexReal,
+                    std::max(0.0, static_cast<double>(coarse ? sky.aerosol2RefractiveIndexImag : sky.aerosolRefractiveIndexImag)));
 
     std::vector<double> mu(static_cast<size_t>(bins));
     for (int i : std::views::iota(0, bins)) mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
 
     const int radiusSamples = 48;
-    const double lnSigma = std::log(std::max(1.0001, static_cast<double>(sky.aerosolSigma)));
-    const double lnRg = std::log(std::max(1e-4, static_cast<double>(sky.aerosolMeanRadiusMicrometers)));
+    const double lnSigma = std::log(std::max(1.0001, static_cast<double>(coarse ? sky.aerosol2Sigma : sky.aerosolSigma)));
+    const double lnRg = std::log(std::max(1e-4, static_cast<double>(coarse ? sky.aerosol2MeanRadiusMicrometers : sky.aerosolMeanRadiusMicrometers)));
     const double lnMin = lnRg - (4.0 * lnSigma);
     const double lnMax = lnRg + (4.0 * lnSigma);
     const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
@@ -164,26 +167,11 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
 namespace {
 
     double WaterIor(double wavelengthNm) {
-        constexpr std::array<double, kSpectralBandCount> values = {
-            1.34350,
-            1.34055,
-            1.33795,
-            1.33570,
-            1.33370,
-            1.33225,
-            1.33110,
-            1.33020,
-            1.32945,
-            1.32885,
-            1.32835,
-            1.32795,
-            1.32760,
-        };
         const double position = std::clamp((wavelengthNm - kSpectralLambdaMinNm) / kSpectralLambdaStepNm,
                                            0.0, static_cast<double>(kSpectralBandCount - 1));
         const int lower = static_cast<int>(std::floor(position));
         const int upper = std::min(lower + 1, kSpectralBandCount - 1);
-        return std::lerp(values[static_cast<size_t>(lower)], values[static_cast<size_t>(upper)],
+        return std::lerp(kWaterIor[static_cast<size_t>(lower)], kWaterIor[static_cast<size_t>(upper)],
                          position - lower);
     }
 
@@ -425,11 +413,11 @@ void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins) {
     for (double value : cdf) table.push_back({.f11 = static_cast<float>(value / cdf.back()), .f12 = 0, .f33 = 0, .f34 = 0});
 }
 
-std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
+std::vector<std::array<float, 4>> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
     constexpr int steps = 256;
     const double re = sky.earthRadius;
     const double ra = sky.atmosphereRadius;
-    std::vector<std::array<float, 2>> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
+    std::vector<std::array<float, 4>> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
     ParallelFor(kTransmittanceAltitudeBins, [&](int a) {
         const double x = static_cast<double>(a) / (kTransmittanceAltitudeBins - 1);
         const double r = re + (x * x * (ra - re));
@@ -440,19 +428,29 @@ std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralCon
             const double ds = (-b + std::sqrt(std::max((b * b) - (r * r) + (ra * ra), 0.0))) / steps;
             double rayleigh = 0.0;
             double mie = 0.0;
+            double ozone = 0.0;
+            double coarse = 0.0;
             for (int i = 0; i < steps; ++i) {
                 const double t = (i + 0.5) * ds;
                 const double altitude = std::max(std::sqrt((r * r) + (t * t) + (2.0 * r * mu * t)) - re, 0.0);
                 rayleigh += std::exp(-altitude / sky.scaleHeightRayleigh) * ds;
                 mie += std::exp(-altitude / sky.scaleHeightMie) * ds;
+                ozone += OzoneProfile(altitude) * ds;
+                coarse += std::exp(-altitude / sky.scaleHeightMie2) * ds;
             }
-            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie)};
+            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone), static_cast<float>(coarse)};
         }
     });
     return table;
 }
 
 namespace {
+
+    double OzoneCrossSection(double wavelengthNm) {
+        const double position = std::clamp((wavelengthNm - 360.0) / 10.0, 0.0, 46.999);
+        const auto i = static_cast<size_t>(position);
+        return std::lerp(kOzoneCrossSection[i], kOzoneCrossSection[i + 1], position - static_cast<double>(i));
+    }
 
     double RayleighShape(double wavelengthNm) {
         const double sigma2 = 1.0e6 / (wavelengthNm * wavelengthNm);
@@ -464,10 +462,13 @@ namespace {
 
 SpectralBand ComputeSpectralBand(int band) {
     const double centre = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
-    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = -0.023 + (0.292e3 / centre)};
+    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = -0.023 + (0.292e3 / centre), .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
     for (int offset = -10; offset <= 10; offset += 5) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
+        result.ozoneCrossSection += OzoneCrossSection(wavelength) / 5.0;
+        result.sunIrradianceScale += kSolarIrradiance[static_cast<size_t>((wavelength - 390.0) / 5.0)] / 5.0;
+        for (size_t i = 0; i < 3; ++i) result.cie[i] += kCie1931[static_cast<size_t>((wavelength - 380.0) / 5.0)][i] / 5.0;
     }
     return result;
 }

@@ -21,7 +21,6 @@ struct SkySpectralConfig {
     float atmosphereRadius = 6420e3f;
     float scaleHeightRayleigh = 7994.0f;
     float scaleHeightMie = 1200.0f;
-    float sunTemperatureKelvin = 5778.0f;
     float sunRadiance550 = 8317.742f;
     std::array<float, 3> sunDirection{0.35f, 0.01f, 0.25f};
     float sunRadius = 0.00465f;
@@ -29,7 +28,7 @@ struct SkySpectralConfig {
     uint32_t secondarySamples = 1;
     uint32_t viewSteps = 1;
     uint32_t samples = 1;
-    uint32_t scatteringOrders = 2;
+    uint32_t scatteringOrders = 3;
 
     float rayleighDepolarization = 0.0279f;
     float aerosolRefractiveIndexReal = 1.33f;
@@ -37,6 +36,14 @@ struct SkySpectralConfig {
     float aerosolMeanRadiusMicrometers = 0.2f;
     float aerosolSigma = 1.5f;
     uint32_t mieTableAngleBins = 181;
+    float ozoneDobsonUnits = 300.0f;
+
+    float betaMie2 = 4.0e-6f;
+    float scaleHeightMie2 = 1500.0f;
+    float aerosol2RefractiveIndexReal = 1.53f;
+    float aerosol2RefractiveIndexImag = 0.008f;
+    float aerosol2MeanRadiusMicrometers = 1.0f;
+    float aerosol2Sigma = 2.0f;
 
     [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
@@ -108,7 +115,7 @@ struct MieCrossSection {
     double scattering;
 };
 
-std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, std::array<MieCrossSection, kSpectralBandCount>& crossSections);
+std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<MieCrossSection, kSpectralBandCount>& crossSections);
 
 std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
@@ -117,11 +124,16 @@ void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins);
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;
 
-std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralConfig& sky);
+std::vector<std::array<float, 4>> ComputeTransmittanceTable(const SkySpectralConfig& sky);
+
+inline double OzoneProfile(double altitude) { return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0))); }
 
 struct SpectralBand {
     double betaRayleighScale;
     double limbDarkening;
+    double ozoneCrossSection;
+    double sunIrradianceScale;
+    std::array<double, 3> cie;
 };
 
 SpectralBand ComputeSpectralBand(int band);
