@@ -132,6 +132,7 @@ struct alignas(16) SceneData {
     float spectralBands[kSpectralBandCount][4];
     float cieXyz[kSpectralBandCount][4];
     float sunDisk[4];
+    float mieBands[kSpectralBandCount][4];
 };
 
 struct PushConstants {
@@ -223,6 +224,12 @@ private:
         sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
         sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
 
+        const double reference = m_mieCrossSections[6].extinction;
+        for (int band = 0; band < kSpectralBandCount; ++band) {
+            const MieCrossSection& cross = m_mieCrossSections[static_cast<size_t>(band)];
+            sceneData.mieBands[band][0] = static_cast<float>(s.betaMie * cross.extinction / reference);
+            sceneData.mieBands[band][1] = static_cast<float>(s.betaMie * cross.scattering / reference);
+        }
         return sceneData;
     }
 
@@ -236,7 +243,7 @@ private:
     }
 
     void CreateMieScatteringBuffer() {
-        const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral);
+        const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral, m_mieCrossSections);
         const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
@@ -591,6 +598,7 @@ private:
     vma::raii::Buffer m_rainbowScatteringBuffer{nullptr};
     vma::raii::Buffer m_transmittanceBuffer{nullptr};
     vma::raii::Buffer m_exposureAccumulator{nullptr};
+    std::array<MieCrossSection, kSpectralBandCount> m_mieCrossSections{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Extent2D m_swapchainExtent{};

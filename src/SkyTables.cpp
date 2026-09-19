@@ -68,7 +68,7 @@ namespace {
     }
 }
 
-std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky) {
+std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, std::array<MieCrossSection, kSpectralBandCount>& crossSections) {
     const int bins = std::max(2, static_cast<int>(sky.mieTableAngleBins));
     const Complex m(sky.aerosolRefractiveIndexReal, std::max(0.0, static_cast<double>(sky.aerosolRefractiveIndexImag)));
 
@@ -93,6 +93,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
         std::vector<double> p12(static_cast<size_t>(bins), 0.0);
         std::vector<double> p33(static_cast<size_t>(bins), 0.0);
         std::vector<double> p34(static_cast<size_t>(bins), 0.0);
+        MieCrossSection cross{.extinction = 0.0, .scattering = 0.0};
 
         for (int rs : std::views::iota(0, radiusSamples)) {
             const double lnR = lnMin + (dLn * static_cast<double>(rs));
@@ -108,6 +109,12 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
             std::vector<Complex> b;
             MieCoefficients(x, m, a, b);
             const int nmax = static_cast<int>(a.size()) - 1;
+            for (int n : std::views::iota(1, nmax + 1)) {
+                const double order = (2.0 * n) + 1.0;
+                const double area = weight * 2.0 * std::numbers::pi / (k * k);
+                cross.extinction += area * order * (a[static_cast<size_t>(n)] + b[static_cast<size_t>(n)]).real();
+                cross.scattering += area * order * (std::norm(a[static_cast<size_t>(n)]) + std::norm(b[static_cast<size_t>(n)]));
+            }
 
             for (int i : std::views::iota(0, bins)) {
                 const double u = mu[static_cast<size_t>(i)];
@@ -139,6 +146,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
             }
         }
 
+        crossSections[static_cast<size_t>(band)] = cross;
         const double norm = std::max(PhaseNormalization(p11), 1e-20);
 
         for (int i : std::views::iota(0, bins)) {
@@ -417,7 +425,7 @@ std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralCon
                 const double t = (i + 0.5) * ds;
                 const double altitude = std::max(std::sqrt((r * r) + (t * t) + (2.0 * r * mu * t)) - re, 0.0);
                 rayleigh += std::exp(-altitude / sky.scaleHeightRayleigh) * ds;
-                mie += sky.betaMie * std::exp(-altitude / sky.scaleHeightMie) * ds;
+                mie += std::exp(-altitude / sky.scaleHeightMie) * ds;
             }
             table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie)};
         }

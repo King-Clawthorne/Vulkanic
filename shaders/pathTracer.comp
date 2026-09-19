@@ -17,6 +17,7 @@ layout(set = 0, binding = 2) uniform SceneData {
     vec4 spectralBands[13];
     vec4 cieXyz[13];
     vec4 sunDisk;
+    vec4 mieBands[13];
 } sceneData;
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer;
 layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer { vec4 entries[]; } rainbowMatrixBuffer;
@@ -75,7 +76,7 @@ float NextFloat(inout uint state) {
 
 vec2 air_density(vec3 pos) {
     float h = max(length(pos) - SkyEarthRadius(), 0.0);
-    return vec2(1.0, sceneData.skySpectralParams.y) * exp(-h / sceneData.skyRadiiScaleHeights.zw);
+    return exp(-h / sceneData.skyRadiiScaleHeights.zw);
 }
 
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
@@ -104,7 +105,7 @@ vec2 sun_air_depth(vec3 origin, vec3 dir) {
                mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
 }
 
-float band_transmittance(vec2 depth, int band) { return exp(-(SkyBetaR(band) * depth.x + depth.y)); }
+float band_transmittance(vec2 depth, int band) { return exp(-(SkyBetaR(band) * depth.x + sceneData.mieBands[band].x * depth.y)); }
 
 mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) {
     return mat4(m11, m12, 0.0, 0.0, m12, m22, 0.0, 0.0, 0.0, 0.0, m33, -m34, 0.0, 0.0, m34, m44);
@@ -196,7 +197,7 @@ ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
 Stokes scatter_band(ScatterGeom g, Stokes s, vec2 w, int band) {
     int bins = max(2, int(sceneData.skyVrtParams.z)), base = band * bins;
     vec4 e = mix(mieMatrixBuffer.entries[base + clamp(g.bin, 0, bins - 1)], mieMatrixBuffer.entries[base + min(g.bin + 1, bins - 1)], g.frac);
-    mat4 m = (SkyBetaR(band) * w.x * g.rayleigh + w.y * mueller(e.x, e.y, e.x, e.z, e.w, e.z)) / (4.0 * PI);
+    mat4 m = (SkyBetaR(band) * w.x * g.rayleigh + sceneData.mieBands[band].y * w.y * mueller(e.x, e.y, e.x, e.z, e.w, e.z)) / (4.0 * PI);
     return rotate(m * rotate(s, g.rot.xy), g.rot.zw) * g.flip;
 }
 

@@ -102,7 +102,12 @@ struct MieMatrixEntry {
     float f34;
 };
 
-std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky);
+struct MieCrossSection {
+    double extinction;
+    double scattering;
+};
+
+std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, std::array<MieCrossSection, kSpectralBandCount>& crossSections);
 
 std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
