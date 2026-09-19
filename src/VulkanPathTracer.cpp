@@ -113,6 +113,7 @@ CameraController::View CameraController::GetView() const {
 }
 
 constexpr uint32_t kFramesInFlight = 2;
+constexpr std::array<int32_t, 2> kZeroExposure{};
 
 constexpr uint32_t kPathTracerSpirv[] = {
 #include "pathTracer.comp.spv.inc"
@@ -197,14 +198,15 @@ private:
         };
         float ySum = 0.0f;
         for (int band = 0; band < kSpectralBandCount; ++band) {
+            const SpectralBand spectral = ComputeSpectralBand(band);
+            sceneData.spectralBands[band][0] = static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale);
             const auto wavelength = static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band));
-            const float ratio = 550.0f / wavelength;
             const float lambda = wavelength * 1.0e-9f;
             constexpr float reference = 550.0e-9f;
             constexpr float c2 = 1.4387769e-2f;
             const float shape = std::pow(reference / lambda, 5.0f) * (std::exp(c2 / (reference * s.sunTemperatureKelvin)) - 1.0f) / (std::exp(c2 / (lambda * s.sunTemperatureKelvin)) - 1.0f);
-            sceneData.spectralBands[band][0] = s.betaRayleigh550 * ratio * ratio * ratio * ratio;
             sceneData.spectralBands[band][1] = s.sunRadiance550 * shape;
+            sceneData.spectralBands[band][2] = static_cast<float>(spectral.limbDarkening);
             const auto g = [&](float mean, float left, float right) {
                 const float x = (wavelength - mean) * (wavelength < mean ? left : right);
                 return std::exp(-0.5f * x * x);
@@ -220,6 +222,7 @@ private:
         sceneData.sunDisk[0] = 2.0f * kPi * (1.0f - std::cos(s.sunRadius));
         sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
         sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
+
         return sceneData;
     }
 
@@ -326,9 +329,9 @@ private:
                                            vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
     }
 
-    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage) const {
-        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage},
-                                 vma::AllocationCreateInfo{vma::AllocationCreateFlagBits::eHostAccessSequentialWrite, vma::MemoryUsage::eAuto});
+    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
+                                                 vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
+        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage}, vma::AllocationCreateInfo{flags, vma::MemoryUsage::eAuto});
     }
 
     static void UploadToBuffer(const vma::raii::Buffer& buffer, std::span<const std::byte> data) {
@@ -364,12 +367,13 @@ private:
     void CreateDescriptorSetLayout() {
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 5> layoutBindings{{
+        const std::array<vk::DescriptorSetLayoutBinding, 6> layoutBindings{{
             {0, eStorageImage, 1, compute},
             {2, eUniformBuffer, 1, compute},
             {7, eStorageBuffer, 1, compute},
             {8, eStorageBuffer, 1, compute},
             {9, eStorageBuffer, 1, compute},
+            {10, eStorageBuffer, 1, compute},
         }};
         vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
         createInfo.setBindings(layoutBindings);
@@ -410,8 +414,10 @@ private:
         const vk::FenceCreateInfo signaled{vk::FenceCreateFlagBits::eSignaled};
         m_frames.clear();
         for (uint32_t i = 0; i < count; ++i) {
-            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .renderFinished = m_device.createSemaphore({}), .presentDone = m_device.createFence(signaled), .inFlight = m_device.createFence(signaled)});
+            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .renderFinished = m_device.createSemaphore({}), .presentDone = m_device.createFence(signaled), .inFlight = m_device.createFence(signaled), .exposure = CreateBuffer(sizeof(kZeroExposure), vk::BufferUsageFlagBits::eTransferDst, vma::AllocationCreateFlagBits::eHostAccessRandom)});
+            UploadToBuffer(m_frames.back().exposure, std::as_bytes(std::span{kZeroExposure}));
         }
+        m_exposureAccumulator = CreateBuffer(sizeof(kZeroExposure), vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst, {});
     }
 
     PushConstants BuildPushConstants() {
@@ -428,7 +434,7 @@ private:
             .forward = {fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel)},
             .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
             .up = {fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
-            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, 0.0f, 0.0f},
+            .frame = {static_cast<float>(m_frameIndex), m_autoExposure * m_config.sky.exposure, 0.0f, 0.0f},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
         };
@@ -448,6 +454,13 @@ private:
             commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setImageMemoryBarriers(barrier));
         };
         commandBuffer.begin({});
+        const auto memoryBarrier = [&](vk::PipelineStageFlags2 srcStage, vk::AccessFlags2 srcAccess, vk::PipelineStageFlags2 dstStage, vk::AccessFlags2 dstAccess) {
+            const vk::MemoryBarrier2 barrier{srcStage, srcAccess, dstStage, dstAccess};
+            commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setMemoryBarriers(barrier));
+        };
+        memoryBarrier(Stage::eComputeShader | Stage::eCopy, Access::eShaderStorageWrite | Access::eTransferRead, Stage::eClear, Access::eTransferWrite);
+        commandBuffer.fillBuffer(*m_exposureAccumulator, 0, vk::WholeSize, 0);
+        memoryBarrier(Stage::eClear, Access::eTransferWrite, Stage::eComputeShader, Access::eShaderStorageRead | Access::eShaderStorageWrite);
         imageBarrier(Stage::eNone, Access::eNone, Stage::eComputeShader, Access::eShaderStorageWrite,
                      vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
 
@@ -456,13 +469,15 @@ private:
         const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral};
         const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo{*b, 0, vk::WholeSize}; };
         const std::array bufferInfos{bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer),
-                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer)};
+                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer),
+                                     bufferInfo(m_exposureAccumulator)};
         const std::array writes{
             vk::WriteDescriptorSet{{}, 0, 0, eStorageImage, imageInfo},
             vk::WriteDescriptorSet{{}, 2, 0, eUniformBuffer, {}, bufferInfos[0]},
             vk::WriteDescriptorSet{{}, 7, 0, eStorageBuffer, {}, bufferInfos[1]},
             vk::WriteDescriptorSet{{}, 8, 0, eStorageBuffer, {}, bufferInfos[2]},
             vk::WriteDescriptorSet{{}, 9, 0, eStorageBuffer, {}, bufferInfos[3]},
+            vk::WriteDescriptorSet{{}, 10, 0, eStorageBuffer, {}, bufferInfos[4]},
         };
         commandBuffer.pushDescriptorSet(vk::PipelineBindPoint::eCompute, *m_pipelineLayout, 0, writes);
         commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
@@ -471,10 +486,22 @@ private:
         const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
         commandBuffer.dispatch(groupsX, groupsY, 1);
+        memoryBarrier(Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eCopy, Access::eTransferRead);
+        commandBuffer.copyBuffer(*m_exposureAccumulator, *m_frames[m_currentFrame].exposure, vk::BufferCopy{0, 0, sizeof(kZeroExposure)});
+        memoryBarrier(Stage::eCopy, Access::eTransferWrite, Stage::eHost, Access::eHostRead);
 
         imageBarrier(Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eNone, Access::eNone,
                      vk::ImageLayout::eGeneral, vk::ImageLayout::ePresentSrcKHR);
         commandBuffer.end();
+    }
+
+    void UpdateAutoExposure(const vma::raii::Buffer& buffer) {
+        std::array<int32_t, 2> exposure{};
+        buffer.getAllocation().copyToMemory(0, exposure.data(), sizeof(exposure));
+        if (exposure[1] <= 0) return;
+        const float target = 0.18f / std::exp2(static_cast<float>(exposure[0]) / 64.0f / static_cast<float>(exposure[1]));
+        const float blend = m_autoExposure == 0.0f ? 1.0f : 1.0f - std::exp(-3.0f * m_deltaSeconds);
+        m_autoExposure = std::lerp(m_autoExposure, target, blend);
     }
 
     void RenderFrame() {
@@ -483,6 +510,7 @@ private:
         while (m_device.waitForFences(fences, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {
         }
 
+        UpdateAutoExposure(frame.exposure);
         const uint32_t imageIndex = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable).value;
 
         m_device.resetFences(fences);
@@ -523,6 +551,7 @@ private:
             const double deltaSeconds = std::chrono::duration<double>(now - previousFrame).count();
             previousFrame = now;
 
+            m_deltaSeconds = static_cast<float>(deltaSeconds);
             m_camera.Update(deltaSeconds, m_window, m_config);
             RenderFrame();
 
@@ -543,6 +572,7 @@ private:
         vk::raii::Semaphore renderFinished{nullptr};
         vk::raii::Fence presentDone{nullptr};
         vk::raii::Fence inFlight{nullptr};
+        vma::raii::Buffer exposure{nullptr};
     };
 
     GLFWwindow* m_window = nullptr;
@@ -560,6 +590,7 @@ private:
     vma::raii::Buffer m_mieScatteringBuffer{nullptr};
     vma::raii::Buffer m_rainbowScatteringBuffer{nullptr};
     vma::raii::Buffer m_transmittanceBuffer{nullptr};
+    vma::raii::Buffer m_exposureAccumulator{nullptr};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Extent2D m_swapchainExtent{};
@@ -574,6 +605,8 @@ private:
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
+    float m_autoExposure = 0.0f;
+    float m_deltaSeconds = 0.0f;
     RuntimeConfig m_config{};
 
     CameraController m_camera;

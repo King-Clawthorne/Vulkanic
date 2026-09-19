@@ -113,6 +113,13 @@ inline constexpr int kTransmittanceMuBins = 256;
 
 std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
+struct SpectralBand {
+    double betaRayleighScale;
+    double limbDarkening;
+};
+
+SpectralBand ComputeSpectralBand(int band);
+
 inline double PhaseNormalization(const std::vector<double>& f11) {
     const int bins = static_cast<int>(f11.size());
     const double dTheta = std::numbers::pi / (bins - 1);

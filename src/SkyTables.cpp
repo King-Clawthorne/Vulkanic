@@ -424,3 +424,23 @@ std::vector<std::array<float, 2>> ComputeTransmittanceTable(const SkySpectralCon
     });
     return table;
 }
+
+namespace {
+
+    double RayleighShape(double wavelengthNm) {
+        const double sigma2 = 1.0e6 / (wavelengthNm * wavelengthNm);
+        const double n = 1.0 + (1.0e-8 * (8060.51 + (2480990.0 / (132.274 - sigma2)) + (17455.7 / (39.32957 - sigma2))));
+        const double n2 = (n * n) - 1.0;
+        return n2 * n2 / std::pow(wavelengthNm, 4.0);
+    }
+}
+
+SpectralBand ComputeSpectralBand(int band) {
+    const double centre = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
+    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = -0.023 + (0.292e3 / centre)};
+    for (int offset = -10; offset <= 10; offset += 5) {
+        const double wavelength = centre + offset;
+        result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
+    }
+    return result;
+}
