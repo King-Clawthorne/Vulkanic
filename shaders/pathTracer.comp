@@ -17,10 +17,13 @@ layout(set = 0, binding = 2) uniform SceneData {
     vec4 cieXyz[13];
     vec4 sunDisk;
     vec4 mieBands[13];
+    vec4 rainbowAxisX;
+    vec4 rainbowAxisZ;
 } sceneData;
 layout(std430, set = 0, binding = 7) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer;
 layout(std430, set = 0, binding = 8) readonly buffer RainbowMatrixBuffer { vec4 entries[]; } rainbowMatrixBuffer;
 layout(std430, set = 0, binding = 9) readonly buffer TransmittanceBuffer { vec2 depth[]; } transmittanceLut;
+layout(std430, set = 0, binding = 10) buffer AccumulationBuffer { vec4 pixels[]; } accumulation;
 layout(push_constant) uniform PushConstants {
     vec4 forward;
     vec4 right;
@@ -55,6 +58,7 @@ int SkyViewSteps() { return int(SpecializedViewSteps != 0 ? SpecializedViewSteps
 int SkySamples() { return int(SpecializedSamples != 0 ? SpecializedSamples : sceneData.skySampleCounts.z); }
 int SkyScatteringOrders() { return int(SpecializedOrders != 0 ? SpecializedOrders : sceneData.skySampleCounts.w); }
 vec3 RainbowCenter() { return sceneData.rainbowCenterEnabled.xyz; }
+vec3 rain_frame(vec3 v) { return vec3(dot(v, sceneData.rainbowAxisX.xyz), v.y, dot(v, sceneData.rainbowAxisZ.xyz)); }
 vec3 RainbowRadii() { return sceneData.rainbowRadiiEdge.xyz; }
 float RainbowScattering() { return sceneData.rainbowOptical.x; }
 float RainbowExtinction() { return sceneData.rainbowOptical.y; }
@@ -300,8 +304,8 @@ Stokes[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
 }
 
 vec2 ray_ellipsoid(vec3 origin, vec3 dir) {
-    vec3 o = (origin - RainbowCenter()) / RainbowRadii();
-    vec3 d = dir / RainbowRadii();
+    vec3 o = rain_frame(origin - RainbowCenter()) / RainbowRadii();
+    vec3 d = rain_frame(dir) / RainbowRadii();
     float a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1.0;
     float discriminant = b * b - a * c;
     if (discriminant < 0.0) return vec2(-1.0);
@@ -309,7 +313,7 @@ vec2 ray_ellipsoid(vec3 origin, vec3 dir) {
 }
 
 float rainbow_density(vec3 localPosition) {
-    float q = length((localPosition - RainbowCenter()) / RainbowRadii());
+    float q = length(rain_frame(localPosition - RainbowCenter()) / RainbowRadii());
     float softness = sceneData.rainbowRadiiEdge.w;
     if (softness <= 0.0) return q <= 1.0 ? 1.0 : 0.0;
     return 1.0 - smoothstep(1.0 - softness, 1.0, q);
@@ -356,7 +360,15 @@ float[SPECTRAL_BANDS] integrate_rainbow_path(vec3 viewDir, vec3 sunDirection) {
 
 float rain_phase_cdf(int i) { return rainbowMatrixBuffer.entries[SPECTRAL_BANDS * RainbowAngleBins() + i].x; }
 
-vec4 rain_sample_direction(vec3 outgoing, inout uint state) {
+float rain_direction_pdf(float cosTheta) {
+    int bins = RainbowAngleBins();
+    float theta = acos(clamp(cosTheta, -1.0, 1.0));
+    int bin = min(int(theta / PI * float(bins - 1)), bins - 2);
+    float phasePdf = (rain_phase_cdf(bin + 1) - rain_phase_cdf(bin)) * float(bins - 1) / (2.0 * PI * PI * max(sin(theta), 1e-8));
+    return 0.9 * phasePdf + 0.1 / (4.0 * PI);
+}
+
+vec3 rain_sample_direction(vec3 axis, inout uint state) {
     float branch = NextFloat(state), u = NextFloat(state), phi = 2.0 * PI * NextFloat(state);
     int bins = RainbowAngleBins();
     float theta;
@@ -370,11 +382,9 @@ vec4 rain_sample_direction(vec3 outgoing, inout uint state) {
         float c0 = rain_phase_cdf(lo), c1 = rain_phase_cdf(hi);
         theta = (float(lo) + (u - c0) / max(c1 - c0, 1e-20)) * PI / float(bins - 1);
     } else theta = acos(1.0 - 2.0 * u);
-    int bin = min(int(theta / PI * float(bins - 1)), bins - 2);
-    float phasePdf = (rain_phase_cdf(bin + 1) - rain_phase_cdf(bin)) * float(bins - 1) / (2.0 * PI * PI * max(sin(theta), 1e-8));
     vec3 a, b;
-    beam_basis(outgoing, a, b);
-    return vec4(normalize(outgoing * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta)), 0.9 * phasePdf + 0.1 / (4.0 * PI));
+    beam_basis(axis, a, b);
+    return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
 }
 
 Stokes[SPECTRAL_BANDS] integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint seed) {
@@ -413,10 +423,10 @@ Stokes[SPECTRAL_BANDS] integrate_rainbow_multiple(vec3 viewDir, vec3 sun, uint s
                 }
             }
             if (vertex + 1 < orders) {
-                vec4 sampled = rain_sample_direction(-direction, state);
-                throughput /= sampled.w;
+                vec3 next = NextFloat(state) < 0.5 ? -rain_sample_direction(-direction, state) : rain_sample_direction(sun, state);
+                throughput /= 0.5 * (rain_direction_pdf(dot(next, direction)) + rain_direction_pdf(dot(next, sun)));
                 origin = p;
-                direction = -sampled.xyz;
+                direction = next;
             }
         }
     }
@@ -458,6 +468,10 @@ void main() {
         accumulatedXyz += sampleXyz;
     }
     vec3 xyz = accumulatedXyz / float(max(1u, samplesPerPixel));
+    uint index = pixel.y * pc.imageSize.x + pixel.x;
+    vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
+    xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);
+    accumulation.pixels[index] = vec4(xyz, previous.w + 1.0);
     vec3 rgb = mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * xyz;
     float lowest = min(rgb.r, min(rgb.g, rgb.b));
     if (lowest < 0.0 && xyz.y > 0.0) rgb = xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest));

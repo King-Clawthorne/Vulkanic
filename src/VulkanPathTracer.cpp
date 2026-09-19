@@ -15,6 +15,7 @@
 #include <print>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <vector>
@@ -29,6 +30,7 @@ public:
         bool polarizerEnabled;
         float polarizerAngle;
         float polarizerEllipticity;
+        friend bool operator==(const View&, const View&) = default;
     };
 
     void Reset(const RuntimeConfig& config);
@@ -132,6 +134,8 @@ struct alignas(16) SceneData {
     float cieXyz[kSpectralBandCount][4];
     float sunDisk[4];
     float mieBands[kSpectralBandCount][4];
+    float rainbowAxisX[4];
+    float rainbowAxisZ[4];
 };
 
 struct PushConstants {
@@ -191,7 +195,6 @@ private:
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
             .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
             .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), 0.0f},
-            .rainbowCenterEnabled = {r.center.x, r.center.y, r.center.z, static_cast<float>(r.enabled)},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
@@ -223,6 +226,17 @@ private:
         sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
         sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
 
+        const float sunLength = std::hypot(s.sunDirection[0], s.sunDirection[2]);
+        const float ax = -s.sunDirection[0] / sunLength;
+        const float az = -s.sunDirection[2] / sunLength;
+        sceneData.rainbowCenterEnabled[0] = ax * r.distance;
+        sceneData.rainbowCenterEnabled[1] = r.height;
+        sceneData.rainbowCenterEnabled[2] = az * r.distance;
+        sceneData.rainbowCenterEnabled[3] = static_cast<float>(r.enabled);
+        sceneData.rainbowAxisX[0] = az;
+        sceneData.rainbowAxisX[2] = -ax;
+        sceneData.rainbowAxisZ[0] = ax;
+        sceneData.rainbowAxisZ[2] = az;
         const double reference = m_mieCrossSections[6].extinction;
         for (int band = 0; band < kSpectralBandCount; ++band) {
             const MieCrossSection& cross = m_mieCrossSections[static_cast<size_t>(band)];
@@ -335,9 +349,9 @@ private:
                                            vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
     }
 
-    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage) const {
-        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage},
-                                 vma::AllocationCreateInfo{vma::AllocationCreateFlagBits::eHostAccessSequentialWrite, vma::MemoryUsage::eAuto});
+    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
+                                                 vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
+        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage}, vma::AllocationCreateInfo{flags, vma::MemoryUsage::eAuto});
     }
 
     static void UploadToBuffer(const vma::raii::Buffer& buffer, std::span<const std::byte> data) {
@@ -373,12 +387,13 @@ private:
     void CreateDescriptorSetLayout() {
         using enum vk::DescriptorType;
         constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 5> layoutBindings{{
+        const std::array<vk::DescriptorSetLayoutBinding, 6> layoutBindings{{
             {0, eStorageImage, 1, compute},
             {2, eUniformBuffer, 1, compute},
             {7, eStorageBuffer, 1, compute},
             {8, eStorageBuffer, 1, compute},
             {9, eStorageBuffer, 1, compute},
+            {10, eStorageBuffer, 1, compute},
         }};
         vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
         createInfo.setBindings(layoutBindings);
@@ -421,10 +436,14 @@ private:
         for (uint32_t i = 0; i < count; ++i) {
             m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .renderFinished = m_device.createSemaphore({}), .presentDone = m_device.createFence(signaled), .inFlight = m_device.createFence(signaled)});
         }
+        const vk::DeviceSize pixels = static_cast<vk::DeviceSize>(m_swapchainExtent.width) * m_swapchainExtent.height;
+        m_accumulationBuffer = CreateBuffer(pixels * 4 * sizeof(float), vk::BufferUsageFlagBits::eStorageBuffer, {});
     }
 
     PushConstants BuildPushConstants() {
         const CameraController::View view = m_camera.GetView();
+        const bool reset = m_lastView != view;
+        m_lastView = view;
 
         const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
         const float aspect = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
@@ -437,7 +456,7 @@ private:
             .forward = {fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel)},
             .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
             .up = {fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
-            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, 0.0f, 0.0f},
+            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0f},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
         };
@@ -457,6 +476,8 @@ private:
             commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setImageMemoryBarriers(barrier));
         };
         commandBuffer.begin({});
+        const vk::MemoryBarrier2 accumulation{Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eComputeShader, Access::eShaderStorageRead | Access::eShaderStorageWrite};
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setMemoryBarriers(accumulation));
         imageBarrier(Stage::eNone, Access::eNone, Stage::eComputeShader, Access::eShaderStorageWrite,
                      vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
 
@@ -465,13 +486,15 @@ private:
         const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral};
         const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo{*b, 0, vk::WholeSize}; };
         const std::array bufferInfos{bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer),
-                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer)};
+                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer),
+                                     bufferInfo(m_accumulationBuffer)};
         const std::array writes{
             vk::WriteDescriptorSet{{}, 0, 0, eStorageImage, imageInfo},
             vk::WriteDescriptorSet{{}, 2, 0, eUniformBuffer, {}, bufferInfos[0]},
             vk::WriteDescriptorSet{{}, 7, 0, eStorageBuffer, {}, bufferInfos[1]},
             vk::WriteDescriptorSet{{}, 8, 0, eStorageBuffer, {}, bufferInfos[2]},
             vk::WriteDescriptorSet{{}, 9, 0, eStorageBuffer, {}, bufferInfos[3]},
+            vk::WriteDescriptorSet{{}, 10, 0, eStorageBuffer, {}, bufferInfos[4]},
         };
         commandBuffer.pushDescriptorSet(vk::PipelineBindPoint::eCompute, *m_pipelineLayout, 0, writes);
         commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
@@ -569,6 +592,7 @@ private:
     vma::raii::Buffer m_mieScatteringBuffer{nullptr};
     vma::raii::Buffer m_rainbowScatteringBuffer{nullptr};
     vma::raii::Buffer m_transmittanceBuffer{nullptr};
+    vma::raii::Buffer m_accumulationBuffer{nullptr};
     std::array<MieCrossSection, kSpectralBandCount> m_mieCrossSections{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
@@ -587,6 +611,7 @@ private:
     RuntimeConfig m_config{};
 
     CameraController m_camera;
+    std::optional<CameraController::View> m_lastView;
 };
 
 int main() {

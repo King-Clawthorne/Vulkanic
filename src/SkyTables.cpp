@@ -285,8 +285,8 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
     const int bins = static_cast<int>(rainbow.angleBins);
     std::vector<MieMatrixEntry> table(static_cast<size_t>(kSpectralBandCount * bins));
     constexpr int subWavelengths = 5;
+    constexpr int radiusSamples = 64;
     constexpr int raySamples = 16384 / subWavelengths;
-    constexpr int radiusSamples = 9;
 
     ParallelFor(kSpectralBandCount, [&](int band) {
         std::vector<double> f11(static_cast<size_t>(bins), 0.0);
@@ -321,39 +321,45 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
             const double wavelengthNm = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * (band + ((sub + 0.5) / subWavelengths) - 0.5));
             const double n = WaterIor(wavelengthNm);
             const std::array<Bow, 2> bow = {RainbowRay(1, n), RainbowRay(2, n)};
+            std::array<std::array<double, 2>, radiusSamples> zScale{};
             for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
-                const double radiusM = radiiUm[static_cast<size_t>(radiusIndex)] * 1.0e-6;
-                const double radiusWeight = radiusWeights[static_cast<size_t>(radiusIndex)] / radiusWeightSum;
-                const double ka = 2.0 * std::numbers::pi * radiusM / (wavelengthNm * 1.0e-9);
-                std::array<double, 2> zScale{};
+                const double ka = 2.0 * std::numbers::pi * radiiUm[static_cast<size_t>(radiusIndex)] * 1.0e-6 / (wavelengthNm * 1.0e-9);
                 for (int k = 0; k < bows; ++k)
-                    zScale[k] = std::pow(ka, 2.0 / 3.0) * std::cbrt(2.0 / bow[k].curvature);
+                    zScale[static_cast<size_t>(radiusIndex)][k] = std::pow(ka, 2.0 / 3.0) * std::cbrt(2.0 / bow[k].curvature);
+            }
 
-                for (int sample = 0; sample < raySamples; ++sample) {
-                    const double b = std::sqrt((static_cast<double>(sample) + 0.5) / raySamples);
-                    const double incidence = std::asin(std::min(b, 1.0));
-                    const FresnelPower fr = AirToWaterFresnel(incidence, std::asin(b / n), n);
-                    double weightS = radiusWeight * fr.transmitS * fr.transmitS;
-                    double weightP = radiusWeight * fr.transmitP * fr.transmitP;
-                    for (int k = 0; k < bows; ++k) {
-                        weightS *= fr.reflectS;
-                        weightP *= fr.reflectP;
-                        const double deviation = Deviation(k + 1, b, n);
-                        const double fade = 1.0 - AiryBlend(zScale[k] * (deviation - bow[k].dMin));
-                        if (fade > 0.0) Deposit(f11, f12, f33, deviation, weightS * fade, weightP * fade, solarSigma, bins);
-                    }
+            for (int sample = 0; sample < raySamples; ++sample) {
+                const double b = std::sqrt((static_cast<double>(sample) + ((sub + 0.5) / subWavelengths)) / raySamples);
+                const double incidence = std::asin(std::min(b, 1.0));
+                const FresnelPower fr = AirToWaterFresnel(incidence, std::asin(b / n), n);
+                Deposit(f11, f12, f33, Deviation(-1, b, n), fr.reflectS, fr.reflectP, solarSigma, bins);
+                double weightS = fr.transmitS * fr.transmitS;
+                double weightP = fr.transmitP * fr.transmitP;
+                Deposit(f11, f12, f33, Deviation(0, b, n), weightS, weightP, solarSigma, bins);
+                for (int k = 0; k < bows; ++k) {
+                    weightS *= fr.reflectS;
+                    weightP *= fr.reflectP;
+                    const double deviation = Deviation(k + 1, b, n);
+                    double fade = 0.0;
+                    for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex)
+                        fade += radiusWeights[static_cast<size_t>(radiusIndex)] / radiusWeightSum *
+                                (1.0 - AiryBlend(zScale[static_cast<size_t>(radiusIndex)][k] * (deviation - bow[k].dMin)));
+                    if (fade > 0.0) Deposit(f11, f12, f33, deviation, weightS * fade, weightP * fade, solarSigma, bins);
                 }
+            }
 
+            for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
+                const double radiusWeight = radiusWeights[static_cast<size_t>(radiusIndex)] / radiusWeightSum;
                 for (int k = 0; k < bows; ++k) {
                     const double b0 = bow[k].b0;
                     const double i0 = std::asin(b0);
                     const FresnelPower fr = AirToWaterFresnel(i0, std::asin(b0 / n), n);
                     const double weightS = radiusWeight * fr.transmitS * fr.transmitS * std::pow(fr.reflectS, k + 1);
                     const double weightP = radiusWeight * fr.transmitP * fr.transmitP * std::pow(fr.reflectP, k + 1);
-                    const double amplitude = raySamples * 8.0 * std::numbers::pi * b0 * std::sqrt(zScale[k]) / std::sqrt(2.0 * bow[k].curvature) * binWidth * kernelSum;
+                    const double amplitude = raySamples * 8.0 * std::numbers::pi * b0 * std::sqrt(zScale[static_cast<size_t>(radiusIndex)][k]) / std::sqrt(2.0 * bow[k].curvature) * binWidth * kernelSum;
                     for (int bin = 0; bin < bins; ++bin) {
                         const double theta = bin * binWidth;
-                        const double z = zScale[k] * ((k == 0 ? theta : (2.0 * std::numbers::pi) - theta) - bow[k].dMin);
+                        const double z = zScale[static_cast<size_t>(radiusIndex)][k] * ((k == 0 ? theta : (2.0 * std::numbers::pi) - theta) - bow[k].dMin);
                         if (z < -6.0 || z > 20.0) continue;
                         const double ai = Airy(-z);
                         const double profile = amplitude * ai * ai * AiryBlend(z);
@@ -379,6 +385,14 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
             }
         }
 
+        for (int i = 0; i < bins; ++i) {
+            const double lo = std::max(0.0, (i - 0.5) * binWidth);
+            const double hi = std::min(std::numbers::pi, (i + 0.5) * binWidth);
+            const double solidAngle = 2.0 * std::numbers::pi * (std::cos(lo) - std::cos(hi));
+            f11[static_cast<size_t>(i)] /= solidAngle;
+            f12[static_cast<size_t>(i)] /= solidAngle;
+            f33[static_cast<size_t>(i)] /= solidAngle;
+        }
         const double normalization = PhaseNormalization(f11);
         for (int i = 0; i < bins; ++i) {
             const double normalizedF11 = f11[static_cast<size_t>(i)] / normalization;
@@ -397,10 +411,15 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
 }
 
 void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins) {
+    const auto phase = [&](int i) {
+        double sum = 0.0;
+        for (int band = 0; band < kSpectralBandCount; ++band) sum += table[(band * bins) + i].f11;
+        return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
+    };
     std::vector<double> cdf(bins, 0.0);
     for (int i = 1; i < bins; ++i) {
-        const double a = table[(6 * bins) + i - 1].f11 * std::sin(std::numbers::pi * (i - 1) / (bins - 1));
-        const double b = table[(6 * bins) + i].f11 * std::sin(std::numbers::pi * i / (bins - 1));
+        const double a = phase(i - 1);
+        const double b = phase(i);
         cdf[i] = cdf[i - 1] + std::max(0.0, a + b);
     }
     for (double value : cdf) table.push_back({.f11 = static_cast<float>(value / cdf.back()), .f12 = 0, .f33 = 0, .f34 = 0});

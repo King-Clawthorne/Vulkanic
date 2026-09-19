@@ -29,7 +29,7 @@ struct SkySpectralConfig {
     uint32_t secondarySamples = 1;
     uint32_t viewSteps = 1;
     uint32_t samples = 1;
-    uint32_t scatteringOrders = 1;
+    uint32_t scatteringOrders = 2;
 
     float rayleighDepolarization = 0.0279f;
     float aerosolRefractiveIndexReal = 1.33f;
@@ -43,11 +43,12 @@ struct SkySpectralConfig {
 
 struct RainbowConfig {
     uint32_t enabled = 1;
-    Vec3 center{.x = 0.0f, .y = 1200.0f, .z = 0.0f};
-    Vec3 radii{.x = 5000.0f, .y = 1800.0f, .z = 5000.0f};
+    float distance = 4000.0f;
+    float height = 0.0f;
+    Vec3 radii{.x = 6000.0f, .y = 6000.0f, .z = 1500.0f};
     float edgeSoftness = 0.15f;
-    float scatteringCoefficient = 1.2e-4f;
-    float extinctionCoefficient = 2.0e-4f;
+    float scatteringCoefficient = 5.0e-4f;
+    float extinctionCoefficient = 5.0e-4f;
     float effectiveRadiusMicrometers = 500.0f;
     float effectiveVariance = 0.08f;
     uint32_t angleBins = 4097;
