@@ -224,20 +224,31 @@ struct Level {
 const int STACK = int(SpecializedOrders);
 Level S[STACK];
 uint gRng;
-const float SUN_LOBE_G = 0.75;
-
-float sun_lobe_pdf(float cosTheta) {
-    float g2 = SUN_LOBE_G * SUN_LOBE_G;
-    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * SUN_LOBE_G * cosTheta, 1.5));
+float mie_cdf(int aerosol, int i) {
+    int bins = max(2, int(sceneData.skyVrtParams.z));
+    return mieMatrixBuffer.entries[(2 * SPECTRAL_BANDS + aerosol) * bins + i].x;
 }
 
-vec3 sun_lobe_sample(vec3 axis) {
-    float g2 = SUN_LOBE_G * SUN_LOBE_G, u = NextFloat(gRng), phi = 2.0 * PI * NextFloat(gRng);
-    float t = (1.0 - g2) / (1.0 - SUN_LOBE_G + 2.0 * SUN_LOBE_G * u);
-    float cosTheta = clamp((1.0 + g2 - t * t) / (2.0 * SUN_LOBE_G), -1.0, 1.0), sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+float mie_pdf(int aerosol, float cosTheta) {
+    int bins = max(2, int(sceneData.skyVrtParams.z));
+    float theta = acos(clamp(cosTheta, -1.0, 1.0));
+    int bin = min(int(theta / PI * float(bins - 1)), bins - 2);
+    return (mie_cdf(aerosol, bin + 1) - mie_cdf(aerosol, bin)) * float(bins - 1) / (2.0 * PI * PI * max(sin(theta), 1e-8));
+}
+
+vec3 mie_sample(int aerosol, vec3 axis) {
+    int bins = max(2, int(sceneData.skyVrtParams.z)), lo = 0, hi = bins - 1;
+    float u = NextFloat(gRng), phi = 2.0 * PI * NextFloat(gRng);
+    while (hi - lo > 1) {
+        int mid = (lo + hi) / 2;
+        if (mie_cdf(aerosol, mid) < u) lo = mid;
+        else hi = mid;
+    }
+    float c0 = mie_cdf(aerosol, lo), c1 = mie_cdf(aerosol, hi);
+    float theta = (float(lo) + (u - c0) / max(c1 - c0, 1e-20)) * PI / float(bins - 1);
     vec3 a, b;
     beam_basis(axis, a, b);
-    return normalize(axis * cosTheta + (a * cos(phi) + b * sin(phi)) * sinTheta);
+    return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
 }
 
 void begin_step(int d, int steps) {
@@ -292,8 +303,16 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             float phi = GOLDEN_ANGLE * float(S[d].sampleIndex + S[d].stepIndex * samples) + 2.0 * PI * S[d].dirJitter.y;
             S[d + 1].org = S[d].pos;
             vec3 next = -vec3(sqrt(max(0.0, 1.0 - z * z)) * vec2(cos(phi), sin(phi)), z).xzy;
-            if (NextFloat(gRng) < 0.5) next = sun_lobe_sample(L);
-            S[d].sampleWeight = 1.0 / ((0.5 / (4.0 * PI) + 0.5 * sun_lobe_pdf(dot(next, L))) * float(samples));
+            vec3 current = S[d].dir;
+            float coarse = sceneData.mieBands[6].w > 0.0 ? 0.2 : 0.0, fine = 0.4 - coarse, choice = NextFloat(gRng);
+            if (choice < fine) next = mie_sample(0, L);
+            else if (choice < 0.4) next = mie_sample(1, L);
+            else if (choice < 0.4 + fine) next = mie_sample(0, current);
+            else if (choice < 0.8) next = mie_sample(1, current);
+            float cosSun = dot(next, L), cosCurrent = dot(next, current);
+            float pdf = 0.2 / (4.0 * PI) + fine * (mie_pdf(0, cosSun) + mie_pdf(0, cosCurrent));
+            if (coarse > 0.0) pdf += coarse * (mie_pdf(1, cosSun) + mie_pdf(1, cosCurrent));
+            S[d].sampleWeight = 1.0 / (pdf * float(samples));
             S[++d].dir = next;
             entering = true;
             continue;

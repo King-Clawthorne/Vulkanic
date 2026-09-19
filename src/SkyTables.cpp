@@ -398,10 +398,10 @@ std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& r
     return table;
 }
 
-void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins) {
+void AppendSamplingCdf(std::vector<MieMatrixEntry>& table, int bins, size_t firstEntry) {
     const auto phase = [&](int i) {
         double sum = 0.0;
-        for (int band = 0; band < kSpectralBandCount; ++band) sum += table[(band * bins) + i].f11;
+        for (int band = 0; band < kSpectralBandCount; ++band) sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].f11;
         return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
     };
     std::vector<double> cdf(bins, 0.0);

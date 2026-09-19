@@ -119,7 +119,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
 
 std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
-void AppendRainbowSamplingCdf(std::vector<MieMatrixEntry>& table, int bins);
+void AppendSamplingCdf(std::vector<MieMatrixEntry>& table, int bins, size_t firstEntry);
 
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;

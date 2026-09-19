@@ -264,6 +264,9 @@ private:
     void CreateMieScatteringBuffer() {
         std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(m_config.sky.spectral, 0, m_mieCrossSections[0]);
         std::ranges::copy(ComputeMieScatteringTable(m_config.sky.spectral, 1, m_mieCrossSections[1]), std::back_inserter(table));
+        const int bins = std::max(2, static_cast<int>(m_config.sky.spectral.mieTableAngleBins));
+        AppendSamplingCdf(table, bins, 0);
+        AppendSamplingCdf(table, bins, static_cast<size_t>(kSpectralBandCount) * static_cast<size_t>(bins));
         const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_mieScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
@@ -271,7 +274,7 @@ private:
 
     void CreateRainbowScatteringBuffer() {
         std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(m_config.rainbow, m_config.sky.spectral.sunRadius);
-        AppendRainbowSamplingCdf(table, static_cast<int>(m_config.rainbow.angleBins));
+        AppendSamplingCdf(table, static_cast<int>(m_config.rainbow.angleBins), 0);
         const auto size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
         m_rainbowScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_rainbowScatteringBuffer, std::as_bytes(std::span{table}));
