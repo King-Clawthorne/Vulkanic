@@ -29,10 +29,9 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 
 // Aerosol model + sampling controls for the Mie table bake. Defaults model a
 // mild continental haze (water-ish droplets, sub-micron, weakly absorbing).
-struct MieAerosolParams
-{
-    double refractiveIndexReal = 1.33; // real part of the relative refractive index
-    double refractiveIndexImag = 0.0;  // imaginary part (absorption; >= 0)
+struct MieAerosolParams {
+    double refractiveIndexReal = 1.33;  // real part of the relative refractive index
+    double refractiveIndexImag = 0.0;   // imaginary part (absorption; >= 0)
     double meanRadiusMicrometers = 0.2; // log-normal geometric mean radius r_g (µm)
     double sigma = 1.5;                 // log-normal geometric standard deviation (> 1)
     int angleBins = 181;                // scattering-angle samples over [0, π] inclusive
@@ -40,8 +39,7 @@ struct MieAerosolParams
 
 // One table entry: the four independent normalized scattering-matrix elements
 // at a single scattering angle. Laid out to match a GPU vec4 (f11, f12, f33, f34).
-struct MieMatrixEntry
-{
+struct MieMatrixEntry {
     float f11;
     float f12;
     float f33;

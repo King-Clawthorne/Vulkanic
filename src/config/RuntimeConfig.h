@@ -12,8 +12,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,8 +28,7 @@ inline constexpr float kPi = std::numbers::pi_v<float>;
 //
 // The C++20 defaulted operator== synthesizes the member-wise equality the old
 // hand-written comparison provided (and, with it, operator!= for free).
-struct Vec3
-{
+struct Vec3 {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
@@ -66,8 +67,7 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 [[nodiscard]] inline Vec3 Normalize(const Vec3& value)
 {
     const float length = Length(value);
-    if (length <= 0.0f)
-    {
+    if (length <= 0.0f) {
         return {};
     }
     return value * (1.0f / length);
@@ -90,8 +90,7 @@ constexpr Vec3& operator+=(Vec3& left, const Vec3& right)
 // Units are SI (metres) for the radii and scale heights; scattering
 // coefficients are 1/m. viewSteps / samples control numerical integration
 // cost.
-struct SkySpectralConfig
-{
+struct SkySpectralConfig {
     float betaRayleigh550 = 13.5e-6f;
     float betaMie = 21e-6f;
     float earthRadius = 6360e3f;
@@ -139,18 +138,13 @@ struct SkySpectralConfig
 // changes — the table is sun-independent, so it only needs rebuilding here.
 inline bool HasMieAerosolChanged(const SkySpectralConfig& left, const SkySpectralConfig& right)
 {
-    return left.aerosolRefractiveIndexReal != right.aerosolRefractiveIndexReal
-           || left.aerosolRefractiveIndexImag != right.aerosolRefractiveIndexImag
-           || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers
-           || left.aerosolSigma != right.aerosolSigma
-           || left.mieTableAngleBins != right.mieTableAngleBins;
+    return left.aerosolRefractiveIndexReal != right.aerosolRefractiveIndexReal || left.aerosolRefractiveIndexImag != right.aerosolRefractiveIndexImag || left.aerosolMeanRadiusMicrometers != right.aerosolMeanRadiusMicrometers || left.aerosolSigma != right.aerosolSigma || left.mieTableAngleBins != right.mieTableAngleBins;
 }
 
 // A finite local ellipsoidal rain shaft. Scattering/extinction coefficients
 // are ensemble volume coefficients in 1/m; the CPU table contains only the
 // normalized angular/polarization distribution of the selected Debye orders.
-struct RainbowConfig
-{
+struct RainbowConfig {
     uint32_t enabled = 1;
     Vec3 center{0.0f, 1200.0f, 0.0f};
     Vec3 radii{5000.0f, 1800.0f, 5000.0f};
@@ -180,31 +174,43 @@ inline void SetRainbowScattering(RainbowConfig& rainbow, float scattering)
 
 inline bool HasRainbowOpticsChanged(const RainbowConfig& left, const RainbowConfig& right)
 {
-    return left.effectiveRadiusMicrometers != right.effectiveRadiusMicrometers
-           || left.effectiveVariance != right.effectiveVariance
-           || left.angleBins != right.angleBins
-           || left.includeSecondary != right.includeSecondary;
+    return left.effectiveRadiusMicrometers != right.effectiveRadiusMicrometers || left.effectiveVariance != right.effectiveVariance || left.angleBins != right.angleBins || left.includeSecondary != right.includeSecondary;
 }
 
-// Top-level configuration loaded from path_tracer_config.json. All fields
-// have defaults so a missing config still produces a valid scene.
-struct RuntimeConfig
-{
+struct RenderConfig {
     uint32_t width = 960;
     uint32_t height = 540;
     uint32_t frameCount = 2;
     bool vsync = false;
     uint32_t samplesPerPixel = 1;
+};
+
+struct CameraConfig {
     Vec3 initialPosition{0.0f, 0.35f, -6.5f};
     Vec3 initialLookAt{0.0f, -0.1f, 3.8f};
     float fovYDegrees = 40.0f;
+    float maxPitchDegrees = 89.0f;
+};
+
+struct InputConfig {
     float mouseSensitivity = 0.0035f;
     float keyLookSpeed = 1.8f;
     float polarizerRotateSpeed = 6.3f;
-    float maxPitchDegrees = 89.0f;
-    float skyExposure = 1.35f;
-    SkySpectralConfig skySpectral{};
+};
+
+struct SkyConfig {
+    float exposure = 1.35f;
+    SkySpectralConfig spectral{}; // "spectralConstants" in JSON
+};
+
+// Top-level configuration; its sections mirror path_tracer_config.json. Every
+// field has a default, so any section or key may be omitted from the file.
+struct RuntimeConfig {
+    RenderConfig render{};
+    CameraConfig camera{};
+    InputConfig input{};
     RainbowConfig rainbow{};
+    SkyConfig sky{};
 };
 
 // Resolve a runtime asset (config, SPIR-V blob, etc.) by checking the
@@ -213,7 +219,7 @@ struct RuntimeConfig
 // fatal.
 std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName);
 
-// Load an entire text file into memory as a single std::string. Throws on
+// Load an entire file (text or binary) into memory as a single std::string. Throws on
 // open / read failure or empty file.
 std::string LoadTextFile(const std::filesystem::path& filePath);
 
@@ -221,3 +227,40 @@ std::string LoadTextFile(const std::filesystem::path& filePath);
 // std::runtime_error with a descriptive context message on any structural
 // or semantic error.
 RuntimeConfig ParseRuntimeConfig(const std::string& jsonText);
+
+// Serialize every runtime-controlled field so a save writes a complete,
+// independently loadable config rather than a lossy GUI-only patch.
+std::string SerializeRuntimeConfig(const RuntimeConfig& config);
+
+// The active config file on disk: finds it at startup, hot-reloads it when it
+// changes, cycles between the *.json files next to it (F2), and saves (F5).
+// Runtime failures (bad JSON while editing, a failed save) are logged rather
+// than thrown so an interactive session keeps running.
+class ConfigFile {
+public:
+    // Locate and parse path_tracer_config.json. Throws if none is found or it
+    // fails to parse.
+    RuntimeConfig Load();
+
+    // Re-parse the file if it changed on disk since it was last read or
+    // written. Polls at most every 250 ms.
+    std::optional<RuntimeConfig> ReloadIfChanged();
+
+    // Switch to the next discovered config file. Stays on the current one if
+    // there is no other file or the next one fails to parse.
+    std::optional<RuntimeConfig> CycleNext();
+
+    void Save(const RuntimeConfig& config);
+
+    [[nodiscard]] const std::filesystem::path& Path() const { return m_path; }
+
+private:
+    RuntimeConfig Read();
+    void DiscoverFiles();
+
+    std::filesystem::path m_path;
+    std::vector<std::filesystem::path> m_files;
+    size_t m_index = 0;
+    std::filesystem::file_time_type m_lastWriteTime{};
+    std::chrono::steady_clock::time_point m_lastPollTime{};
+};

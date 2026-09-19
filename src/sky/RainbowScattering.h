@@ -10,8 +10,7 @@
 // population, and broadens each radius by the finite solar disk and its own
 // Airy scale. Entries use the same normalized Mueller convention as
 // the atmospheric Mie table: integral(F11 dOmega) = 4*pi.
-struct RainbowScatteringParams
-{
+struct RainbowScatteringParams {
     double effectiveRadiusMicrometers = 500.0;
     double effectiveVariance = 0.08;
     double solarAngularRadiusRadians = 0.00465;

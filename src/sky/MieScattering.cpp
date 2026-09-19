@@ -13,66 +13,63 @@
 // samples, so cost here is irrelevant (a few hundred thousand term-evaluations
 // at startup).
 
-namespace
-{
-constexpr double kPi = std::numbers::pi_v<double>;
-using Complex = std::complex<double>;
+namespace {
+    constexpr double kPi = std::numbers::pi_v<double>;
+    using Complex = std::complex<double>;
 
-// Number of Mie terms to sum (Wiscombe 1980 convergence criterion) plus a
-// small safety margin.
-int MieTermCount(double x)
-{
-    const int n = static_cast<int>(x + 4.0 * std::cbrt(std::max(x, 1e-8)) + 2.0);
-    return n + 2;
-}
-
-// Single-particle Mie coefficients a_n, b_n for size parameter x and relative
-// (complex) refractive index m. The logarithmic derivative D_n(mx) is built by
-// downward recurrence (stable); the real-argument Riccati–Bessel functions
-// psi_n / chi_n by upward recurrence.
-void MieCoefficients(double x, Complex m, std::vector<Complex>& a, std::vector<Complex>& b)
-{
-    const int nmax = MieTermCount(x);
-    const Complex mx = m * x;
-
-    // Downward recurrence for D_n(mx): D_{n-1} = n/mx - 1/(D_n + n/mx).
-    const int nstart = nmax + 15;
-    std::vector<Complex> D(static_cast<size_t>(nstart) + 1u, Complex(0.0, 0.0));
-    for (int n = nstart; n > 0; --n)
+    // Number of Mie terms to sum (Wiscombe 1980 convergence criterion) plus a
+    // small safety margin.
+    int MieTermCount(double x)
     {
-        const Complex nOverMx = Complex(static_cast<double>(n), 0.0) / mx;
-        D[static_cast<size_t>(n) - 1u] = nOverMx - Complex(1.0, 0.0) / (D[static_cast<size_t>(n)] + nOverMx);
+        const int n = static_cast<int>(x + 4.0 * std::cbrt(std::max(x, 1e-8)) + 2.0);
+        return n + 2;
     }
 
-    a.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
-    b.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
-
-    // Riccati–Bessel seeds: psi_{-1}=cos x, psi_0=sin x; chi_{-1}=-sin x, chi_0=cos x.
-    double psiPrev = std::cos(x);
-    double psi = std::sin(x);
-    double chiPrev = -std::sin(x);
-    double chi = std::cos(x);
-
-    for (int n : std::views::iota(1, nmax + 1))
+    // Single-particle Mie coefficients a_n, b_n for size parameter x and relative
+    // (complex) refractive index m. The logarithmic derivative D_n(mx) is built by
+    // downward recurrence (stable); the real-argument Riccati–Bessel functions
+    // psi_n / chi_n by upward recurrence.
+    void MieCoefficients(double x, Complex m, std::vector<Complex>& a, std::vector<Complex>& b)
     {
-        const double dn = static_cast<double>(n);
-        const double psiN = (2.0 * dn - 1.0) / x * psi - psiPrev;
-        const double chiN = (2.0 * dn - 1.0) / x * chi - chiPrev;
-        const Complex ksiN(psiN, -chiN);    // ksi_n = psi_n - i chi_n
-        const Complex ksiPrev(psiPrev, -chiPrev);
+        const int nmax = MieTermCount(x);
+        const Complex mx = m * x;
 
-        const Complex Dn = D[static_cast<size_t>(n)];
-        const Complex ta = Dn / m + Complex(dn / x, 0.0);
-        a[static_cast<size_t>(n)] = (ta * psiN - psiPrev) / (ta * ksiN - ksiPrev);
-        const Complex tb = Dn * m + Complex(dn / x, 0.0);
-        b[static_cast<size_t>(n)] = (tb * psiN - psiPrev) / (tb * ksiN - ksiPrev);
+        // Downward recurrence for D_n(mx): D_{n-1} = n/mx - 1/(D_n + n/mx).
+        const int nstart = nmax + 15;
+        std::vector<Complex> D(static_cast<size_t>(nstart) + 1u, Complex(0.0, 0.0));
+        for (int n = nstart; n > 0; --n) {
+            const Complex nOverMx = Complex(static_cast<double>(n), 0.0) / mx;
+            D[static_cast<size_t>(n) - 1u] = nOverMx - Complex(1.0, 0.0) / (D[static_cast<size_t>(n)] + nOverMx);
+        }
 
-        psiPrev = psi;
-        psi = psiN;
-        chiPrev = chi;
-        chi = chiN;
+        a.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
+        b.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
+
+        // Riccati–Bessel seeds: psi_{-1}=cos x, psi_0=sin x; chi_{-1}=-sin x, chi_0=cos x.
+        double psiPrev = std::cos(x);
+        double psi = std::sin(x);
+        double chiPrev = -std::sin(x);
+        double chi = std::cos(x);
+
+        for (int n : std::views::iota(1, nmax + 1)) {
+            const double dn = static_cast<double>(n);
+            const double psiN = (2.0 * dn - 1.0) / x * psi - psiPrev;
+            const double chiN = (2.0 * dn - 1.0) / x * chi - chiPrev;
+            const Complex ksiN(psiN, -chiN); // ksi_n = psi_n - i chi_n
+            const Complex ksiPrev(psiPrev, -chiPrev);
+
+            const Complex Dn = D[static_cast<size_t>(n)];
+            const Complex ta = Dn / m + Complex(dn / x, 0.0);
+            a[static_cast<size_t>(n)] = (ta * psiN - psiPrev) / (ta * ksiN - ksiPrev);
+            const Complex tb = Dn * m + Complex(dn / x, 0.0);
+            b[static_cast<size_t>(n)] = (tb * psiN - psiPrev) / (tb * ksiN - ksiPrev);
+
+            psiPrev = psi;
+            psi = psiN;
+            chiPrev = chi;
+            chi = chiN;
+        }
     }
-}
 } // namespace
 
 std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& params)
@@ -83,8 +80,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
     // Cache scattering-angle cosines / sines.
     std::vector<double> mu(static_cast<size_t>(bins));
     std::vector<double> sinTheta(static_cast<size_t>(bins));
-    for (int i : std::views::iota(0, bins))
-    {
+    for (int i : std::views::iota(0, bins)) {
         const double theta = kPi * static_cast<double>(i) / static_cast<double>(bins - 1);
         mu[static_cast<size_t>(i)] = std::cos(theta);
         sinTheta[static_cast<size_t>(i)] = std::sin(theta);
@@ -105,8 +101,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
     // eliminating the manual band*bins+i index arithmetic below.
     auto tableView = std::mdspan(table.data(), static_cast<size_t>(kSpectralBandCount), static_cast<size_t>(bins));
 
-    for (int band : std::views::iota(0, kSpectralBandCount))
-    {
+    for (int band : std::views::iota(0, kSpectralBandCount)) {
         const double lambdaUm = (kSpectralLambdaMinNm + kSpectralLambdaStepNm * band) * 1e-3;
         const double k = 2.0 * kPi / lambdaUm;
 
@@ -115,13 +110,11 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
         std::vector<double> p33(static_cast<size_t>(bins), 0.0);
         std::vector<double> p34(static_cast<size_t>(bins), 0.0);
 
-        for (int rs : std::views::iota(0, radiusSamples))
-        {
+        for (int rs : std::views::iota(0, radiusSamples)) {
             const double lnR = lnMin + dLn * static_cast<double>(rs);
             const double z = (lnR - lnRg) / lnSigma;
             const double weight = std::exp(-0.5 * z * z) * dLn;
-            if (weight < 1e-12)
-            {
+            if (weight < 1e-12) {
                 continue;
             }
 
@@ -132,8 +125,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
             MieCoefficients(x, m, a, b);
             const int nmax = static_cast<int>(a.size()) - 1;
 
-            for (int i : std::views::iota(0, bins))
-            {
+            for (int i : std::views::iota(0, bins)) {
                 const double u = mu[static_cast<size_t>(i)];
 
                 // Angular functions: pi_0 = 0, pi_1 = 1, tau_1 = mu.
@@ -142,8 +134,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
                 Complex s1(0.0, 0.0);
                 Complex s2(0.0, 0.0);
 
-                for (int n : std::views::iota(1, nmax + 1))
-                {
+                for (int n : std::views::iota(1, nmax + 1)) {
                     const double dn = static_cast<double>(n);
                     const double tauCur = dn * u * piCur - (dn + 1.0) * piPrev;
                     const double fn = (2.0 * dn + 1.0) / (dn * (dn + 1.0));
@@ -179,8 +170,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const MieAerosolParams& pa
             });
         const double norm = std::max(0.5 * integral, 1e-20);
 
-        for (int i : std::views::iota(0, bins))
-        {
+        for (int i : std::views::iota(0, bins)) {
             MieMatrixEntry& entry = tableView[band, static_cast<size_t>(i)];
             entry.f11 = static_cast<float>(p11[static_cast<size_t>(i)] / norm);
             entry.f12 = static_cast<float>(p12[static_cast<size_t>(i)] / norm);

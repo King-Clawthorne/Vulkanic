@@ -1,0 +1,17 @@
+# K&R braces: opening brace on the same line, except for function bodies.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 0
+AccessModifierOffset: -4
+NamespaceIndentation: All
+PointerAlignment: Left
+SortIncludes: Never
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true

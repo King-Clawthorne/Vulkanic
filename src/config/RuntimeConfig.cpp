@@ -1,12 +1,6 @@
-// RuntimeConfig.cpp — JSON config loader.
-//
-// Implements a tiny, dependency-free JSON parser (JsonParser) plus a set of
-// strongly-typed converters that map the parsed tree onto the
-// RuntimeConfig struct. The parser supports the subset of RFC 8259 actually
-// used by path_tracer_config.json: objects, arrays, strings (with the
-// standard escape set, no \uXXXX), doubles via std::strtod, true/false/null,
-// and arbitrary whitespace. All errors carry a human-readable context
-// string identifying the offending JSON path.
+// RuntimeConfig.cpp — config file handling. glaze reads and writes the JSON
+// straight into the RuntimeConfig structs; only Vec3 and the upper-case sky
+// constants need an explicit mapping.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -15,20 +9,16 @@
 
 #include <windows.h>
 
+#include <glaze/glaze.hpp>
+
 #include <algorithm>
 #include <array>
-#include <cctype>
-#include <charconv>
-#include <map>
 #include <format>
 #include <fstream>
-#include <limits>
+#include <print>
 #include <ranges>
 #include <stdexcept>
-#include <string_view>
 #include <system_error>
-#include <utility>
-#include <variant>
 
 // Search a fixed list of conventional locations for a runtime file
 // (config / SPIR-V / etc.). Mirrors ResolveModelFilePath() but uses wide
@@ -37,8 +27,7 @@ std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
 {
     WCHAR exePath[MAX_PATH]{};
     const DWORD pathLen = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if (pathLen == 0 || pathLen == MAX_PATH)
-    {
+    if (pathLen == 0 || pathLen == MAX_PATH) {
         throw std::runtime_error("Failed to resolve executable path.");
     }
 
@@ -49,10 +38,8 @@ std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
         std::filesystem::current_path() / fileName,
     };
 
-    for (const auto& candidate : candidatePaths)
-    {
-        if (std::filesystem::exists(candidate))
-        {
+    for (const auto& candidate : candidatePaths) {
+        if (std::filesystem::exists(candidate)) {
             return candidate;
         }
     }
@@ -66,583 +53,83 @@ std::filesystem::path ResolveRuntimeFilePath(const wchar_t* fileName)
 std::string LoadTextFile(const std::filesystem::path& filePath)
 {
     std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-    if (!file)
-    {
-        throw std::runtime_error("Failed to open text file.");
+    if (!file) {
+        throw std::runtime_error("Failed to open " + filePath.string());
     }
 
     const auto fileSize = file.tellg();
-    if (fileSize <= 0)
-    {
-        throw std::runtime_error("Text file is empty.");
+    if (fileSize <= 0) {
+        throw std::runtime_error(filePath.string() + " is empty.");
     }
 
     std::string data(static_cast<size_t>(fileSize), '\0');
     file.seekg(0, std::ios::beg);
     file.read(data.data(), static_cast<std::streamsize>(data.size()));
-    if (!file)
-    {
-        throw std::runtime_error("Failed to read text file.");
+    if (!file) {
+        throw std::runtime_error("Failed to read " + filePath.string());
     }
 
     return data;
 }
 
-namespace
-{
-// Generic JSON node. The std::variant carries the actual payload; the
-// AsXxx() helpers fail loudly with a context string when a node has the
-// wrong type, which keeps the call sites concise.
-struct JsonValue
-{
-    using Array = std::vector<JsonValue>;
-    using Object = std::map<std::string, JsonValue, std::less<>>;
-
-    std::variant<std::nullptr_t, bool, double, std::string, Array, Object> data = nullptr;
-
-    JsonValue() = default;
-    explicit JsonValue(std::nullptr_t value) : data(value) {}
-    explicit JsonValue(bool value) : data(value) {}
-    explicit JsonValue(double value) : data(value) {}
-    explicit JsonValue(std::string value) : data(std::move(value)) {}
-    explicit JsonValue(Array value) : data(std::move(value)) {}
-    explicit JsonValue(Object value) : data(std::move(value)) {}
-
-    const Object& AsObject(const std::string& context) const
-    {
-        const auto* object = std::get_if<Object>(&data);
-        if (object == nullptr)
-        {
-            throw std::runtime_error(context + " must be an object.");
-        }
-        return *object;
-    }
-
-    const Array& AsArray(const std::string& context) const
-    {
-        const auto* array = std::get_if<Array>(&data);
-        if (array == nullptr)
-        {
-            throw std::runtime_error(context + " must be an array.");
-        }
-        return *array;
-    }
-
-    const std::string& AsString(const std::string& context) const
-    {
-        const auto* stringValue = std::get_if<std::string>(&data);
-        if (stringValue == nullptr)
-        {
-            throw std::runtime_error(context + " must be a string.");
-        }
-        return *stringValue;
-    }
-
-    double AsNumber(const std::string& context) const
-    {
-        const auto* number = std::get_if<double>(&data);
-        if (number == nullptr)
-        {
-            throw std::runtime_error(context + " must be a number.");
-        }
-        return *number;
-    }
+template <>
+struct glz::meta<Vec3> {
+    static constexpr auto value = glz::array(&Vec3::x, &Vec3::y, &Vec3::z);
 };
 
-// Recursive-descent JSON parser over a borrowed std::string_view. The
-// parser is single-use: construct, call Parse(), then discard.
-class JsonParser
-{
-public:
-    explicit JsonParser(std::string_view text) : m_text(text) {}
-
-    // Parse the entire document and assert no trailing data remains.
-    JsonValue Parse()
-    {
-        JsonValue value = ParseValue();
-        SkipWhitespace();
-        if (!IsAtEnd())
-        {
-            throw std::runtime_error("Unexpected trailing characters after JSON document.");
-        }
-        return value;
-    }
-
-private:
-    // Dispatch on the first non-whitespace character to one of the typed
-    // sub-parsers. Each sub-parser leaves m_position pointing past its
-    // last consumed character.
-    JsonValue ParseValue()
-    {
-        SkipWhitespace();
-        if (IsAtEnd())
-        {
-            throw std::runtime_error("Unexpected end of JSON input.");
-        }
-
-        const char current = m_text[m_position];
-        if (current == '{')
-        {
-            return ParseObject();
-        }
-        if (current == '[')
-        {
-            return ParseArray();
-        }
-        if (current == '"')
-        {
-            return JsonValue(ParseString());
-        }
-        if (current == 't')
-        {
-            ConsumeLiteral("true");
-            return JsonValue(true);
-        }
-        if (current == 'f')
-        {
-            ConsumeLiteral("false");
-            return JsonValue(false);
-        }
-        if (current == 'n')
-        {
-            ConsumeLiteral("null");
-            return JsonValue(nullptr);
-        }
-        if (current == '-' || std::isdigit(static_cast<unsigned char>(current)))
-        {
-            return JsonValue(ParseNumber());
-        }
-
-        throw std::runtime_error("Unexpected token in JSON input.");
-    }
-
-    JsonValue ParseObject()
-    {
-        Consume('{');
-
-        JsonValue::Object object;
-        SkipWhitespace();
-        if (TryConsume('}'))
-        {
-            return JsonValue(std::move(object));
-        }
-
-        while (true)
-        {
-            SkipWhitespace();
-            if (Peek() != '"')
-            {
-                throw std::runtime_error("Expected a JSON object key.");
-            }
-
-            std::string key = ParseString();
-            SkipWhitespace();
-            Consume(':');
-            JsonValue value = ParseValue();
-
-            auto [_, inserted] = object.emplace(key, std::move(value));
-            if (!inserted)
-            {
-                throw std::runtime_error("Duplicate JSON key \"" + key + "\".");
-            }
-
-            SkipWhitespace();
-            if (TryConsume('}'))
-            {
-                break;
-            }
-            Consume(',');
-        }
-
-        return JsonValue(std::move(object));
-    }
-
-    JsonValue ParseArray()
-    {
-        Consume('[');
-
-        JsonValue::Array array;
-        SkipWhitespace();
-        if (TryConsume(']'))
-        {
-            return JsonValue(std::move(array));
-        }
-
-        while (true)
-        {
-            array.push_back(ParseValue());
-            SkipWhitespace();
-            if (TryConsume(']'))
-            {
-                break;
-            }
-            Consume(',');
-        }
-
-        return JsonValue(std::move(array));
-    }
-
-    std::string ParseString()
-    {
-        Consume('"');
-
-        std::string result;
-        while (!IsAtEnd())
-        {
-            const char current = m_text[m_position++];
-            if (current == '"')
-            {
-                return result;
-            }
-            if (current == '\\')
-            {
-                if (IsAtEnd())
-                {
-                    throw std::runtime_error("Unterminated escape sequence in JSON string.");
-                }
-
-                const char escaped = m_text[m_position++];
-                switch (escaped)
-                {
-                case '"':
-                case '\\':
-                case '/':
-                    result.push_back(escaped);
-                    break;
-                case 'b':
-                    result.push_back('\b');
-                    break;
-                case 'f':
-                    result.push_back('\f');
-                    break;
-                case 'n':
-                    result.push_back('\n');
-                    break;
-                case 'r':
-                    result.push_back('\r');
-                    break;
-                case 't':
-                    result.push_back('\t');
-                    break;
-                default:
-                    throw std::runtime_error("Unsupported JSON string escape sequence.");
-                }
-                continue;
-            }
-            if (static_cast<unsigned char>(current) < 0x20)
-            {
-                throw std::runtime_error("Control characters are not allowed in JSON strings.");
-            }
-            result.push_back(current);
-        }
-
-        throw std::runtime_error("Unterminated JSON string.");
-    }
-
-    // std::from_chars is locale-independent and does not require a
-    // null-terminated string, making it strictly more correct than strtod
-    // for parsing untrusted JSON text into a double.
-    double ParseNumber()
-    {
-        const char* const begin = m_text.data() + m_position;
-        const char* const end = m_text.data() + m_text.size();
-        double value{};
-        const auto [ptr, ec] = std::from_chars(begin, end, value);
-        if (ec != std::errc{})
-        {
-            throw std::runtime_error("Expected a JSON number.");
-        }
-        m_position = static_cast<size_t>(ptr - m_text.data());
-        return value;
-    }
-
-    void ConsumeLiteral(std::string_view literal)
-    {
-        if (m_text.substr(m_position, literal.size()) != literal)
-        {
-            throw std::runtime_error("Invalid JSON literal.");
-        }
-        m_position += literal.size();
-    }
-
-    void Consume(char expected)
-    {
-        SkipWhitespace();
-        if (IsAtEnd() || m_text[m_position] != expected)
-        {
-            throw std::runtime_error(std::string("Expected '") + expected + "' in JSON input.");
-        }
-        ++m_position;
-    }
-
-    bool TryConsume(char expected)
-    {
-        SkipWhitespace();
-        if (IsAtEnd() || m_text[m_position] != expected)
-        {
-            return false;
-        }
-        ++m_position;
-        return true;
-    }
-
-    char Peek() const
-    {
-        if (IsAtEnd())
-        {
-            return '\0';
-        }
-        return m_text[m_position];
-    }
-
-    void SkipWhitespace()
-    {
-        while (!IsAtEnd() && std::isspace(static_cast<unsigned char>(m_text[m_position])))
-        {
-            ++m_position;
-        }
-    }
-
-    bool IsAtEnd() const
-    {
-        return m_position >= m_text.size();
-    }
-
-    std::string_view m_text;
-    size_t m_position = 0;
+template <>
+struct glz::meta<SkySpectralConfig> {
+    using T = SkySpectralConfig;
+    static constexpr auto value = glz::object(
+        "BETA_R_550", &T::betaRayleigh550, "BETA_M", &T::betaMie,
+        "EARTH_R", &T::earthRadius, "ATMOS_R", &T::atmosphereRadius,
+        "SCALE_H_R", &T::scaleHeightRayleigh, "SCALE_H_M", &T::scaleHeightMie,
+        "SUN_TEMPERATURE_K", &T::sunTemperatureKelvin, "SUN_RADIANCE_550", &T::sunRadiance550,
+        "SUN_DIRECTION", &T::sunDirection, "SUN_RADIUS", &T::sunRadius, "SUN_AA", &T::sunAa,
+        "secondarySamples", &T::secondarySamples, "VIEW_STEPS", &T::viewSteps, "Samples", &T::samples,
+        "SCATTERING_ORDERS", &T::scatteringOrders, "RAYLEIGH_DEPOLARIZATION", &T::rayleighDepolarization,
+        "GROUND_ALBEDO", &T::groundAlbedo, "AEROSOL_IOR_REAL", &T::aerosolRefractiveIndexReal,
+        "AEROSOL_IOR_IMAG", &T::aerosolRefractiveIndexImag, "AEROSOL_MEAN_RADIUS_UM", &T::aerosolMeanRadiusMicrometers,
+        "AEROSOL_SIGMA", &T::aerosolSigma, "MIE_TABLE_ANGLE_BINS", &T::mieTableAngleBins);
 };
 
-std::string Quote(std::string_view value)
-{
-    return std::format("\"{}\"", value);
-}
+template <>
+struct glz::meta<SkyConfig> {
+    static constexpr auto value = glz::object("exposure", &SkyConfig::exposure, "spectralConstants", &SkyConfig::spectral);
+};
 
-const JsonValue* FindMember(const JsonValue::Object& object, std::string_view key)
-{
-    const auto iterator = object.find(key);
-    if (iterator == object.end())
+namespace {
+    void FailIf(bool failed, const char* message)
     {
-        return nullptr;
+        if (failed) throw std::runtime_error(message);
     }
-    return &iterator->second;
-}
-
-// Convert a JSON number to float, rejecting NaN/Inf and out-of-range
-// magnitudes that would silently saturate when cast.
-float ParseFloatValue(const JsonValue& value, const std::string& context)
-{
-    const double number = value.AsNumber(context);
-    if (!std::isfinite(number)
-        || number < -static_cast<double>(std::numeric_limits<float>::max())
-        || number > static_cast<double>(std::numeric_limits<float>::max()))
-    {
-        throw std::runtime_error(context + " must be a finite float.");
-    }
-    return static_cast<float>(number);
-}
-
-// Convert a JSON number to uint32_t, rejecting fractional or negative
-// inputs so the caller never has to second-guess floor/round behavior.
-uint32_t ParseUint32Value(const JsonValue& value, const std::string& context)
-{
-    const double number = value.AsNumber(context);
-    if (!std::isfinite(number) || number < 0.0 || number > static_cast<double>(std::numeric_limits<uint32_t>::max())
-        || std::floor(number) != number)
-    {
-        throw std::runtime_error(context + " must be a uint32 value.");
-    }
-    return static_cast<uint32_t>(number);
-}
-
-std::array<float, 3> ParseFloat3Value(const JsonValue& value, const std::string& context)
-{
-    const auto& array = value.AsArray(context);
-    if (array.size() != 3)
-    {
-        throw std::runtime_error(context + " must contain exactly three numeric values.");
-    }
-
-    return {
-        ParseFloatValue(array[0], context + "[0]"),
-        ParseFloatValue(array[1], context + "[1]"),
-        ParseFloatValue(array[2], context + "[2]"),
-    };
-}
-
-// Each helper leaves `target` at its default when the key is absent, so a
-// partial config still produces a valid scene.
-void ParseOptionalJsonNumber(const JsonValue::Object& object, std::string_view key, float& target)
-{
-    if (const JsonValue* value = FindMember(object, key))
-    {
-        target = ParseFloatValue(*value, Quote(key));
-    }
-}
-
-void ParseOptionalJsonUint32(const JsonValue::Object& object, std::string_view key, uint32_t& target)
-{
-    if (const JsonValue* value = FindMember(object, key))
-    {
-        target = ParseUint32Value(*value, Quote(key));
-    }
-}
-
-void ParseOptionalJsonVec3(const JsonValue::Object& object, std::string_view key, Vec3& target)
-{
-    if (const JsonValue* value = FindMember(object, key))
-    {
-        const auto parsed = ParseFloat3Value(*value, Quote(key));
-        target = {parsed[0], parsed[1], parsed[2]};
-    }
-}
-
-void ParseOptionalJsonFloat3(const JsonValue::Object& object, std::string_view key, std::array<float, 3>& target)
-{
-    if (const JsonValue* value = FindMember(object, key))
-    {
-        target = ParseFloat3Value(*value, Quote(key));
-    }
-}
-
-// Throw a validation error when `failed` is true. Lets each semantic check in
-// ParseRuntimeConfig stay a single fail-fast line that reads as the condition
-// that is NOT allowed, paired with its message.
-void FailIf(bool failed, const char* message)
-{
-    if (failed)
-    {
-        throw std::runtime_error(message);
-    }
-}
-
-// Pull the global render / camera / input / sky sections off the root
-// object. Each sub-section is optional, and within a section every field
-// is optional, so partial configs are valid.
-void ParseSections(const JsonValue::Object& root, RuntimeConfig& config)
-{
-    if (const JsonValue* renderValue = FindMember(root, "render"))
-    {
-        const auto& render = renderValue->AsObject("\"render\"");
-        ParseOptionalJsonUint32(render, "width", config.width);
-        ParseOptionalJsonUint32(render, "height", config.height);
-        ParseOptionalJsonUint32(render, "frameCount", config.frameCount);
-        if (const JsonValue* value = FindMember(render, "vsync"))
-        {
-            const bool* vsync = std::get_if<bool>(&value->data);
-            if (!vsync) throw std::runtime_error("\"vsync\" must be a boolean.");
-            config.vsync = *vsync;
-        }
-        ParseOptionalJsonUint32(render, "samplesPerPixel", config.samplesPerPixel);
-    }
-
-    if (const JsonValue* cameraValue = FindMember(root, "camera"))
-    {
-        const auto& camera = cameraValue->AsObject("\"camera\"");
-        ParseOptionalJsonVec3(camera, "initialPosition", config.initialPosition);
-        ParseOptionalJsonVec3(camera, "initialLookAt", config.initialLookAt);
-        ParseOptionalJsonNumber(camera, "fovYDegrees", config.fovYDegrees);
-        ParseOptionalJsonNumber(camera, "maxPitchDegrees", config.maxPitchDegrees);
-    }
-
-    if (const JsonValue* inputValue = FindMember(root, "input"))
-    {
-        const auto& input = inputValue->AsObject("\"input\"");
-        ParseOptionalJsonNumber(input, "mouseSensitivity", config.mouseSensitivity);
-        ParseOptionalJsonNumber(input, "keyLookSpeed", config.keyLookSpeed);
-        ParseOptionalJsonNumber(input, "polarizerRotateSpeed", config.polarizerRotateSpeed);
-    }
-
-    if (const JsonValue* skyValue = FindMember(root, "sky"))
-    {
-        const auto& sky = skyValue->AsObject("\"sky\"");
-        ParseOptionalJsonNumber(sky, "exposure", config.skyExposure);
-
-        if (const JsonValue* spectralValue = FindMember(sky, "spectralConstants"))
-        {
-            const auto& spectral = spectralValue->AsObject("\"sky.spectralConstants\"");
-            ParseOptionalJsonNumber(spectral, "BETA_R_550", config.skySpectral.betaRayleigh550);
-            ParseOptionalJsonNumber(spectral, "BETA_M", config.skySpectral.betaMie);
-            ParseOptionalJsonNumber(spectral, "EARTH_R", config.skySpectral.earthRadius);
-            ParseOptionalJsonNumber(spectral, "ATMOS_R", config.skySpectral.atmosphereRadius);
-            ParseOptionalJsonNumber(spectral, "SCALE_H_R", config.skySpectral.scaleHeightRayleigh);
-            ParseOptionalJsonNumber(spectral, "SCALE_H_M", config.skySpectral.scaleHeightMie);
-            ParseOptionalJsonNumber(spectral, "SUN_TEMPERATURE_K", config.skySpectral.sunTemperatureKelvin);
-            ParseOptionalJsonNumber(spectral, "SUN_RADIANCE_550", config.skySpectral.sunRadiance550);
-            ParseOptionalJsonFloat3(spectral, "SUN_DIRECTION", config.skySpectral.sunDirection);
-            ParseOptionalJsonNumber(spectral, "SUN_RADIUS", config.skySpectral.sunRadius);
-            ParseOptionalJsonNumber(spectral, "SUN_AA", config.skySpectral.sunAa);
-            ParseOptionalJsonUint32(spectral, "secondarySamples", config.skySpectral.secondarySamples);
-            ParseOptionalJsonUint32(spectral, "VIEW_STEPS", config.skySpectral.viewSteps);
-            ParseOptionalJsonUint32(spectral, "Samples", config.skySpectral.samples);
-            ParseOptionalJsonUint32(spectral, "SCATTERING_ORDERS", config.skySpectral.scatteringOrders);
-
-            // Polarized vector radiative transfer controls.
-            ParseOptionalJsonNumber(spectral, "RAYLEIGH_DEPOLARIZATION",
-                                    config.skySpectral.rayleighDepolarization);
-            ParseOptionalJsonNumber(spectral, "GROUND_ALBEDO", config.skySpectral.groundAlbedo);
-            ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_REAL",
-                                    config.skySpectral.aerosolRefractiveIndexReal);
-            ParseOptionalJsonNumber(spectral, "AEROSOL_IOR_IMAG",
-                                    config.skySpectral.aerosolRefractiveIndexImag);
-            ParseOptionalJsonNumber(spectral, "AEROSOL_MEAN_RADIUS_UM",
-                                    config.skySpectral.aerosolMeanRadiusMicrometers);
-            ParseOptionalJsonNumber(spectral, "AEROSOL_SIGMA", config.skySpectral.aerosolSigma);
-            ParseOptionalJsonUint32(spectral, "MIE_TABLE_ANGLE_BINS",
-                                    config.skySpectral.mieTableAngleBins);
-        }
-    }
-
-    if (const JsonValue* rainbowValue = FindMember(root, "rainbow"))
-    {
-        const auto& rainbow = rainbowValue->AsObject("\"rainbow\"");
-        ParseOptionalJsonUint32(rainbow, "enabled", config.rainbow.enabled);
-        ParseOptionalJsonVec3(rainbow, "center", config.rainbow.center);
-        ParseOptionalJsonVec3(rainbow, "radii", config.rainbow.radii);
-        ParseOptionalJsonNumber(rainbow, "edgeSoftness", config.rainbow.edgeSoftness);
-        ParseOptionalJsonNumber(rainbow, "scatteringCoefficient", config.rainbow.scatteringCoefficient);
-        ParseOptionalJsonNumber(rainbow, "extinctionCoefficient", config.rainbow.extinctionCoefficient);
-        ParseOptionalJsonNumber(rainbow, "effectiveRadiusMicrometers",
-                                config.rainbow.effectiveRadiusMicrometers);
-        ParseOptionalJsonNumber(rainbow, "effectiveVariance", config.rainbow.effectiveVariance);
-        ParseOptionalJsonUint32(rainbow, "angleBins", config.rainbow.angleBins);
-        ParseOptionalJsonUint32(rainbow, "viewSteps", config.rainbow.viewSteps);
-        ParseOptionalJsonUint32(rainbow, "includeSecondary", config.rainbow.includeSecondary);
-        ParseOptionalJsonUint32(rainbow, "scatteringOrders", config.rainbow.scatteringOrders);
-        ParseOptionalJsonUint32(rainbow, "multipleScatteringSamples", config.rainbow.multipleScatteringSamples);
-        ParseOptionalJsonUint32(rainbow, "multipleScatteringSteps", config.rainbow.multipleScatteringSteps);
-    }
-}
-
 } // namespace
 
-// Public entry point: parse, populate, then run an exhaustive set of
-// semantic checks. Throws on the first problem found rather than
-// accumulating errors; the renderer cannot meaningfully degrade past most
-// of these issues so fail-fast is the simpler contract.
+// Parse, then reject values the renderer cannot use. Unknown keys are ignored
+// and missing ones keep their defaults.
 RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
 {
     RuntimeConfig config{};
-    const JsonValue rootValue = JsonParser(std::string_view(jsonText)).Parse();
-    const auto& root = rootValue.AsObject("Root config");
+    if (const auto error = glz::read<glz::opts{.error_on_unknown_keys = false}>(config, jsonText)) {
+        throw std::runtime_error("Invalid config JSON: " + glz::format_error(error, jsonText));
+    }
 
-    ParseSections(root, config);
-
-    const SkySpectralConfig& sky = config.skySpectral;
+    const SkySpectralConfig& sky = config.sky.spectral;
     const auto& sunDir = sky.sunDirection;
 
-    FailIf(config.width == 0 || config.height == 0,
+    FailIf(config.render.width == 0 || config.render.height == 0,
            "\"width\" and \"height\" must be greater than 0.");
-    FailIf(config.frameCount == 0, "\"frameCount\" must be greater than 0.");
-    FailIf(config.samplesPerPixel == 0, "\"samplesPerPixel\" must be greater than 0.");
-    FailIf(Length(config.initialLookAt - config.initialPosition) <= 0.001f,
+    FailIf(config.render.frameCount == 0, "\"frameCount\" must be greater than 0.");
+    FailIf(config.render.samplesPerPixel == 0, "\"samplesPerPixel\" must be greater than 0.");
+    FailIf(Length(config.camera.initialLookAt - config.camera.initialPosition) <= 0.001f,
            "\"initialPosition\" and \"initialLookAt\" must not be the same.");
-    FailIf(config.fovYDegrees <= 1.0f || config.fovYDegrees >= 179.0f,
+    FailIf(config.camera.fovYDegrees <= 1.0f || config.camera.fovYDegrees >= 179.0f,
            "\"fovYDegrees\" must be between 1 and 179.");
-    FailIf(config.mouseSensitivity < 0.0f || config.keyLookSpeed < 0.0f || config.polarizerRotateSpeed < 0.0f,
+    FailIf(config.input.mouseSensitivity < 0.0f || config.input.keyLookSpeed < 0.0f || config.input.polarizerRotateSpeed < 0.0f,
            "\"mouseSensitivity\", \"keyLookSpeed\", and \"polarizerRotateSpeed\" must be non-negative.");
-    FailIf(config.maxPitchDegrees <= 0.0f || config.maxPitchDegrees >= 90.0f,
+    FailIf(config.camera.maxPitchDegrees <= 0.0f || config.camera.maxPitchDegrees >= 90.0f,
            "\"maxPitchDegrees\" must be greater than 0 and less than 90.");
-    FailIf(config.skyExposure <= 0.0f, "\"exposure\" must be greater than 0.");
+    FailIf(config.sky.exposure <= 0.0f, "\"exposure\" must be greater than 0.");
     FailIf(sky.betaRayleigh550 < 0.0f || sky.betaMie < 0.0f,
            "Sky scattering coefficients must be non-negative.");
     FailIf(sky.earthRadius <= 0.0f || sky.atmosphereRadius <= 0.0f || sky.atmosphereRadius <= sky.earthRadius,
@@ -675,16 +162,149 @@ RuntimeConfig ParseRuntimeConfig(const std::string& jsonText)
            "Rainbow radii must all be greater than 0.");
     FailIf(rainbow.edgeSoftness < 0.0f || rainbow.edgeSoftness >= 1.0f,
            "Rainbow edgeSoftness must be in [0, 1).");
-    FailIf(rainbow.scatteringCoefficient < 0.0f || rainbow.extinctionCoefficient < 0.0f
-               || rainbow.scatteringCoefficient > rainbow.extinctionCoefficient,
+    FailIf(rainbow.scatteringCoefficient < 0.0f || rainbow.extinctionCoefficient < 0.0f || rainbow.scatteringCoefficient > rainbow.extinctionCoefficient,
            "Rainbow coefficients must satisfy 0 <= scattering <= extinction.");
     FailIf(rainbow.effectiveRadiusMicrometers <= 0.0f || rainbow.effectiveVariance < 0.0f,
            "Rainbow effective radius must be positive and variance non-negative.");
     FailIf(rainbow.angleBins < 16 || rainbow.viewSteps == 0,
            "Rainbow angleBins must be at least 16 and viewSteps greater than 0.");
-    FailIf(rainbow.scatteringOrders < 1 || rainbow.scatteringOrders > 4
-               || rainbow.multipleScatteringSamples < 1 || rainbow.multipleScatteringSamples > 64
-               || rainbow.multipleScatteringSteps < 1 || rainbow.multipleScatteringSteps > 64,
+    FailIf(rainbow.scatteringOrders < 1 || rainbow.scatteringOrders > 4 || rainbow.multipleScatteringSamples < 1 || rainbow.multipleScatteringSamples > 64 || rainbow.multipleScatteringSteps < 1 || rainbow.multipleScatteringSteps > 64,
            "Rain orders must be 1-4; multiple scattering samples and steps must be 1-64.");
     return config;
+}
+
+std::string SerializeRuntimeConfig(const RuntimeConfig& config)
+{
+    std::string json;
+    // Pretty-printed, but with vectors kept on one line like the hand-written file.
+    struct Opts : glz::opts {
+        bool new_lines_in_arrays = false;
+    };
+    if (glz::write<Opts{{.prettify = true}}>(config, json)) {
+        throw std::runtime_error("Failed to serialize config.");
+    }
+    return json + "\n";
+}
+
+namespace {
+    constexpr const wchar_t* kConfigFileName = L"path_tracer_config.json";
+
+    std::filesystem::file_time_type LastWriteTime(const std::filesystem::path& path)
+    {
+        std::error_code errorCode;
+        const auto time = std::filesystem::last_write_time(path, errorCode);
+        if (errorCode) throw std::runtime_error("Failed to read config file timestamp.");
+        return time;
+    }
+} // namespace
+
+RuntimeConfig ConfigFile::Read()
+{
+    RuntimeConfig config = ParseRuntimeConfig(LoadTextFile(m_path));
+    m_lastWriteTime = LastWriteTime(m_path);
+    return config;
+}
+
+RuntimeConfig ConfigFile::Load()
+{
+    // Prefer the editable source-tree config when launched from the repo.
+    // The build also copies a deployment config beside the executable,
+    // but choosing that copy first makes source edits appear to require a
+    // rebuild because the hot-reloader watches the copied file instead.
+    const auto cwd = std::filesystem::current_path();
+    for (const auto& candidate : {cwd / L"config" / kConfigFileName, cwd.parent_path() / L"config" / kConfigFileName}) {
+        if (std::filesystem::exists(candidate)) {
+            m_path = std::filesystem::absolute(candidate).lexically_normal();
+            break;
+        }
+    }
+    if (m_path.empty()) m_path = ResolveRuntimeFilePath(kConfigFileName);
+    if (m_path.empty()) throw std::runtime_error("Failed to locate path_tracer_config.json.");
+
+    DiscoverFiles();
+    RuntimeConfig config = Read();
+    std::println("[Config] Loaded {}", m_path.string());
+    std::println("[Config] F2 cycles {} discovered config file(s); F5 saves GUI settings.", m_files.size());
+    return config;
+}
+
+void ConfigFile::DiscoverFiles()
+{
+    m_files.clear();
+    const auto cwd = std::filesystem::current_path();
+    for (const auto& directory : {m_path.parent_path(), cwd / L"config", cwd.parent_path() / L"config"}) {
+        std::error_code errorCode;
+        if (!std::filesystem::is_directory(directory, errorCode)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(directory, errorCode)) {
+            if (errorCode) break;
+            if (!entry.is_regular_file() || entry.path().extension() != L".json") continue;
+            const auto path = std::filesystem::absolute(entry.path()).lexically_normal();
+            if (std::ranges::find(m_files, path) == m_files.end()) m_files.push_back(path);
+        }
+    }
+    std::ranges::sort(m_files);
+    if (std::ranges::find(m_files, m_path) == m_files.end()) m_files.push_back(m_path);
+    m_index = static_cast<size_t>(std::ranges::find(m_files, m_path) - m_files.begin());
+}
+
+std::optional<RuntimeConfig> ConfigFile::ReloadIfChanged()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (m_path.empty() || now - m_lastPollTime < std::chrono::milliseconds(250)) return std::nullopt;
+    m_lastPollTime = now;
+
+    std::error_code errorCode;
+    const auto currentWriteTime = std::filesystem::last_write_time(m_path, errorCode);
+    if (errorCode || currentWriteTime == m_lastWriteTime) return std::nullopt;
+
+    // Record the new time even on failure so a broken edit is reported once,
+    // not every poll.
+    m_lastWriteTime = currentWriteTime;
+    try {
+        RuntimeConfig config = Read();
+        std::println("[Config] Reloaded {}", m_path.string());
+        return config;
+    } catch (const std::exception& error) {
+        std::println(stderr, "[Config] Reload failed: {}", error.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<RuntimeConfig> ConfigFile::CycleNext()
+{
+    DiscoverFiles();
+    if (m_files.size() < 2) {
+        std::println("[Config] No alternate JSON config files found.");
+        return std::nullopt;
+    }
+    const size_t oldIndex = m_index;
+    const std::filesystem::path oldPath = m_path;
+    m_index = (m_index + 1) % m_files.size();
+    m_path = m_files[m_index];
+    try {
+        RuntimeConfig config = Read();
+        std::println("[Config] Switched to {}", m_path.string());
+        return config;
+    } catch (const std::exception& error) {
+        m_index = oldIndex;
+        m_path = oldPath;
+        std::println(stderr, "[Config] Failed to switch config: {}", error.what());
+        return std::nullopt;
+    }
+}
+
+void ConfigFile::Save(const RuntimeConfig& config)
+{
+    try {
+        std::ofstream file(m_path, std::ios::binary | std::ios::trunc);
+        if (!file) throw std::runtime_error("Failed to open active config for saving.");
+        const std::string json = SerializeRuntimeConfig(config);
+        file.write(json.data(), static_cast<std::streamsize>(json.size()));
+        file.close();
+        if (!file) throw std::runtime_error("Failed to save active config.");
+        m_lastWriteTime = LastWriteTime(m_path);
+        std::println("[Config] Saved {}", m_path.string());
+    } catch (const std::exception& error) {
+        std::println(stderr, "[Config] Save failed: {}", error.what());
+    }
 }

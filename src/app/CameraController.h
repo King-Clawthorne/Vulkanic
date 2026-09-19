@@ -1,7 +1,7 @@
 #pragma once
 
 // CameraController — owns the look-only camera and the polarization-filter
-// analyzer state, and translates raw Win32 keyboard / mouse input into them.
+// analyzer state, and translates GLFW keyboard / mouse input into them.
 //
 // The sky is directional, so the camera never moves positionally; it only
 // rotates (yaw/pitch) plus an optional R reset. The polarizer state (enabled,
@@ -10,14 +10,11 @@
 // resulting camera basis and polarizer parameters when it builds push
 // constants; it owns no camera/input state of its own.
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 #include "config/RuntimeConfig.h"
 
-class CameraController
-{
+struct GLFWwindow;
+
+class CameraController {
 public:
     // Snap the camera to the config's initialPosition / initialLookAt and
     // recompute yaw/pitch. Safe to call before the window exists.
@@ -28,8 +25,8 @@ public:
     void ClampPitch(const RuntimeConfig& config);
 
     // Integrate look + polarizer input over deltaSeconds. Input is ignored
-    // unless `window` is the foreground window.
-    void Update(double deltaSeconds, HWND window, const RuntimeConfig& config);
+    // unless `window` has focus.
+    void Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config);
 
     [[nodiscard]] Vec3 Position() const { return m_position; }
     [[nodiscard]] Vec3 Forward() const;
@@ -43,7 +40,7 @@ public:
     }
 
 private:
-    void UpdateMouseLook(HWND window, const RuntimeConfig& config);
+    void UpdateMouseLook(GLFWwindow* window, const RuntimeConfig& config);
 
     Vec3 m_position{};
     float m_yaw = 0.0f;
@@ -51,7 +48,8 @@ private:
 
     bool m_resetKeyDown = false;
     bool m_mouseLookActive = false;
-    POINT m_lastMousePosition{};
+    double m_lastMouseX = 0.0;
+    double m_lastMouseY = 0.0;
 
     // Camera polarization filter. P toggles it on/off; C switches between a
     // linear analyzer and an elliptical one. In linear mode [ and ] rotate the

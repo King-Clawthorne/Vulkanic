@@ -4,94 +4,50 @@ project(vulkan_path_tracer)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(MSVC)
-    # CMake does not yet expose CXX26 as a strict MSVC dialect, but its
-    # non-strict fallback selects MSVC's C++26-capable /std:c++latest mode.
-    set(CMAKE_CXX_STANDARD_REQUIRED OFF)
-
-    foreach(flag_var
-            CMAKE_C_FLAGS_DEBUG
-            CMAKE_CXX_FLAGS_DEBUG
-            CMAKE_C_FLAGS_RELWITHDEBINFO
-            CMAKE_CXX_FLAGS_RELWITHDEBINFO)
-        if(DEFINED ${flag_var})
-            string(REPLACE "/Zi" "/Z7" ${flag_var} "${${flag_var}}")
-        endif()
-    endforeach()
-else()
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-endif()
-
-find_program(SCCACHE_EXECUTABLE NAMES sccache)
-if(SCCACHE_EXECUTABLE)
-    if(NOT DEFINED CMAKE_C_COMPILER_LAUNCHER)
-        set(CMAKE_C_COMPILER_LAUNCHER "${SCCACHE_EXECUTABLE}" CACHE FILEPATH "C compiler launcher")
-    endif()
-    if(NOT DEFINED CMAKE_CXX_COMPILER_LAUNCHER)
-        set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_EXECUTABLE}" CACHE FILEPATH "C++ compiler launcher")
-    endif()
-endif()
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
 
 find_package(Vulkan REQUIRED)
 find_program(GLSLC_EXECUTABLE NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
 
 include(FetchContent)
-FetchContent_Declare(
-        vk_bootstrap
-        GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git
-        GIT_TAG v1.3.302)
-FetchContent_Declare(
-        vma
-        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-        GIT_TAG v3.1.0)
-FetchContent_Declare(
-        imgui
-        GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG v1.92.9)
-FetchContent_MakeAvailable(vk_bootstrap vma imgui)
+FetchContent_Declare(vk_bootstrap GIT_REPOSITORY https://github.com/charles-lunarg/vk-bootstrap.git GIT_TAG v1.3.302)
+# VMA-Hpp bundles the matching VulkanMemoryAllocator as a submodule.
+FetchContent_Declare(vma_hpp GIT_REPOSITORY https://github.com/YaaZ/VulkanMemoryAllocator-Hpp.git GIT_TAG v3.3.0+3 GIT_SHALLOW TRUE)
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.92.9)
+FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/glfw/glfw.git GIT_TAG 3.4)
+FetchContent_Declare(glaze GIT_REPOSITORY https://github.com/stephenberry/glaze.git GIT_TAG v8.4.0 GIT_SHALLOW TRUE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(spirv_reflect GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Reflect.git GIT_TAG vulkan-sdk-1.4.321.0 GIT_SHALLOW TRUE)
+set(SPIRV_REFLECT_EXECUTABLE OFF CACHE BOOL "" FORCE)
+set(SPIRV_REFLECT_INSTALL OFF CACHE BOOL "" FORCE)
+set(SPIRV_REFLECT_STATIC_LIB ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(vk_bootstrap vma_hpp imgui glfw glaze spirv_reflect)
 
-add_library(imgui STATIC
-        ${imgui_SOURCE_DIR}/imgui.cpp
-        ${imgui_SOURCE_DIR}/imgui_draw.cpp
-        ${imgui_SOURCE_DIR}/imgui_tables.cpp
-        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
+set(IMGUI_SOURCES imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp
+        backends/imgui_impl_glfw.cpp backends/imgui_impl_vulkan.cpp)
+list(TRANSFORM IMGUI_SOURCES PREPEND "${imgui_SOURCE_DIR}/")
+add_library(imgui STATIC ${IMGUI_SOURCES})
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
+target_link_libraries(imgui PUBLIC Vulkan::Vulkan glfw)
 
-set(SHADER_SOURCES
-        shaders/path_tracer.comp
-        shaders/post_process.comp)
-
-set(SHADER_SHARED_DEPENDENCIES
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/path_tracer_common.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow.comp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/rainbow_multiple.glsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ground_lighting.glsl")
+set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/$<CONFIG>")
+file(GLOB SHADER_DEPENDENCIES CONFIGURE_DEPENDS "${SHADER_DIR}/*.comp" "${SHADER_DIR}/*.glsl")
 
 set(SHADER_SPV_OUTPUTS)
-foreach(SHADER_SOURCE IN LISTS SHADER_SOURCES)
-    set(SHADER_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_SOURCE}")
-    get_filename_component(SHADER_SOURCE_NAME "${SHADER_SOURCE}" NAME)
-    # Separate configurations so multi-config builds never reuse Debug shaders
-    # in Release (or vice versa).
-    set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>/${SHADER_SOURCE_NAME}.spv")
-
+foreach(SHADER IN ITEMS path_tracer.comp post_process.comp)
+    set(SHADER_OUTPUT "${SHADER_OUT_DIR}/${SHADER}.spv")
     add_custom_command(
             OUTPUT "${SHADER_OUTPUT}"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>"
-            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2
-            "$<IF:$<CONFIG:Debug>,-O0,-O>" "$<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:-g>"
-            -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
-            -o "${SHADER_OUTPUT}" "${SHADER_INPUT}"
-            DEPENDS "${SHADER_INPUT}" ${SHADER_SHARED_DEPENDENCIES}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUT_DIR}"
+            COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.4 -O
+            -I "${SHADER_DIR}" -o "${SHADER_OUTPUT}" "${SHADER_DIR}/${SHADER}"
+            DEPENDS ${SHADER_DEPENDENCIES}
             VERBATIM COMMAND_EXPAND_LISTS)
-
     list(APPEND SHADER_SPV_OUTPUTS "${SHADER_OUTPUT}")
 endforeach()
-
 add_custom_target(vulkan_shader ALL DEPENDS ${SHADER_SPV_OUTPUTS})
 
 add_executable(Vulkanic
@@ -103,30 +59,9 @@ add_executable(Vulkanic
         src/renderer/VmaUsage.cpp
         src/renderer/VulkanPathTracer.cpp)
 target_include_directories(Vulkanic PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator imgui)
-
-# A POST_BUILD copy alone goes stale when only GLSL changes: shader rebuilds
-# do not require relinking the executable. Synchronize on every target build.
-add_custom_target(vulkan_runtime_shaders
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Vulkanic>"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${SHADER_SPV_OUTPUTS} "$<TARGET_FILE_DIR:Vulkanic>"
-        DEPENDS vulkan_shader
-        VERBATIM COMMAND_EXPAND_LISTS)
-add_dependencies(Vulkanic vulkan_runtime_shaders)
+target_link_libraries(Vulkanic PRIVATE Vulkan::Vulkan vk-bootstrap::vk-bootstrap GPUOpen::VulkanMemoryAllocator VulkanMemoryAllocator-Hpp::VulkanMemoryAllocator-Hpp imgui glfw glaze::glaze spirv-reflect-static)
+add_dependencies(Vulkanic vulkan_shader)
 
 add_custom_command(TARGET Vulkanic POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json"
-        "$<TARGET_FILE_DIR:Vulkanic>/path_tracer_config.json")
-
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(VulkanicRainScatteringTests tests/RainScatteringTests.cpp)
-    target_include_directories(VulkanicRainScatteringTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    add_test(NAME rain_scattering_slider COMMAND VulkanicRainScatteringTests)
-    add_executable(VulkanicRainMultipleTests tests/RainMultipleTests.cpp
-        src/config/RuntimeConfig.cpp src/sky/RainbowScattering.cpp)
-    target_include_directories(VulkanicRainMultipleTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    add_test(NAME rain_multiple COMMAND VulkanicRainMultipleTests)
-endif()
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/path_tracer_config.json" "$<TARGET_FILE_DIR:Vulkanic>")

@@ -1,28 +1,8 @@
-// VulkanPathTracer.cpp — full Vulkan + Win32 implementation of the renderer.
+// VulkanPathTracer.cpp — the renderer: GLFW window, Vulkan setup, and the frame loop.
 //
-// File layout (search the SECTION banners below):
-//   * helpers          — small utilities (error wrappers, math types,
-//                        buffer/descriptor structs).
-//   * window procedure — Win32 input plumbing for the camera controls.
-//   * Vulkan app       — the VulkanApp class: device setup, swapchain,
-//                        scene/Mie buffer upload, compute pipeline, the
-//                        render loop, and teardown.
-//
-// This is a polarized-sky simulator with no scene geometry: one compute pass
-// evaluates sky radiance and another models the camera/display. High-level flow when
-// RunVulkanPathTracer() is called:
-//   1. Read path_tracer_config.json.
-//   2. Create a Win32 window, Vulkan instance, surface, device, queues.
-//   3. Upload the sky uniform buffer and bake the Lorenz–Mie SSBO.
-//   4. Create the swapchain (storage-image capable), descriptor sets, and the
-//      compute pipeline from path_tracer.comp.
-//   5. Drive the message loop: each frame integrates camera input and
-//      dispatches transport into persistent HDR accumulation, then camera
-//      post-processing into the swapchain image for presentation.
-
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#define VK_USE_PLATFORM_WIN32_KHR
+// A polarized-sky simulator with no scene geometry. Each frame one compute pass
+// accumulates sky radiance into an HDR buffer, a second models the camera and
+// display into the swapchain image, and Dear ImGui draws the control panel on top.
 
 #include "VulkanPathTracer.h"
 
@@ -31,14 +11,20 @@
 #include "sky/MieScattering.h"
 #include "sky/RainbowScattering.h"
 
-#include <windows.h>
 #include <vulkan/vulkan_raii.hpp>
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
 
 #include <VkBootstrap.h>
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
-#include <imgui_impl_win32.h>
-#include <vk_mem_alloc.h>
+#include <imgui_impl_glfw.h>
+// VMA-Hpp targets a newer vulkan-hpp than SDK 1.4.321, which lacks this macro.
+#ifndef VULKAN_HPP_DISPATCH_LOADER_STATIC_TYPE
+#define VULKAN_HPP_DISPATCH_LOADER_STATIC_TYPE VULKAN_HPP_NAMESPACE::detail::DispatchLoaderStatic
+#endif
+#include <vk_mem_alloc.hpp>
+#include <spirv_reflect.h>
 
 #include <array>
 #include <algorithm>
@@ -51,115 +37,33 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <iomanip>
+#include <map>
+#include <memory>
 #include <optional>
 #include <ranges>
-#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
+constexpr std::array kShaderFiles{L"path_tracer.comp.spv", L"post_process.comp.spv"};
 
-// =====================================================================
-// SECTION: helpers
-//
-// Cross-cutting utilities used by the rest of the file: error reporting
-// wrappers around the Win32 BOOL / Vulkan VkResult conventions, SPIR-V
-// blob loading, alignment math, and the small POD structs that describe
-// queue families, swapchain support, GPU buffers, and acceleration
-// structures. Also defines the std140-friendly upload structs (SceneData,
-// InstanceData, MaterialData) shared with the shaders — the static_assert
-// lines lock the layouts so any accidental field shuffle fails the build.
-// =====================================================================
-
-// Throw a std::runtime_error on a failed Win32 BOOL return so call sites
-// can treat any non-zero result as success without nested if-blocks.
-static void ThrowIfFalse(BOOL condition, const char* message)
+static std::string LoadSpirv(const wchar_t* fileName)
 {
-    if (!condition)
-    {
-        throw std::runtime_error(message);
-    }
+    const auto path = ResolveRuntimeFilePath(fileName);
+    if (path.empty()) throw std::runtime_error("Failed to find SPIR-V shader.");
+    return LoadTextFile(path);
 }
 
-// Map any non-success VkResult to a std::runtime_error tagged with the
-// numeric result code, so the user sees both the operation that failed
-// and the Vulkan-level reason.
-static void ThrowVk(VkResult result, const char* message)
-{
-    if (result != VK_SUCCESS)
-    {
-        throw std::runtime_error(std::format("{} (VkResult={})", message, static_cast<int>(result)));
-    }
-}
-
-// Load a SPIR-V module (or any binary blob) from disk into a std::vector.
-// Resolution mirrors the runtime config: search exe dir → exe parent →
-// CWD; first hit wins. The file is opened in binary mode so the size from
-// tellg() matches the actual byte count.
-static std::vector<char> LoadBinaryFile(const wchar_t* fileName)
-{
-    const auto shaderPath = ResolveRuntimeFilePath(fileName);
-    if (shaderPath.empty())
-    {
-        throw std::runtime_error("Failed to open SPIR-V shader.");
-    }
-
-    std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
-    if (!file)
-    {
-        throw std::runtime_error("Failed to open SPIR-V shader.");
-    }
-    const auto fileSize = file.tellg();
-    if (fileSize <= 0)
-    {
-        throw std::runtime_error("SPIR-V shader is empty.");
-    }
-
-    std::vector<char> data(static_cast<size_t>(fileSize));
-    file.seekg(0, std::ios::beg);
-    file.read(data.data(), static_cast<std::streamsize>(data.size()));
-    if (!file)
-    {
-        throw std::runtime_error("Failed to read SPIR-V shader.");
-    }
-
-    return data;
-}
-
-// Indices of the queue families this app needs. Optional because they're
-// discovered one at a time during physical-device selection.
-struct QueueFamilyIndices
-{
-    std::optional<uint32_t> graphicsFamily;
-    std::optional<uint32_t> presentFamily;
-
-    bool IsComplete() const
-    {
-        return graphicsFamily.has_value() && presentFamily.has_value();
-    }
+// A VMA buffer and its memory. Members are destroyed in reverse order, so the
+// buffer is released before its allocation.
+struct GpuBuffer {
+    vma::UniqueAllocation allocation;
+    vma::UniqueBuffer buffer;
 };
 
-// Generic GPU buffer + its VMA allocation. The allocation is created
-// persistently mapped, so `mapped` points at host-visible memory for the
-// buffer's lifetime and uploads are a plain memcpy + flush.
-struct BufferAllocation
-{
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VmaAllocation allocation = VK_NULL_HANDLE;
-    void* mapped = nullptr;
-    VkDeviceSize size = 0;
-};
-
-// Sky / scene uniforms uploaded to the compute pipeline.
-//
-// Each vec4 packs multiple scalars together to keep the std140 layout
-// compact and to match the shader-side struct one-for-one. The static
-// assertion below pins the size so any future field reshuffle that breaks
-// alignment fails to compile rather than corrupting the GPU view of the data.
-struct alignas(16) SceneData
-{
+// Sky uniforms. Layout mirrors the shader's std140 block; the static_assert
+// catches accidental reshuffles.
+struct alignas(16) SceneData {
     // x = Rayleigh extinction at 550 nm, y = Mie extinction,
     // z = solar temperature (K), w = solar radiance at 550 nm.
     float skySpectralParams[4];
@@ -178,8 +82,7 @@ struct alignas(16) SceneData
 
 static_assert(sizeof(SceneData) == 352, "Scene data layout must stay 16-byte aligned.");
 
-struct PushConstants
-{
+struct PushConstants {
     float cameraPositionFrame[4];
     float cameraForwardSamples[4];
     float cameraRightBounces[4];
@@ -193,250 +96,86 @@ struct PushConstants
 
 static_assert(sizeof(PushConstants) == 104, "Push constant layout must match the shader.");
 
-// Pack a 3-vector plus a trailing scalar into a std140 vec4 slot (float[4]).
-// The two overloads cover the project's two 3-component types so the Build*
-// functions read as one xyz+w line per slot instead of four scalar writes.
-static void PackVec4(float (&slot)[4], const std::array<float, 3>& xyz, float w)
-{
-    slot[0] = xyz[0];
-    slot[1] = xyz[1];
-    slot[2] = xyz[2];
-    slot[3] = w;
-}
-
-static void PackVec4(float (&slot)[4], const Vec3& xyz, float w)
-{
-    slot[0] = xyz.x;
-    slot[1] = xyz.y;
-    slot[2] = xyz.z;
-    slot[3] = w;
-}
-
-// Serialize every runtime-controlled field so F5 writes a complete,
-// independently loadable config rather than a lossy GUI-only patch.
-static std::string SerializeRuntimeConfig(const RuntimeConfig& c)
-{
-    const SkySpectralConfig& s = c.skySpectral;
-    const RainbowConfig& r = c.rainbow;
-    std::ostringstream out;
-    out << std::setprecision(9) << std::boolalpha;
-    out << "{\n  \"render\": {\n"
-        << "    \"width\": " << c.width << ",\n    \"height\": " << c.height
-        << ",\n    \"frameCount\": " << c.frameCount << ",\n    \"samplesPerPixel\": " << c.samplesPerPixel
-        << ",\n    \"vsync\": " << c.vsync
-        << "\n  },\n  \"camera\": {\n"
-        << "    \"initialPosition\": [" << c.initialPosition.x << ", " << c.initialPosition.y << ", " << c.initialPosition.z << "],\n"
-        << "    \"initialLookAt\": [" << c.initialLookAt.x << ", " << c.initialLookAt.y << ", " << c.initialLookAt.z << "],\n"
-        << "    \"fovYDegrees\": " << c.fovYDegrees << ",\n    \"maxPitchDegrees\": " << c.maxPitchDegrees
-        << "\n  },\n  \"input\": {\n"
-        << "    \"mouseSensitivity\": " << c.mouseSensitivity << ",\n    \"keyLookSpeed\": " << c.keyLookSpeed
-        << ",\n    \"polarizerRotateSpeed\": " << c.polarizerRotateSpeed
-        << "\n  },\n  \"rainbow\": {\n"
-        << "    \"enabled\": " << r.enabled << ",\n    \"center\": [" << r.center.x << ", " << r.center.y << ", " << r.center.z << "],\n"
-        << "    \"radii\": [" << r.radii.x << ", " << r.radii.y << ", " << r.radii.z << "],\n"
-        << "    \"edgeSoftness\": " << r.edgeSoftness << ",\n    \"scatteringCoefficient\": " << r.scatteringCoefficient
-        << ",\n    \"extinctionCoefficient\": " << r.extinctionCoefficient
-        << ",\n    \"effectiveRadiusMicrometers\": " << r.effectiveRadiusMicrometers
-        << ",\n    \"effectiveVariance\": " << r.effectiveVariance << ",\n    \"angleBins\": " << r.angleBins
-        << ",\n    \"viewSteps\": " << r.viewSteps << ",\n    \"includeSecondary\": " << r.includeSecondary
-        << ",\n    \"scatteringOrders\": " << r.scatteringOrders
-        << ",\n    \"multipleScatteringSamples\": " << r.multipleScatteringSamples
-        << ",\n    \"multipleScatteringSteps\": " << r.multipleScatteringSteps
-        << "\n  },\n  \"sky\": {\n    \"exposure\": " << c.skyExposure << ",\n    \"spectralConstants\": {\n"
-        << "      \"BETA_R_550\": " << s.betaRayleigh550 << ",\n      \"BETA_M\": " << s.betaMie
-        << ",\n      \"EARTH_R\": " << s.earthRadius << ",\n      \"ATMOS_R\": " << s.atmosphereRadius
-        << ",\n      \"SCALE_H_R\": " << s.scaleHeightRayleigh << ",\n      \"SCALE_H_M\": " << s.scaleHeightMie
-        << ",\n      \"SUN_TEMPERATURE_K\": " << s.sunTemperatureKelvin << ",\n      \"SUN_RADIANCE_550\": " << s.sunRadiance550
-        << ",\n      \"SUN_DIRECTION\": [" << s.sunDirection[0] << ", " << s.sunDirection[1] << ", " << s.sunDirection[2] << "],\n"
-        << "      \"SUN_RADIUS\": " << s.sunRadius << ",\n      \"SUN_AA\": " << s.sunAa
-        << ",\n      \"secondarySamples\": " << s.secondarySamples << ",\n      \"VIEW_STEPS\": " << s.viewSteps
-        << ",\n      \"Samples\": " << s.samples << ",\n      \"SCATTERING_ORDERS\": " << s.scatteringOrders
-        << ",\n      \"RAYLEIGH_DEPOLARIZATION\": " << s.rayleighDepolarization
-        << ",\n      \"GROUND_ALBEDO\": " << s.groundAlbedo
-        << ",\n      \"AEROSOL_IOR_REAL\": " << s.aerosolRefractiveIndexReal
-        << ",\n      \"AEROSOL_IOR_IMAG\": " << s.aerosolRefractiveIndexImag
-        << ",\n      \"AEROSOL_MEAN_RADIUS_UM\": " << s.aerosolMeanRadiusMicrometers
-        << ",\n      \"AEROSOL_SIGMA\": " << s.aerosolSigma
-        << ",\n      \"MIE_TABLE_ANGLE_BINS\": " << s.mieTableAngleBins
-        << "\n    }\n  }\n}\n";
-    return out.str();
-}
-
-// =====================================================================
-// SECTION: window procedure
-//
-// Win32 message handling for the render window. The path tracer takes raw
-// keyboard / mouse input directly (no input library) so the WndProc here
-// just translates messages into flags on a small InputState struct that
-// the render loop polls each frame. Mouse-look uses raw input so motion
-// is independent of the desktop pointer-acceleration curve.
-// =====================================================================
-
-// =====================================================================
-// SECTION: Vulkan app
-//
-// VulkanApp owns every Vulkan handle the renderer needs and drives the
-// frame loop. The constructor walks through Vulkan setup top-to-bottom:
-// instance + surface + device, command pools, the sky uniform buffer and
-// baked Lorenz–Mie SSBO, swapchain, descriptor sets, and finally the
-// compute pipeline.
-//
-// Render() runs once per frame: poll the camera, push fresh uniforms, and
-// dispatch the compute shader, which writes the acquired swapchain image
-// directly; the image is then presented.
-// All resources are released in the destructor in reverse construction
-// order so partial-init failure paths (which throw mid-construction)
-// still tear down cleanly via RAII member destructors where possible.
-// =====================================================================
-
-// Owns every Vulkan handle and orchestrates the renderer. Public surface
-// is intentionally thin (just Run()); construction is two-phase via Run()
-// rather than the ctor so failures can throw with cleanup driven by
-// Cleanup() rather than partial-RAII destructors.
-class VulkanPathTracer
-{
+// Owns the window and every Vulkan handle, and runs the frame loop.
+class VulkanPathTracer {
 public:
-    explicit VulkanPathTracer(const BenchmarkOptions& benchmark) : m_benchmark(benchmark) {}
-
-    // Default scene/render configuration file, resolved relative to the
-    // executable by ResolveRuntimeFilePath().
-    static constexpr const wchar_t* CONFIG_FILE_NAME = L"path_tracer_config.json";
-
-    // RAII member destructors release every Vulkan handle in reverse
-    // declaration order. The only manual teardown is the VMA allocator and its
-    // buffers, which must be released here (in the destructor body, before any
-    // raii member is destroyed) while the device is still alive.
+    // Members release themselves in reverse declaration order once the GPU
+    // is idle; only ImGui and GLFW need explicit shutdown.
     ~VulkanPathTracer()
     {
-        if (*m_device)
-        {
+        if (*m_device) {
             m_device.waitIdle();
         }
-        if (m_imguiInitialized)
-        {
+        if (m_imguiInitialized) {
             ImGui_ImplVulkan_Shutdown();
-            ImGui_ImplWin32_Shutdown();
+            ImGui_ImplGlfw_Shutdown();
             ImGui::DestroyContext();
             m_imguiInitialized = false;
         }
-        DestroySceneBuffers();
-        if (m_allocator != VK_NULL_HANDLE)
-        {
-            vmaDestroyAllocator(m_allocator);
-            m_allocator = VK_NULL_HANDLE;
-        }
-        if (m_window != nullptr)
-        {
-            DestroyWindow(m_window);
+        if (m_window != nullptr) {
+            glfwDestroyWindow(m_window);
             m_window = nullptr;
         }
+        glfwTerminate();
     }
 
-    // Top-level driver: load config → init Vulkan → render until the
-    // window closes → tear everything down. Throws on any failure; the
-    // caller in main() converts that into a non-zero exit code.
     void Run()
     {
-        LoadInitialRuntimeConfig();
+        ApplyRuntimeConfig(m_configFile.Load(), true);
         CreateWindowAndShow();
-        CreateInstance();
+        const vkb::Instance vkbInstance = CreateInstance();
         CreateSurface();
-        PickPhysicalDevice();
-        CreateLogicalDevice();
+        CreateLogicalDevice(PickPhysicalDevice(vkbInstance));
         CreateAllocator();
         CreateCommandPool();
         CreateSceneResources();
         CreateSwapchain();
-        CreateGuiRenderTargets();
         CreateDescriptorSetLayout();
         CreatePipeline();
-        CreateDescriptorSets();
-        CreateCommandBuffers();
-        CreateSyncObjects();
+        CreateFrameResources();
         CreateGui();
-        if (m_benchmark.frames != 0)
-        {
-            m_showGui = false;
-            const auto properties = m_physicalDevice.getProperties();
-            const auto queueProperties = m_physicalDevice.getQueueFamilyProperties();
-            const uint32_t validBits = queueProperties[m_queueFamilies.graphicsFamily.value()].timestampValidBits;
-            if (validBits == 0) throw std::runtime_error("Selected queue does not support GPU timestamps.");
-            m_timestampMask = validBits == 64 ? UINT64_MAX : (uint64_t{1} << validBits) - 1;
-            m_timestampPeriodMs = properties.limits.timestampPeriod * 1.0e-6;
-            m_timestampPool = vk::raii::QueryPool(m_device,
-                vk::QueryPoolCreateInfo({}, vk::QueryType::eTimestamp, m_config.frameCount * 3));
-            std::println("[Benchmark] GPU: {}; {}x{}; warmup={}; frames={}",
-                         properties.deviceName.data(), m_swapchainExtent.width, m_swapchainExtent.height,
-                         m_benchmark.warmupFrames, m_benchmark.frames);
-        }
         MessageLoop();
         m_device.waitIdle();
-        if (m_benchmark.frames != 0) FinishBenchmark();
     }
 
 private:
-    static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    // F1 toggles the GUI; F2 cycles config files; F5 saves the current one.
+    // Installed before ImGui's GLFW backend, which chains to it.
+    static void KeyCallback(GLFWwindow* window, int key, int, int action, int)
     {
-        auto* app = reinterpret_cast<VulkanPathTracer*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-        if (message == WM_NCCREATE)
-        {
-            const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-            app = static_cast<VulkanPathTracer*>(create->lpCreateParams);
-            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+        auto* app = static_cast<VulkanPathTracer*>(glfwGetWindowUserPointer(window));
+        if (app == nullptr || action != GLFW_PRESS) {
+            return;
         }
-        if (message == WM_KEYDOWN && wParam == VK_F1 && app != nullptr && app->m_benchmark.frames == 0)
-        {
-            app->m_showGui = !app->m_showGui;
-            return 0;
-        }
-        if (message == WM_KEYDOWN && app != nullptr && app->m_benchmark.frames == 0 && (lParam & (1LL << 30)) == 0)
-        {
-            if (wParam == VK_F2)
-            {
-                app->m_cycleConfigRequested = true;
-                return 0;
-            }
-            if (wParam == VK_F5)
-            {
-                app->m_saveConfigRequested = true;
-                return 0;
-            }
-        }
-        if (app != nullptr && app->m_benchmark.frames == 0 && app->m_imguiInitialized
-            && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam))
-        {
-            return 1;
-        }
-        if (message == WM_DESTROY)
-        {
-            PostQuitMessage(0);
-            return 0;
-        }
-        return DefWindowProcW(window, message, wParam, lParam);
+        if (key == GLFW_KEY_F1) app->m_showGui = !app->m_showGui;
+        if (key == GLFW_KEY_F2) app->m_cycleConfigRequested = true;
+        if (key == GLFW_KEY_F5) app->m_saveConfigRequested = true;
     }
 
     void CreateGui()
     {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
-        if (m_benchmark.frames != 0) ImGui::GetIO().IniFilename = nullptr;
         ImGui::StyleColorsDark();
-        ImGui_ImplWin32_Init(m_window);
+        ImGui_ImplGlfw_InitForVulkan(m_window, true);
 
         ImGui_ImplVulkan_InitInfo initInfo{};
-        initInfo.ApiVersion = VK_API_VERSION_1_2;
+        initInfo.ApiVersion = VK_API_VERSION_1_4;
         initInfo.Instance = static_cast<VkInstance>(*m_instance);
         initInfo.PhysicalDevice = static_cast<VkPhysicalDevice>(*m_physicalDevice);
         initInfo.Device = static_cast<VkDevice>(*m_device);
-        initInfo.QueueFamily = m_queueFamilies.graphicsFamily.value();
+        initInfo.QueueFamily = m_queueFamily;
         initInfo.Queue = static_cast<VkQueue>(*m_graphicsQueue);
         initInfo.DescriptorPoolSize = 64;
-        initInfo.MinImageCount = std::max(2u, m_config.frameCount);
+        initInfo.MinImageCount = std::max(2u, m_config.render.frameCount);
         initInfo.ImageCount = static_cast<uint32_t>(m_swapchainImages.size());
-        initInfo.PipelineInfoMain.RenderPass = static_cast<VkRenderPass>(*m_guiRenderPass);
+        initInfo.UseDynamicRendering = true;
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats =
+            reinterpret_cast<const VkFormat*>(&m_swapchainFormat);
         initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-        if (!ImGui_ImplVulkan_Init(&initInfo))
-        {
+        if (!ImGui_ImplVulkan_Init(&initInfo)) {
             throw std::runtime_error("Failed to initialize Dear ImGui Vulkan backend.");
         }
         m_imguiInitialized = true;
@@ -445,58 +184,52 @@ private:
     void BuildGuiFrame()
     {
         ImGui_ImplVulkan_NewFrame();
-        ImGui_ImplWin32_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        if (m_showGui)
-        {
+        if (m_showGui) {
             ImGui::SetNextWindowPos({16.0f, 16.0f}, ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize({330.0f, 0.0f}, ImGuiCond_FirstUseEver);
             ImGui::Begin("Vulkanic Controls", &m_showGui, ImGuiWindowFlags_AlwaysAutoResize);
             RuntimeConfig next = m_config;
             bool changed = false;
-            changed |= ImGui::SliderFloat("Exposure", &next.skyExposure, 0.1f, 4.0f, "%.2f");
-            float aerosolDensity = next.skySpectral.betaMie * 1.0e6f;
-            if (ImGui::SliderFloat("Aerosol density", &aerosolDensity, 0.0f, 100.0f, "%.1f"))
-            {
-                next.skySpectral.betaMie = aerosolDensity * 1.0e-6f;
-                changed = true;
-            }
-            int viewSteps = static_cast<int>(next.skySpectral.viewSteps);
-            if (ImGui::SliderInt("View steps", &viewSteps, 1, 20))
-            {
-                next.skySpectral.viewSteps = static_cast<uint32_t>(viewSteps);
-                changed = true;
-            }
-            int scatteringOrders = static_cast<int>(next.skySpectral.scatteringOrders);
-            if (ImGui::SliderInt("Scattering orders", &scatteringOrders, 1, 3))
-            {
-                next.skySpectral.scatteringOrders = static_cast<uint32_t>(scatteringOrders);
-                changed = true;
-            }
-            changed |= ImGui::SliderFloat("Ground albedo", &next.skySpectral.groundAlbedo,
-                                          0.0f, 1.0f, "%.2f");
+            // Each control edits a field of `next`; `scale` converts the stored
+            // value into friendlier display units (e.g. 1e-6 m^-1 -> 1).
+            const auto slider = [&](const char* label, float& value, float min, float max,
+                                    float scale = 1.0f, const char* format = "%.2f") {
+                float shown = value * scale;
+                if (!ImGui::SliderFloat(label, &shown, min, max, format)) return false;
+                value = shown / scale;
+                return changed = true;
+            };
+            const auto sliderInt = [&](const char* label, uint32_t& value, int min, int max) {
+                int shown = static_cast<int>(value);
+                if (!ImGui::SliderInt(label, &shown, min, max)) return false;
+                value = static_cast<uint32_t>(shown);
+                return changed = true;
+            };
+
+            SkySpectralConfig& sky = next.sky.spectral;
+            slider("Exposure", next.sky.exposure, 0.1f, 4.0f);
+            slider("Aerosol density", sky.betaMie, 0.0f, 100.0f, 1.0e6f, "%.1f");
+            sliderInt("View steps", sky.viewSteps, 1, 20);
+            sliderInt("Scattering orders", sky.scatteringOrders, 1, 3);
+            slider("Ground albedo", sky.groundAlbedo, 0.0f, 1.0f);
+
             bool rainbowEnabled = next.rainbow.enabled != 0;
-            if (ImGui::Checkbox("Rainbow", &rainbowEnabled))
-            {
+            if (ImGui::Checkbox("Rainbow", &rainbowEnabled)) {
                 next.rainbow.enabled = rainbowEnabled ? 1u : 0u;
                 changed = true;
             }
-            if (rainbowEnabled)
-            {
-                float rainScattering = next.rainbow.scatteringCoefficient * 1.0e4f;
-                if (ImGui::SliderFloat("Rain scattering", &rainScattering, 0.0f, 5.0f, "%.2f"))
-                {
-                    SetRainbowScattering(next.rainbow, rainScattering * 1.0e-4f);
-                    changed = true;
-                }
+            float rainScattering = next.rainbow.scatteringCoefficient;
+            if (rainbowEnabled && slider("Rain scattering", rainScattering, 0.0f, 5.0f, 1.0e4f)) {
+                SetRainbowScattering(next.rainbow, rainScattering);
             }
-            if (changed)
-            {
+            if (changed) {
                 ApplyRuntimeConfig(next, false);
             }
             ImGui::Separator();
-            ImGui::Text("Config: %s", m_configPath.filename().string().c_str());
+            ImGui::Text("Config: %s", m_configFile.Path().filename().string().c_str());
             ImGui::TextDisabled("F1 GUI | F2 next config | F5 save");
             ImGui::End();
         }
@@ -505,73 +238,48 @@ private:
 
     SceneData BuildSceneData() const
     {
-        const SkySpectralConfig& s = m_config.skySpectral;
-        SceneData sceneData{};
-        sceneData.skySpectralParams[0] = s.betaRayleigh550;
-        sceneData.skySpectralParams[1] = s.betaMie;
-        sceneData.skySpectralParams[2] = s.sunTemperatureKelvin;
-        sceneData.skySpectralParams[3] = s.sunRadiance550;
-        sceneData.skyRadiiScaleHeights[0] = s.earthRadius;
-        sceneData.skyRadiiScaleHeights[1] = s.atmosphereRadius;
-        sceneData.skyRadiiScaleHeights[2] = s.scaleHeightRayleigh;
-        sceneData.skyRadiiScaleHeights[3] = s.scaleHeightMie;
-        PackVec4(sceneData.skySunDirectionRadius, s.sunDirection, s.sunRadius);
-        sceneData.skySampleCounts[0] = s.secondarySamples;
-        sceneData.skySampleCounts[1] = s.viewSteps;
-        sceneData.skySampleCounts[2] = s.samples;
-        sceneData.skySampleCounts[3] = s.scatteringOrders;
-        sceneData.skyVrtParams[0] = s.sunAa;
-        sceneData.skyVrtParams[1] = s.rayleighDepolarization;
-        sceneData.skyVrtParams[2] = static_cast<float>(s.mieTableAngleBins);
-        sceneData.skyVrtParams[3] = s.groundAlbedo;
+        const SkySpectralConfig& s = m_config.sky.spectral;
         const RainbowConfig& r = m_config.rainbow;
-        PackVec4(sceneData.rainbowCenterEnabled, r.center, static_cast<float>(r.enabled));
-        PackVec4(sceneData.rainbowRadiiEdge, r.radii, r.edgeSoftness);
-        sceneData.rainbowOptical[0] = r.scatteringCoefficient;
-        sceneData.rainbowOptical[1] = r.extinctionCoefficient;
-        sceneData.rainbowOptical[2] = static_cast<float>(r.angleBins);
-        sceneData.rainbowOptical[3] = static_cast<float>(r.viewSteps);
-        sceneData.rainbowMultiple[0] = r.scatteringOrders;
-        sceneData.rainbowMultiple[1] = r.multipleScatteringSamples;
-        sceneData.rainbowMultiple[2] = r.multipleScatteringSteps;
+        SceneData sceneData{
+            .skySpectralParams = {s.betaRayleigh550, s.betaMie, s.sunTemperatureKelvin, s.sunRadiance550},
+            .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.scaleHeightMie},
+            .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
+            .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
+            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, float(s.mieTableAngleBins), s.groundAlbedo},
+            .rainbowCenterEnabled = {r.center.x, r.center.y, r.center.z, float(r.enabled)},
+            .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
+            .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, float(r.angleBins), float(r.viewSteps)},
+            .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
+        };
         // Cache the existing per-wavelength formulas on config upload. They
         // depend on scene parameters, not the pixel, path or scattering order.
         // Planck radiance remains normalized at 550 nm, with the same float
         // wavelength grid and constants previously evaluated in sky.comp.
-        for (int band = 0; band < kSpectralBandCount; ++band)
-        {
+        for (int band = 0; band < kSpectralBandCount; ++band) {
             const float wavelength = float(kSpectralLambdaMinNm + kSpectralLambdaStepNm * band);
             const float ratio = 550.0f / wavelength;
             const float lambda = wavelength * 1.0e-9f;
             constexpr float reference = 550.0e-9f;
             constexpr float c2 = 1.4387769e-2f;
-            const float shape = std::pow(reference / lambda, 5.0f)
-                * (std::exp(c2 / (reference * s.sunTemperatureKelvin)) - 1.0f)
-                / (std::exp(c2 / (lambda * s.sunTemperatureKelvin)) - 1.0f);
+            const float shape = std::pow(reference / lambda, 5.0f) * (std::exp(c2 / (reference * s.sunTemperatureKelvin)) - 1.0f) / (std::exp(c2 / (lambda * s.sunTemperatureKelvin)) - 1.0f);
             sceneData.spectralBands[band][0] = s.betaRayleigh550 * ratio * ratio * ratio * ratio;
             sceneData.spectralBands[band][1] = s.sunRadiance550 * shape;
         }
         return sceneData;
     }
 
-    // Allocate the scene uniform buffer (sky parameters) and the Lorenz–Mie
-    // scattering-matrix SSBO consumed by the ray-generation shader.
     void CreateSceneBuffers()
     {
-        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        const VkDeviceSize accumulationSize = static_cast<VkDeviceSize>(m_config.width)
-                                            * static_cast<VkDeviceSize>(m_config.height)
-                                            * sizeof(float) * 4u;
-        m_accumulationBuffer = CreateBuffer(accumulationSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
+        const VkDeviceSize accumulationSize = static_cast<VkDeviceSize>(m_config.render.width) * static_cast<VkDeviceSize>(m_config.render.height) * sizeof(float) * 4u;
+        m_accumulationBuffer = CreateBuffer(accumulationSize, vk::BufferUsageFlagBits::eStorageBuffer);
         CreateMieScatteringBuffer();
         CreateRainbowScatteringBuffer();
     }
 
-    // Translate the aerosol fields of the live config into the Mie precompute
-    // parameters.
     MieAerosolParams BuildMieAerosolParams() const
     {
-        const SkySpectralConfig& s = m_config.skySpectral;
+        const SkySpectralConfig& s = m_config.sky.spectral;
         MieAerosolParams params{};
         params.refractiveIndexReal = s.aerosolRefractiveIndexReal;
         params.refractiveIndexImag = s.aerosolRefractiveIndexImag;
@@ -581,16 +289,13 @@ private:
         return params;
     }
 
-    // Bake the Lorenz–Mie scattering matrix on the CPU and stage it into the
-    // binding-7 SSBO sampled by the polarized sky integrator. The table is
-    // immutable for the buffer's lifetime, so it is uploaded here rather than
-    // through UploadSceneDataFromConfig.
+    // Bake the Lorenz–Mie scattering matrix on the CPU (binding 7).
     void CreateMieScatteringBuffer()
     {
         const MieAerosolParams params = BuildMieAerosolParams();
         const std::vector<MieMatrixEntry> table = ComputeMieScatteringTable(params);
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
-        m_mieScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        m_mieScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_mieScatteringBuffer, std::as_bytes(std::span{table}));
         std::println("[Sky] Baked Lorenz-Mie scattering matrix: {} angle bins x {} spectral bands.",
                      params.angleBins, kSpectralBandCount);
@@ -601,7 +306,7 @@ private:
         RainbowScatteringParams params{};
         params.effectiveRadiusMicrometers = m_config.rainbow.effectiveRadiusMicrometers;
         params.effectiveVariance = m_config.rainbow.effectiveVariance;
-        params.solarAngularRadiusRadians = m_config.skySpectral.sunRadius;
+        params.solarAngularRadiusRadians = m_config.sky.spectral.sunRadius;
         params.angleBins = static_cast<int>(m_config.rainbow.angleBins);
         params.includeSecondary = m_config.rainbow.includeSecondary != 0;
         return params;
@@ -613,354 +318,96 @@ private:
         std::vector<MieMatrixEntry> table = ComputeRainbowScatteringTable(params);
         AppendRainbowSamplingCdf(table, params.angleBins);
         const VkDeviceSize size = static_cast<VkDeviceSize>(table.size() * sizeof(MieMatrixEntry));
-        m_rainbowScatteringBuffer = CreateBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        m_rainbowScatteringBuffer = CreateBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(m_rainbowScatteringBuffer, std::as_bytes(std::span{table}));
         std::println("[Rainbow] Baked droplet Mueller matrix: {} angle bins x {} spectral bands.",
                      params.angleBins, kSpectralBandCount);
     }
 
-    // Release the uniform buffer created by CreateSceneBuffers(). Safe to
-    // call when the buffer was never created (no-op).
-    void DestroySceneBuffers()
-    {
-        DestroyBuffer(m_sceneDataBuffer);
-        DestroyBuffer(m_mieScatteringBuffer);
-        DestroyBuffer(m_rainbowScatteringBuffer);
-        DestroyBuffer(m_accumulationBuffer);
-    }
-
-    // Pack the current RuntimeConfig.skySpectral into a SceneData record and
-    // stage it into the scene UBO. Called whenever the config is (re)loaded.
     void UploadSceneDataFromConfig()
     {
         const SceneData sceneData = BuildSceneData();
         UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span{&sceneData, 1}));
     }
 
-    // Bind the live resources (output image, scene UBO, Mie SSBO) into the
-    // descriptor sets.
-    void UpdateDescriptorSetContents()
-    {
-        if (m_descriptorSets.empty())
-        {
-            return;
-        }
-
-        for (size_t i = 0; i < m_descriptorSets.size(); ++i)
-        {
-            const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[i], vk::ImageLayout::eGeneral};
-            const vk::DescriptorBufferInfo sceneDataInfo{m_sceneDataBuffer.buffer, 0, m_sceneDataBuffer.size};
-            const vk::DescriptorBufferInfo mieDataInfo{m_mieScatteringBuffer.buffer, 0, m_mieScatteringBuffer.size};
-            const vk::DescriptorBufferInfo rainbowDataInfo{m_rainbowScatteringBuffer.buffer, 0,
-                                                            m_rainbowScatteringBuffer.size};
-            const vk::DescriptorBufferInfo accumulationInfo{m_accumulationBuffer.buffer, 0,
-                                                             m_accumulationBuffer.size};
-
-            vk::WriteDescriptorSet imageWrite{*m_descriptorSets[i], 0, 0, vk::DescriptorType::eStorageImage, imageInfo};
-            vk::WriteDescriptorSet sceneWrite{*m_descriptorSets[i], 2, 0, vk::DescriptorType::eUniformBuffer, {}, sceneDataInfo};
-            vk::WriteDescriptorSet mieWrite{*m_descriptorSets[i], 7, 0, vk::DescriptorType::eStorageBuffer, {}, mieDataInfo};
-            vk::WriteDescriptorSet rainbowWrite{*m_descriptorSets[i], 8, 0,
-                                                 vk::DescriptorType::eStorageBuffer, {}, rainbowDataInfo};
-            vk::WriteDescriptorSet accumulationWrite{*m_descriptorSets[i], 9, 0,
-                                                      vk::DescriptorType::eStorageBuffer, {}, accumulationInfo};
-
-            m_device.updateDescriptorSets({imageWrite, sceneWrite, mieWrite, rainbowWrite, accumulationWrite}, nullptr);
-        }
-    }
-
-    // Re-apply the current m_config's sky parameters to live GPU resources.
-    // Rebuilds the Mie scattering table when the aerosol model changed, then
-    // re-uploads the scene UBO.
+    // Re-upload sky parameters, rebuilding the Mie / rainbow tables if asked.
     void RefreshSceneFromConfig(bool rebuildMieTable, bool rebuildRainbowTable)
     {
-        if (m_sceneDataBuffer.buffer == VK_NULL_HANDLE)
-        {
+        if (!m_sceneDataBuffer.buffer) {
             return;
         }
 
         m_device.waitIdle();
-        if (rebuildMieTable)
-        {
-            DestroyBuffer(m_mieScatteringBuffer);
+        if (rebuildMieTable) {
             CreateMieScatteringBuffer();
-            UpdateDescriptorSetContents();
         }
-        if (rebuildRainbowTable)
-        {
-            DestroyBuffer(m_rainbowScatteringBuffer);
+        if (rebuildRainbowTable) {
             CreateRainbowScatteringBuffer();
-            UpdateDescriptorSetContents();
         }
         UploadSceneDataFromConfig();
     }
 
-    // Diff the incoming config against the current one and apply the cheapest
-    // valid refresh (camera reset, Mie rebuild, sky UBO re-upload).
+    // Apply a new config, doing only the refresh work its changes require.
     void ApplyRuntimeConfig(const RuntimeConfig& config, bool resetCameraState)
     {
-        const bool pipelineChanged = config.skySpectral.scatteringOrders != m_config.skySpectral.scatteringOrders
-            || config.skySpectral.viewSteps != m_config.skySpectral.viewSteps
-            || config.skySpectral.samples != m_config.skySpectral.samples
-            || config.skySpectral.secondarySamples != m_config.skySpectral.secondarySamples;
-        const bool skySpectralChanged = config.skySpectral != m_config.skySpectral;
-        const bool mieAerosolChanged = HasMieAerosolChanged(config.skySpectral, m_config.skySpectral);
+        const bool pipelineChanged = config.sky.spectral.scatteringOrders != m_config.sky.spectral.scatteringOrders || config.sky.spectral.viewSteps != m_config.sky.spectral.viewSteps || config.sky.spectral.samples != m_config.sky.spectral.samples || config.sky.spectral.secondarySamples != m_config.sky.spectral.secondarySamples;
+        const bool skySpectralChanged = config.sky.spectral != m_config.sky.spectral;
+        const bool mieAerosolChanged = HasMieAerosolChanged(config.sky.spectral, m_config.sky.spectral);
         const bool rainbowChanged = config.rainbow != m_config.rainbow;
-        const bool rainbowOpticsChanged = HasRainbowOpticsChanged(config.rainbow, m_config.rainbow)
-                                           || config.skySpectral.sunRadius != m_config.skySpectral.sunRadius;
-        if (skySpectralChanged || rainbowChanged || config.samplesPerPixel != m_config.samplesPerPixel
-            || config.fovYDegrees != m_config.fovYDegrees)
+        const bool rainbowOpticsChanged = HasRainbowOpticsChanged(config.rainbow, m_config.rainbow) || config.sky.spectral.sunRadius != m_config.sky.spectral.sunRadius;
+        if (skySpectralChanged || rainbowChanged || config.render.samplesPerPixel != m_config.render.samplesPerPixel || config.camera.fovYDegrees != m_config.camera.fovYDegrees)
             m_accumulationResetRequested = true;
 
-        if (!m_configPath.empty() && !resetCameraState)
-        {
-            if (config.width != m_config.width || config.height != m_config.height
-                || config.frameCount != m_config.frameCount || config.vsync != m_config.vsync)
-            {
+        if (!resetCameraState) {
+            if (config.render.width != m_config.render.width || config.render.height != m_config.render.height || config.render.frameCount != m_config.render.frameCount || config.render.vsync != m_config.render.vsync) {
                 std::println("[Config] width/height/frameCount/vsync changes apply on the next launch.");
             }
         }
 
         m_config = config;
-        if (resetCameraState)
-        {
+        if (resetCameraState) {
             m_camera.Reset(m_config);
             return;
         }
 
         m_camera.ClampPitch(m_config);
 
-        if (skySpectralChanged || rainbowChanged)
-        {
+        if (skySpectralChanged || rainbowChanged) {
             RefreshSceneFromConfig(mieAerosolChanged, rainbowOpticsChanged);
             if (pipelineChanged) CreatePipeline();
         }
     }
 
-    // Load and parse path_tracer_config.json from disk for the first
-    // time. Records the file's last-write time so ReloadRuntimeConfigIfNeeded
-    // can pick up live edits.
-    void LoadInitialRuntimeConfig()
+    // Called once per frame: apply F2 (cycle) / F5 (save) requests and pick
+    // up edits made to the active config file on disk.
+    void ProcessConfigChanges()
     {
-        if (!m_benchmark.configPath.empty())
-            m_configPath = std::filesystem::absolute(m_benchmark.configPath);
-        // Prefer the editable source-tree config when launched from the repo.
-        // The build also copies a deployment config beside the executable,
-        // but choosing that copy first makes source edits appear to require a
-        // rebuild because the hot-reloader watches the copied file instead.
-        const std::array<std::filesystem::path, 2> editableCandidates = {
-            std::filesystem::current_path() / L"config" / CONFIG_FILE_NAME,
-            std::filesystem::current_path().parent_path() / L"config" / CONFIG_FILE_NAME,
-        };
-        for (const auto& candidate : editableCandidates)
-        {
-            if (!m_configPath.empty()) break;
-            if (std::filesystem::exists(candidate))
-            {
-                m_configPath = std::filesystem::absolute(candidate).lexically_normal();
-                break;
-            }
+        if (std::exchange(m_cycleConfigRequested, false)) {
+            if (auto config = m_configFile.CycleNext()) ApplyRuntimeConfig(*config, false);
         }
-        if (m_configPath.empty())
-        {
-            m_configPath = ResolveRuntimeFilePath(CONFIG_FILE_NAME);
+        if (std::exchange(m_saveConfigRequested, false)) {
+            m_configFile.Save(m_config);
         }
-
-        DiscoverConfigFiles();
-        if (m_configPath.empty())
-        {
-            throw std::runtime_error("Failed to locate path_tracer_config.json.");
-        }
-
-        ApplyRuntimeConfig(ParseRuntimeConfig(LoadTextFile(m_configPath)), true);
-
-        std::error_code errorCode;
-        m_configLastWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
-        if (errorCode)
-        {
-            throw std::runtime_error("Failed to read config file timestamp.");
-        }
-
-        std::println("[Config] Loaded {}", m_configPath.string());
-        std::println("[Config] F2 cycles {} discovered config file(s); F5 saves GUI settings.",
-                     m_configFiles.size());
+        if (auto config = m_configFile.ReloadIfChanged()) ApplyRuntimeConfig(*config, false);
     }
 
-    void DiscoverConfigFiles()
-    {
-        m_configFiles.clear();
-        std::vector<std::filesystem::path> directories = {
-            m_configPath.parent_path(),
-            std::filesystem::current_path() / L"config",
-            std::filesystem::current_path().parent_path() / L"config",
-        };
-        for (const auto& directory : directories)
-        {
-            std::error_code errorCode;
-            if (!std::filesystem::is_directory(directory, errorCode)) continue;
-            for (const auto& entry : std::filesystem::directory_iterator(directory, errorCode))
-            {
-                if (errorCode) break;
-                if (!entry.is_regular_file() || entry.path().extension() != L".json") continue;
-                const auto path = std::filesystem::absolute(entry.path()).lexically_normal();
-                if (std::ranges::find(m_configFiles, path) == m_configFiles.end())
-                    m_configFiles.push_back(path);
-            }
-        }
-        std::ranges::sort(m_configFiles);
-        const auto selected = std::ranges::find(m_configFiles, m_configPath);
-        if (selected == m_configFiles.end())
-        {
-            m_configFiles.push_back(m_configPath);
-            m_configIndex = m_configFiles.size() - 1;
-        }
-        else
-        {
-            m_configIndex = static_cast<size_t>(selected - m_configFiles.begin());
-        }
-    }
-
-    void SaveActiveConfig()
-    {
-        std::ofstream file(m_configPath, std::ios::binary | std::ios::trunc);
-        if (!file) throw std::runtime_error("Failed to open active config for saving.");
-        const std::string json = SerializeRuntimeConfig(m_config);
-        file.write(json.data(), static_cast<std::streamsize>(json.size()));
-        file.close();
-        if (!file) throw std::runtime_error("Failed to save active config.");
-        std::error_code errorCode;
-        m_configLastWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
-        if (errorCode) throw std::runtime_error("Saved config but could not read its timestamp.");
-        std::println("[Config] Saved {}", m_configPath.string());
-    }
-
-    void CycleActiveConfig()
-    {
-        DiscoverConfigFiles();
-        if (m_configFiles.size() < 2)
-        {
-            std::println("[Config] No alternate JSON config files found.");
-            return;
-        }
-        const size_t oldIndex = m_configIndex;
-        const std::filesystem::path oldPath = m_configPath;
-        m_configIndex = (m_configIndex + 1) % m_configFiles.size();
-        m_configPath = m_configFiles[m_configIndex];
-        try
-        {
-            ApplyRuntimeConfig(ParseRuntimeConfig(LoadTextFile(m_configPath)), false);
-            std::error_code errorCode;
-            m_configLastWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
-            if (errorCode) throw std::runtime_error("Failed to read alternate config timestamp.");
-            std::println("[Config] Switched to {}", m_configPath.string());
-        }
-        catch (const std::exception& error)
-        {
-            m_configIndex = oldIndex;
-            m_configPath = oldPath;
-            std::println(stderr, "[Config] Failed to switch config: {}", error.what());
-        }
-    }
-
-    void ProcessConfigCommands()
-    {
-        if (m_cycleConfigRequested)
-        {
-            m_cycleConfigRequested = false;
-            CycleActiveConfig();
-        }
-        if (m_saveConfigRequested)
-        {
-            m_saveConfigRequested = false;
-            try { SaveActiveConfig(); }
-            catch (const std::exception& error)
-            {
-                std::println(stderr, "[Config] Save failed: {}", error.what());
-            }
-        }
-    }
-
-    // Poll the config file's last-write time once per frame; on a change
-    // re-parse it and ApplyRuntimeConfig() the result. Failures during
-    // reload are logged and ignored so a typo in the JSON does not crash
-    // an interactive editing session.
-    void ReloadRuntimeConfigIfNeeded()
-    {
-        if (m_configPath.empty())
-        {
-            return;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now - m_lastConfigPollTime < std::chrono::milliseconds(250))
-        {
-            return;
-        }
-        m_lastConfigPollTime = now;
-
-        std::error_code errorCode;
-        const auto currentWriteTime = std::filesystem::last_write_time(m_configPath, errorCode);
-        if (errorCode || currentWriteTime == m_configLastWriteTime)
-        {
-            return;
-        }
-
-        try
-        {
-            ApplyRuntimeConfig(ParseRuntimeConfig(LoadTextFile(m_configPath)), false);
-            std::println("[Config] Reloaded {}", m_configPath.string());
-        }
-        catch (const std::exception& error)
-        {
-            std::println(stderr, "[Config] Reload failed: {}", error.what());
-        }
-
-        m_configLastWriteTime = currentWriteTime;
-    }
-
-    // Register the window class and create the main render window at
-    // the configured resolution. Returns once the window is visible.
     void CreateWindowAndShow()
     {
-        const HINSTANCE instance = GetModuleHandleW(nullptr);
-        const wchar_t* className = L"VulkanPathTracerWindowClass";
-
-        WNDCLASSEXW windowClass{};
-        windowClass.cbSize = sizeof(windowClass);
-        windowClass.hInstance = instance;
-        windowClass.lpfnWndProc = WindowProc;
-        windowClass.lpszClassName = className;
-        windowClass.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
-
-        const ATOM atom = RegisterClassExW(&windowClass);
-        if (atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            throw std::runtime_error("Failed to register window class.");
+        if (!glfwInit()) {
+            throw std::runtime_error("Failed to initialize GLFW.");
         }
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-        RECT rect{0, 0, static_cast<LONG>(m_config.width), static_cast<LONG>(m_config.height)};
-        const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        ThrowIfFalse(AdjustWindowRect(&rect, style, FALSE), "Failed to size window.");
-
-        m_window = CreateWindowExW(0,
-                                   className,
-                                   L"Vulkan Path Tracer - FPS: measuring...",
-                                   style,
-                                   CW_USEDEFAULT,
-                                   CW_USEDEFAULT,
-                                   rect.right - rect.left,
-                                   rect.bottom - rect.top,
-                                   nullptr,
-                                   nullptr,
-                                   instance,
-                                   this);
-        if (m_window == nullptr)
-        {
+        m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height),
+                                    "Vulkan Path Tracer - FPS: measuring...", nullptr, nullptr);
+        if (m_window == nullptr) {
             throw std::runtime_error("Failed to create window.");
         }
+        glfwSetWindowUserPointer(m_window, this);
+        glfwSetKeyCallback(m_window, KeyCallback);
 
-        ShowWindow(m_window, SW_SHOWDEFAULT);
-        UpdateWindow(m_window);
-        std::println("[Config] Edit {} and save to hot-reload tuning.", m_configPath.string());
+        std::println("[Config] Edit {} and save to hot-reload tuning.", m_configFile.Path().string());
         std::println("[Config] width, height, frameCount, and vsync are loaded from JSON at startup.");
         std::println("[Controls] Hold RMB or use the arrow keys to look around the sky. R resets the view.");
         std::println("[Controls] P toggles the polarization filter; C switches linear/elliptical.");
@@ -968,183 +415,130 @@ private:
         std::println("[Controls] F1 toggles the live GUI control panel.");
     }
 
-    // Create the VkInstance via vk-bootstrap, which auto-enables the Win32
-    // surface extensions. Validation layers are requested only when present so
-    // the SDK's debug layers light up without a hard dependency on them.
-    void CreateInstance()
+    // vk-bootstrap enables the platform surface extensions; validation layers
+    // are used only when installed.
+    vkb::Instance CreateInstance()
     {
         auto instanceResult = vkb::InstanceBuilder{}
-            .set_app_name("Vulkan Path Tracer")
-            .set_engine_name("None")
-            .require_api_version(1, 2, 0)
-            .request_validation_layers()
-            .build();
-        if (!instanceResult)
-        {
+                                  .set_app_name("Vulkan Path Tracer")
+                                  .set_engine_name("None")
+                                  .require_api_version(1, 4, 0)
+                                  .enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+                                  .enable_extension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+                                  .request_validation_layers()
+                                  .build();
+        if (!instanceResult) {
             throw std::runtime_error("Failed to create Vulkan instance: " + instanceResult.error().message());
         }
 
-        m_vkbInstance = instanceResult.value();
-        m_instance = vk::raii::Instance(m_context, m_vkbInstance.instance);
+        m_instance = vk::raii::Instance(m_context, instanceResult.value().instance);
+        return instanceResult.value();
     }
 
-    // Create the Win32 surface linking the HWND to the Vulkan instance.
     void CreateSurface()
     {
-        vk::Win32SurfaceCreateInfoKHR createInfo{};
-        createInfo.hinstance = GetModuleHandleW(nullptr);
-        createInfo.hwnd = m_window;
-        m_surface = m_instance.createWin32SurfaceKHR(createInfo);
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        vk::detail::resultCheck(vk::Result(glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface)),
+                                "Failed to create window surface");
+        m_surface = vk::raii::SurfaceKHR(m_instance, surface);
     }
 
-    // Select a physical device via vk-bootstrap. vkb requires a presentable
-    // swapchain by default; we additionally require the swapchain surface to
-    // support storage-image usage (the compute shader writes it directly) and
-    // the non-semantic-info extension that keeps debugPrintfEXT working.
-    void PickPhysicalDevice()
+    // The compute shader writes the swapchain image directly, so the surface
+    // must support storage usage. Non-semantic info keeps debugPrintfEXT working.
+    vkb::PhysicalDevice PickPhysicalDevice(const vkb::Instance& vkbInstance)
     {
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+        VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        features13.dynamicRendering = VK_TRUE;
+        features13.synchronization2 = VK_TRUE;
+        VkPhysicalDeviceVulkan14Features features14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+        features14.pushDescriptor = VK_TRUE;
+        VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchainMaintenance{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR};
+        swapchainMaintenance.swapchainMaintenance1 = VK_TRUE;
 
-        auto deviceResult = vkb::PhysicalDeviceSelector{m_vkbInstance}
+        auto deviceResult = vkb::PhysicalDeviceSelector{vkbInstance}
                                 .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
-                                .set_minimum_version(1, 2)
+                                .set_minimum_version(1, 4)
                                 .set_required_features(requiredFeatures)
+                                .set_required_features_13(features13)
+                                .add_required_extension_features(features14)
+                                .add_required_extension_features(swapchainMaintenance)
+                                .add_required_extension(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)
                                 .add_required_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME)
                                 .require_present()
                                 .select();
-        if (!deviceResult)
-        {
+        if (!deviceResult) {
             throw std::runtime_error("Failed to select Vulkan physical device: " + deviceResult.error().message());
         }
 
-        m_vkbPhysicalDevice = deviceResult.value();
-        m_physicalDevice = vk::raii::PhysicalDevice(m_instance, m_vkbPhysicalDevice.physical_device);
+        m_physicalDevice = vk::raii::PhysicalDevice(m_instance, deviceResult.value().physical_device);
 
         const vk::SurfaceCapabilitiesKHR capabilities = m_physicalDevice.getSurfaceCapabilitiesKHR(*m_surface);
-        if (!(capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage))
-        {
+        if (!(capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)) {
             throw std::runtime_error("Selected GPU does not support storage-image swapchains for this app.");
         }
+        return deviceResult.value();
     }
 
-    // Create the VkDevice via vk-bootstrap and fetch the graphics+present
-    // queue handles and their family indices. vkb already enabled the
-    // swapchain and non-semantic-info extensions during device selection.
-    void CreateLogicalDevice()
+    void CreateLogicalDevice(const vkb::PhysicalDevice& vkbPhysicalDevice)
     {
-        auto deviceResult = vkb::DeviceBuilder{m_vkbPhysicalDevice}.build();
-        if (!deviceResult)
-        {
+        auto deviceResult = vkb::DeviceBuilder{vkbPhysicalDevice}.build();
+        if (!deviceResult) {
             throw std::runtime_error("Failed to create Vulkan logical device: " + deviceResult.error().message());
         }
+        m_device = vk::raii::Device(m_physicalDevice, deviceResult.value().device);
 
-        m_vkbDevice = deviceResult.value();
-        m_device = vk::raii::Device(m_physicalDevice, m_vkbDevice.device);
-
-        auto graphicsFamily = m_vkbDevice.get_queue_index(vkb::QueueType::graphics);
-        auto presentFamily = m_vkbDevice.get_queue_index(vkb::QueueType::present);
-        if (!graphicsFamily || !presentFamily)
-        {
-            throw std::runtime_error("Failed to retrieve graphics/present queue families.");
+        const auto queueFamily = deviceResult.value().get_queue_index(vkb::QueueType::graphics);
+        if (!queueFamily || !m_physicalDevice.getSurfaceSupportKHR(queueFamily.value(), *m_surface)) {
+            throw std::runtime_error("The graphics queue cannot present to the window.");
         }
-        m_queueFamilies.graphicsFamily = graphicsFamily.value();
-        m_queueFamilies.presentFamily = presentFamily.value();
-        m_graphicsQueue = m_device.getQueue(graphicsFamily.value(), 0);
-        m_presentQueue = m_device.getQueue(presentFamily.value(), 0);
+        m_queueFamily = queueFamily.value();
+        m_graphicsQueue = m_device.getQueue(m_queueFamily, 0);
     }
 
-    // Create the VMA allocator that backs every device buffer allocation.
     void CreateAllocator()
     {
-        VmaAllocatorCreateInfo allocatorInfo{};
-        allocatorInfo.instance = static_cast<VkInstance>(*m_instance);
-        allocatorInfo.physicalDevice = static_cast<VkPhysicalDevice>(*m_physicalDevice);
-        allocatorInfo.device = static_cast<VkDevice>(*m_device);
-        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
-        ThrowVk(vmaCreateAllocator(&allocatorInfo, &m_allocator), "Failed to create VMA allocator");
+        m_allocator = vma::createAllocatorUnique(vma::AllocatorCreateInfo{}
+                                                     .setInstance(*m_instance)
+                                                     .setPhysicalDevice(*m_physicalDevice)
+                                                     .setDevice(*m_device)
+                                                     .setVulkanApiVersion(VK_API_VERSION_1_4));
     }
 
-    // Allocate a host-visible, persistently mapped buffer through VMA. Every
-    // buffer in this renderer is a small CPU-written upload target (the scene
-    // UBO and the baked Mie SSBO), so the allocation strategy is shared.
-    BufferAllocation CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage) const
+    // Every buffer here is small and CPU-written, so all are host-visible.
+    GpuBuffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage) const
     {
-        BufferAllocation allocation{};
-        allocation.size = size;
-
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = size;
-        bufferInfo.usage = usage;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        VmaAllocationCreateInfo allocCreateInfo{};
-        allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
-        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-                                | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-        VmaAllocationInfo info{};
-        ThrowVk(vmaCreateBuffer(m_allocator, &bufferInfo, &allocCreateInfo, &allocation.buffer, &allocation.allocation, &info),
-                "Failed to create buffer");
-        allocation.mapped = info.pMappedData;
-        return allocation;
+        auto [allocation, buffer] = m_allocator->createBufferUnique(
+            vk::BufferCreateInfo{{}, size, usage},
+            vma::AllocationCreateInfo{vma::AllocationCreateFlagBits::eHostAccessSequentialWrite, vma::MemoryUsage::eAuto});
+        return {std::move(allocation), std::move(buffer)};
     }
 
-    // Destroy the VkBuffer and free its VMA allocation, zeroing the handle so
-    // the struct can be safely re-used or destroyed twice.
-    void DestroyBuffer(BufferAllocation& allocation)
+    void UploadToBuffer(const GpuBuffer& buffer, std::span<const std::byte> data) const
     {
-        if (allocation.buffer != VK_NULL_HANDLE)
-        {
-            vmaDestroyBuffer(m_allocator, allocation.buffer, allocation.allocation);
-            allocation.buffer = VK_NULL_HANDLE;
-            allocation.allocation = VK_NULL_HANDLE;
-        }
-        allocation.mapped = nullptr;
-        allocation.size = 0;
+        m_allocator->copyMemoryToAllocation(data.data(), *buffer.allocation, 0, data.size());
     }
 
-    // Copy host data into the buffer's persistently mapped allocation, then
-    // flush so the write is visible to the GPU even on non-coherent memory.
-    // The std::span overload lets callers pass any trivially-copyable object or
-    // contiguous range via std::as_bytes without hand-computing byte sizes.
-    void UploadToBuffer(const BufferAllocation& allocation, std::span<const std::byte> data) const
-    {
-        if (data.size() > static_cast<size_t>(allocation.size))
-        {
-            throw std::runtime_error("Upload exceeds destination buffer size.");
-        }
-        std::memcpy(allocation.mapped, data.data(), data.size());
-        ThrowVk(vmaFlushAllocation(m_allocator, allocation.allocation, 0, data.size()),
-                "Failed to flush buffer allocation");
-    }
-
-    // Allocate the scene UBO + Mie SSBO and upload the sky parameters. There
-    // is no geometry / acceleration structure in this sky-only renderer.
     void CreateSceneResources()
     {
         CreateSceneBuffers();
         UploadSceneDataFromConfig();
     }
 
-    // Create the swapchain and its image views via vk-bootstrap. The images
-    // are created with VK_IMAGE_USAGE_STORAGE_BIT and written directly by the
-    // compute shader (no separate offscreen image or blit). Present-mode
-    // is FIFO with VSync, otherwise IMMEDIATE → MAILBOX → FIFO;
-    // at least frameCount images are requested so per-frame resources line up.
+    // Present mode is FIFO with vsync, otherwise IMMEDIATE, falling back to MAILBOX.
     void CreateSwapchain()
     {
-        vkb::SwapchainBuilder builder{m_vkbDevice};
+        vkb::SwapchainBuilder builder{*m_physicalDevice, *m_device, *m_surface, m_queueFamily, m_queueFamily};
         builder.set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-               .set_desired_present_mode(m_config.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR)
-               .add_fallback_present_mode(m_config.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR)
-               .set_desired_extent(m_config.width, m_config.height)
-               .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
-               .set_required_min_image_count(m_config.frameCount);
+            .set_desired_present_mode(m_config.render.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR)
+            .add_fallback_present_mode(m_config.render.vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_MAILBOX_KHR)
+            .set_desired_extent(m_config.render.width, m_config.render.height)
+            .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+            .set_required_min_image_count(m_config.render.frameCount);
         auto swapchainResult = builder.build();
-        if (!swapchainResult)
-        {
+        if (!swapchainResult) {
             throw std::runtime_error("Failed to create Vulkan swapchain: " + swapchainResult.error().message());
         }
 
@@ -1153,125 +547,68 @@ private:
         m_swapchainFormat = static_cast<vk::Format>(swapchain.image_format);
         m_swapchainExtent = swapchain.extent;
 
-        // Wrap the swapchain images and build a 2D color image view per image.
-        m_swapchainImages.clear();
+        m_swapchainImages = m_swapchain.getImages();
         m_swapchainImageViews.clear();
-        for (VkImage image : m_swapchain.getImages())
-        {
-            m_swapchainImages.emplace_back(image);
-
-            vk::ImageViewCreateInfo viewInfo{};
-            viewInfo.image = image;
-            viewInfo.viewType = vk::ImageViewType::e2D;
-            viewInfo.format = m_swapchainFormat;
-            viewInfo.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-            m_swapchainImageViews.emplace_back(m_device, viewInfo);
-        }
-        m_swapchainLayouts.assign(m_swapchainImages.size(), vk::ImageLayout::eUndefined);
-
-        // One render-finished semaphore per swapchain image: a present-wait
-        // semaphore stays in use until its image is re-acquired, so it cannot
-        // be tied to the frame-in-flight slot.
-        m_presentSemaphores.clear();
-        for (size_t i = 0; i < m_swapchainImages.size(); ++i)
-        {
-            m_presentSemaphores.emplace_back(m_device.createSemaphore({}));
+        for (VkImageView view : swapchain.get_image_views().value()) {
+            m_swapchainImageViews.emplace_back(m_device, view);
         }
     }
 
-    void CreateGuiRenderTargets()
-    {
-        vk::AttachmentDescription colorAttachment{};
-        colorAttachment.format = m_swapchainFormat;
-        colorAttachment.samples = vk::SampleCountFlagBits::e1;
-        colorAttachment.loadOp = vk::AttachmentLoadOp::eLoad;
-        colorAttachment.storeOp = vk::AttachmentStoreOp::eStore;
-        colorAttachment.stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
-        colorAttachment.stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
-        colorAttachment.initialLayout = vk::ImageLayout::eColorAttachmentOptimal;
-        colorAttachment.finalLayout = vk::ImageLayout::ePresentSrcKHR;
-
-        const vk::AttachmentReference colorReference{0, vk::ImageLayout::eColorAttachmentOptimal};
-        vk::SubpassDescription subpass{};
-        subpass.pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
-        subpass.setColorAttachments(colorReference);
-
-        vk::RenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.setAttachments(colorAttachment);
-        renderPassInfo.setSubpasses(subpass);
-        m_guiRenderPass = vk::raii::RenderPass(m_device, renderPassInfo);
-
-        m_guiFramebuffers.clear();
-        for (const auto& imageView : m_swapchainImageViews)
-        {
-            const vk::ImageView attachment = *imageView;
-            vk::FramebufferCreateInfo framebufferInfo{};
-            framebufferInfo.renderPass = *m_guiRenderPass;
-            framebufferInfo.setAttachments(attachment);
-            framebufferInfo.width = m_swapchainExtent.width;
-            framebufferInfo.height = m_swapchainExtent.height;
-            framebufferInfo.layers = 1;
-            m_guiFramebuffers.emplace_back(m_device, framebufferInfo);
-        }
-    }
-
-    // Define the descriptor-set layout used by the compute pipeline: the
-    // output storage image (binding 0), the sky parameter UBO (binding 2),
-    // and the baked Lorenz–Mie SSBO (binding 7).
+    // Read the descriptor bindings and push-constant block from both compute
+    // shaders, so the layout can never drift from the GLSL.
     void CreateDescriptorSetLayout()
     {
-        // Output image (binding 0), sky parameter UBO (binding 2), and the
-        // Lorenz–Mie scattering-matrix SSBO (binding 7) — all read/written by
-        // the ray-generation shader. The binding numbers keep their original
-        // values (gaps are legal) so the shared sky header is untouched.
-        using enum vk::DescriptorType;
-        constexpr auto compute = vk::ShaderStageFlagBits::eCompute;
-        const std::array<vk::DescriptorSetLayoutBinding, 5> bindings = {
-            vk::DescriptorSetLayoutBinding{0, eStorageImage, 1, compute},
-            vk::DescriptorSetLayoutBinding{2, eUniformBuffer, 1, compute},
-            vk::DescriptorSetLayoutBinding{7, eStorageBuffer, 1, compute},
-            vk::DescriptorSetLayoutBinding{8, eStorageBuffer, 1, compute},
-            vk::DescriptorSetLayoutBinding{9, eStorageBuffer, 1, compute},
-        };
+        std::map<uint32_t, vk::DescriptorSetLayoutBinding> bindings;
+        for (const wchar_t* fileName : kShaderFiles) {
+            const std::string spirv = LoadSpirv(fileName);
+            const spv_reflect::ShaderModule module(spirv.size(), spirv.data());
+            if (module.GetResult() != SPV_REFLECT_RESULT_SUCCESS) throw std::runtime_error("Failed to reflect SPIR-V shader.");
 
-        vk::DescriptorSetLayoutCreateInfo createInfo{};
-        createInfo.setBindings(bindings);
+            uint32_t count = 0;
+            module.EnumerateDescriptorBindings(&count, nullptr);
+            std::vector<SpvReflectDescriptorBinding*> reflected(count);
+            module.EnumerateDescriptorBindings(&count, reflected.data());
+            for (const SpvReflectDescriptorBinding* binding : reflected) {
+                bindings[binding->binding] = {binding->binding, vk::DescriptorType(binding->descriptor_type), binding->count,
+                                              vk::ShaderStageFlagBits::eCompute};
+            }
+
+            module.EnumeratePushConstantBlocks(&count, nullptr);
+            std::vector<SpvReflectBlockVariable*> blocks(count);
+            module.EnumeratePushConstantBlocks(&count, blocks.data());
+            for (const SpvReflectBlockVariable* block : blocks) {
+                if (block->offset + block->size != sizeof(PushConstants)) {
+                    throw std::runtime_error("PushConstants does not match the shader's push-constant block.");
+                }
+            }
+        }
+
+        // Push descriptors: bindings are written straight into the command
+        // buffer each frame, so no descriptor pool or sets are needed.
+        const auto layoutBindings = bindings | std::views::values | std::ranges::to<std::vector>();
+        vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
+        createInfo.setBindings(layoutBindings);
         m_descriptorSetLayout = vk::raii::DescriptorSetLayout(m_device, createInfo);
     }
 
-    vk::raii::ShaderModule CreateShaderModule(const std::vector<char>& bytecode)
+    vk::raii::ShaderModule CreateShaderModule(const wchar_t* fileName)
     {
-        vk::ShaderModuleCreateInfo createInfo{};
-        createInfo.codeSize = bytecode.size();
-        createInfo.pCode = std::bit_cast<const uint32_t*>(bytecode.data());
-        return vk::raii::ShaderModule(m_device, createInfo);
+        const std::string bytecode = LoadSpirv(fileName);
+        return vk::raii::ShaderModule(m_device, vk::ShaderModuleCreateInfo{{}, bytecode.size(), std::bit_cast<const uint32_t*>(bytecode.data())});
     }
 
-    // Compile the compute shader module from its SPIR-V blob and assemble the
-    // pipeline. Sky-only renderer: a single compute shader evaluates the sky
-    // analytically per pixel and writes the swapchain storage image directly.
     void CreatePipeline()
     {
-        const vk::raii::ShaderModule computeModule = CreateShaderModule(LoadBinaryFile(L"path_tracer.comp.spv"));
-        const vk::raii::ShaderModule postModule = CreateShaderModule(LoadBinaryFile(L"post_process.comp.spv"));
+        const vk::raii::ShaderModule computeModule = CreateShaderModule(kShaderFiles[0]);
+        const vk::raii::ShaderModule postModule = CreateShaderModule(kShaderFiles[1]);
 
-        vk::PipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.stage = vk::ShaderStageFlagBits::eCompute;
-        stageInfo.module = *computeModule;
-        stageInfo.pName = "main";
         // Specialize loop bounds without changing the requested quality. The
         // config refresh waits for in-flight work before rebuilding pipelines.
-        const std::array<uint32_t, 4> settings = {m_config.skySpectral.scatteringOrders,
-            m_config.skySpectral.viewSteps, m_config.skySpectral.samples,
-            m_config.skySpectral.secondarySamples};
-        const std::array<vk::SpecializationMapEntry, 4> entries = {{
-            {0, 0, sizeof(uint32_t)}, {1, 4, sizeof(uint32_t)},
-            {2, 8, sizeof(uint32_t)}, {3, 12, sizeof(uint32_t)}}};
-        vk::SpecializationInfo specialization{};
-        specialization.setMapEntries(entries);
-        specialization.dataSize = sizeof(settings);
-        specialization.pData = settings.data();
-        stageInfo.pSpecializationInfo = &specialization;
+        const std::array<uint32_t, 4> settings = {m_config.sky.spectral.scatteringOrders,
+                                                  m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples,
+                                                  m_config.sky.spectral.secondarySamples};
+        const std::array<vk::SpecializationMapEntry, 4> entries = {{{0, 0, sizeof(uint32_t)}, {1, 4, sizeof(uint32_t)}, {2, 8, sizeof(uint32_t)}, {3, 12, sizeof(uint32_t)}}};
+        const vk::SpecializationInfo specialization{uint32_t(entries.size()), entries.data(), sizeof(settings), settings.data()};
 
         const vk::PushConstantRange pushRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants)};
         vk::PipelineLayoutCreateInfo layoutInfo{};
@@ -1279,75 +616,29 @@ private:
         layoutInfo.setPushConstantRanges(pushRange);
         m_pipelineLayout = vk::raii::PipelineLayout(m_device, layoutInfo);
 
-        vk::ComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = *m_pipelineLayout;
-        m_computePipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
-        stageInfo.module = *postModule;
-        stageInfo.pSpecializationInfo = nullptr;
-        pipelineInfo.stage = stageInfo;
-        m_postProcessPipeline = vk::raii::Pipeline(m_device, nullptr, pipelineInfo);
-    }
-
-    // Allocate the descriptor pool and one descriptor set per layout
-    // slot. Initial bindings are deferred to UpdateDescriptorSetContents()
-    // because they depend on scene resources that are created later.
-    void CreateDescriptorSets()
-    {
-        using enum vk::DescriptorType;
-        const uint32_t count = static_cast<uint32_t>(m_swapchainImageViews.size());
-        const std::array<vk::DescriptorPoolSize, 3> poolSizes = {
-            vk::DescriptorPoolSize{eStorageImage, count},
-            vk::DescriptorPoolSize{eUniformBuffer, count},
-            vk::DescriptorPoolSize{eStorageBuffer, count * 3u},
+        const auto makePipeline = [&](const vk::raii::ShaderModule& module, const vk::SpecializationInfo* info) {
+            const vk::PipelineShaderStageCreateInfo stage{{}, vk::ShaderStageFlagBits::eCompute, *module, "main", info};
+            return vk::raii::Pipeline(m_device, nullptr, vk::ComputePipelineCreateInfo{{}, stage, *m_pipelineLayout});
         };
-
-        vk::DescriptorPoolCreateInfo poolInfo{};
-        poolInfo.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
-        poolInfo.maxSets = count;
-        poolInfo.setPoolSizes(poolSizes);
-        m_descriptorPool = vk::raii::DescriptorPool(m_device, poolInfo);
-
-        const std::vector<vk::DescriptorSetLayout> layouts(count, *m_descriptorSetLayout);
-        vk::DescriptorSetAllocateInfo allocInfo{};
-        allocInfo.descriptorPool = *m_descriptorPool;
-        allocInfo.setSetLayouts(layouts);
-
-        m_descriptorSets = vk::raii::DescriptorSets(m_device, allocInfo);
-        UpdateDescriptorSetContents();
+        m_computePipeline = makePipeline(computeModule, &specialization);
+        m_postProcessPipeline = makePipeline(postModule, nullptr);
     }
 
-    // Create the graphics-queue command pool used for the per-frame command
-    // buffers.
     void CreateCommandPool()
     {
-        vk::CommandPoolCreateInfo createInfo{vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-                                             m_queueFamilies.graphicsFamily.value()};
+        vk::CommandPoolCreateInfo createInfo{vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily};
         m_commandPool = vk::raii::CommandPool(m_device, createInfo);
     }
 
-    // Allocate one primary command buffer per frame in flight.
-    void CreateCommandBuffers()
+    void CreateFrameResources()
     {
-        vk::CommandBufferAllocateInfo allocInfo{*m_commandPool, vk::CommandBufferLevel::ePrimary, m_config.frameCount};
-        m_commandBuffers = vk::raii::CommandBuffers(m_device, allocInfo);
-    }
-
-    // Allocate the per-frame image-available semaphores and the fences that
-    // gate command-buffer reuse. Render-finished semaphores are per swapchain
-    // image and live with the swapchain.
-    void CreateSyncObjects()
-    {
-        const vk::FenceCreateInfo fenceInfo{vk::FenceCreateFlagBits::eSignaled};
-
+        const uint32_t count = m_config.render.frameCount;
+        vk::raii::CommandBuffers commandBuffers(m_device, {*m_commandPool, vk::CommandBufferLevel::ePrimary, count});
+        const vk::FenceCreateInfo signaled{vk::FenceCreateFlagBits::eSignaled};
         m_frames.clear();
-        for (uint32_t i = 0; i < m_config.frameCount; ++i)
-        {
-            FrameResources frame{
-                m_device.createSemaphore({}),
-                m_device.createFence(fenceInfo),
-            };
-            m_frames.push_back(std::move(frame));
+        for (uint32_t i = 0; i < count; ++i) {
+            m_frames.push_back({std::move(commandBuffers[i]), m_device.createSemaphore({}), m_device.createSemaphore({}),
+                                m_device.createFence(signaled), m_device.createFence(signaled)});
         }
     }
 
@@ -1359,171 +650,111 @@ private:
         const Vec3 up = Normalize(Cross(forward, right));
         const float aspect =
             static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
-        const bool polarizerEnabled = m_camera.PolarizerEnabled();
-        const float polarizerAngle = m_camera.PolarizerAngleRadians();
-        const float polarizerEllipticity = m_camera.PolarizerEllipticityRadians();
-        if (!m_accumulationStateInitialized
-            || Length(position - m_previousAccumulationPosition) > 1.0e-6f
-            || Length(forward - m_previousAccumulationForward) > 1.0e-6f
-            || polarizerEnabled != m_previousPolarizerEnabled
-            || std::abs(polarizerAngle - m_previousPolarizerAngle) > 1.0e-6f
-            || std::abs(polarizerEllipticity - m_previousPolarizerEllipticity) > 1.0e-6f)
-            m_accumulationResetRequested = true;
+        // Restart accumulation whenever the view or the analyzer moves.
+        const ViewState view{position, forward, m_camera.PolarizerEnabled(),
+                             m_camera.PolarizerAngleRadians(), m_camera.PolarizerEllipticityRadians()};
+        if (m_lastView != view) m_accumulationResetRequested = true;
+        m_lastView = view;
 
-        PushConstants constants{};
-        PackVec4(constants.cameraPositionFrame, position, static_cast<float>(m_frameIndex));
-        PackVec4(constants.cameraForwardSamples, forward, static_cast<float>(m_config.samplesPerPixel));
-        PackVec4(constants.cameraRightBounces, right, m_accumulationResetRequested ? 1.0f : 0.0f);
-        PackVec4(constants.cameraUpTanHalfFovY, up, std::tan(m_config.fovYDegrees * 0.5f * kPi / 180.0f));
-        constants.displayParams[0] = m_config.skyExposure;
-        constants.displayParams[1] = aspect;
-        PackVec4(constants.polarizer,
-                 std::array<float, 3>{polarizerEnabled ? 1.0f : 0.0f,
-                                      polarizerAngle, polarizerEllipticity},
-                 0.0f);
-
-        constants.imageSize[0] = m_swapchainExtent.width;
-        constants.imageSize[1] = m_swapchainExtent.height;
-        m_previousAccumulationPosition = position;
-        m_previousAccumulationForward = forward;
-        m_previousPolarizerEnabled = polarizerEnabled;
-        m_previousPolarizerAngle = polarizerAngle;
-        m_previousPolarizerEllipticity = polarizerEllipticity;
-        m_accumulationStateInitialized = true;
+        const PushConstants constants{
+            .cameraPositionFrame = {position.x, position.y, position.z, float(m_frameIndex)},
+            .cameraForwardSamples = {forward.x, forward.y, forward.z, float(m_config.render.samplesPerPixel)},
+            .cameraRightBounces = {right.x, right.y, right.z, m_accumulationResetRequested ? 1.0f : 0.0f},
+            .cameraUpTanHalfFovY = {up.x, up.y, up.z, std::tan(m_config.camera.fovYDegrees * 0.5f * kPi / 180.0f)},
+            .displayParams = {m_config.sky.exposure, aspect, 0.0f, 0.0f},
+            .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
+            .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
+        };
         m_accumulationResetRequested = false;
         return constants;
     }
 
-    // Record one frame's worth of work into commandBuffer:
-    //   1. Barrier transitioning the acquired swapchain image to GENERAL.
-    //   2. Bind the compute pipeline + descriptors, push constants.
-    //   3. vkCmdDispatch over an 8x8-tiled grid; the shader writes the
-    //      swapchain image directly as a storage image.
-    //   4. Barrier transitioning the swapchain image to PRESENT_SRC.
     void RecordCommandBuffer(const vk::raii::CommandBuffer& commandBuffer, uint32_t imageIndex)
     {
-        commandBuffer.begin({});
-        const uint32_t queryBase = m_currentFrame * 3;
-        if (m_benchmark.frames != 0) commandBuffer.resetQueryPool(*m_timestampPool, queryBase, 3);
-
+        using Stage = vk::PipelineStageFlagBits2;
+        using Access = vk::AccessFlagBits2;
+        const vk::Image image = m_swapchainImages[imageIndex];
         const vk::ImageSubresourceRange colorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-        vk::ImageMemoryBarrier toGeneral{};
-        toGeneral.oldLayout = m_swapchainLayouts[imageIndex];
-        toGeneral.newLayout = vk::ImageLayout::eGeneral;
-        toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toGeneral.image = m_swapchainImages[imageIndex];
-        toGeneral.subresourceRange = colorRange;
-        toGeneral.srcAccessMask = {};
-        toGeneral.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+        // The compute pass overwrites every pixel, so the previous contents
+        // (and layout) can always be discarded.
+        const auto imageBarrier = [&](vk::PipelineStageFlags2 srcStage, vk::AccessFlags2 srcAccess,
+                                      vk::PipelineStageFlags2 dstStage, vk::AccessFlags2 dstAccess,
+                                      vk::ImageLayout oldLayout, vk::ImageLayout newLayout) {
+            const vk::ImageMemoryBarrier2 barrier{srcStage, srcAccess, dstStage, dstAccess, oldLayout, newLayout,
+                                                  VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, colorRange};
+            commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setImageMemoryBarriers(barrier));
+        };
+        const auto accumulationBarrier = [&](vk::AccessFlags2 srcAccess, vk::AccessFlags2 dstAccess) {
+            const vk::BufferMemoryBarrier2 barrier{Stage::eComputeShader, srcAccess, Stage::eComputeShader, dstAccess,
+                                                   VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                                                   *m_accumulationBuffer.buffer, 0, vk::WholeSize};
+            commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setBufferMemoryBarriers(barrier));
+        };
 
-        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
-                                      vk::PipelineStageFlagBits::eComputeShader,
-                                      {}, nullptr, nullptr, toGeneral);
+        commandBuffer.begin({});
+        imageBarrier(Stage::eNone, Access::eNone, Stage::eComputeShader, Access::eShaderStorageWrite,
+                     vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
+        accumulationBarrier(Access::eShaderStorageRead | Access::eShaderStorageWrite,
+                            Access::eShaderStorageRead | Access::eShaderStorageWrite);
 
-        vk::BufferMemoryBarrier accumulationStartBarrier{};
-        accumulationStartBarrier.srcAccessMask = vk::AccessFlagBits::eShaderRead
-                                               | vk::AccessFlagBits::eShaderWrite;
-        accumulationStartBarrier.dstAccessMask = vk::AccessFlagBits::eShaderRead
-                                               | vk::AccessFlagBits::eShaderWrite;
-        accumulationStartBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        accumulationStartBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        accumulationStartBarrier.buffer = m_accumulationBuffer.buffer;
-        accumulationStartBarrier.offset = 0;
-        accumulationStartBarrier.size = m_accumulationBuffer.size;
-        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                      vk::PipelineStageFlagBits::eComputeShader,
-                                      {}, nullptr, accumulationStartBarrier, nullptr);
-
-        const PushConstants pushConstants = BuildPushConstants();
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute,
-                                         *m_pipelineLayout,
-                                         0,
-                                         *m_descriptorSets[imageIndex],
-                                         nullptr);
-        commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout,
-                                                   vk::ShaderStageFlagBits::eCompute,
-                                                   0,
-                                                   pushConstants);
+        using enum vk::DescriptorType;
+        const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral};
+        const auto bufferInfo = [](const GpuBuffer& b) { return vk::DescriptorBufferInfo{*b.buffer, 0, vk::WholeSize}; };
+        const std::array bufferInfos{bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer),
+                                     bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_accumulationBuffer)};
+        const std::array writes{
+            vk::WriteDescriptorSet{{}, 0, 0, eStorageImage, imageInfo},
+            vk::WriteDescriptorSet{{}, 2, 0, eUniformBuffer, {}, bufferInfos[0]},
+            vk::WriteDescriptorSet{{}, 7, 0, eStorageBuffer, {}, bufferInfos[1]},
+            vk::WriteDescriptorSet{{}, 8, 0, eStorageBuffer, {}, bufferInfos[2]},
+            vk::WriteDescriptorSet{{}, 9, 0, eStorageBuffer, {}, bufferInfos[3]},
+        };
+        commandBuffer.pushDescriptorSet(vk::PipelineBindPoint::eCompute, *m_pipelineLayout, 0, writes);
+        commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0,
+                                                   BuildPushConstants());
         // 8x8 workgroups, matching the compute shader's local size; round up so
         // the whole render target is covered (the shader discards the overhang).
         constexpr uint32_t kTile = 8;
         const uint32_t groupsX = (m_swapchainExtent.width + kTile - 1) / kTile;
         const uint32_t groupsY = (m_swapchainExtent.height + kTile - 1) / kTile;
-        if (m_benchmark.frames != 0)
-            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase);
         commandBuffer.dispatch(groupsX, groupsY, 1);
-        if (m_benchmark.frames != 0)
-            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase + 1);
 
-        vk::BufferMemoryBarrier accumulationBarrier{};
-        accumulationBarrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-        accumulationBarrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-        accumulationBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        accumulationBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        accumulationBarrier.buffer = m_accumulationBuffer.buffer;
-        accumulationBarrier.offset = 0;
-        accumulationBarrier.size = m_accumulationBuffer.size;
-        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                      vk::PipelineStageFlagBits::eComputeShader,
-                                      {}, nullptr, accumulationBarrier, nullptr);
-
+        accumulationBarrier(Access::eShaderStorageWrite, Access::eShaderStorageRead);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_postProcessPipeline);
         commandBuffer.dispatch(groupsX, groupsY, 1);
-        if (m_benchmark.frames != 0)
-            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *m_timestampPool, queryBase + 2);
 
-        if (!m_benchmark.captureHdrPath.empty())
-        {
-            auto toHost = accumulationBarrier;
-            toHost.dstAccessMask = vk::AccessFlagBits::eHostRead;
-            commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                          vk::PipelineStageFlagBits::eHost,
-                                          {}, nullptr, toHost, nullptr);
-        }
+        imageBarrier(Stage::eComputeShader, Access::eShaderStorageWrite,
+                     Stage::eColorAttachmentOutput, Access::eColorAttachmentRead | Access::eColorAttachmentWrite,
+                     vk::ImageLayout::eGeneral, vk::ImageLayout::eColorAttachmentOptimal);
 
-        vk::ImageMemoryBarrier toColorAttachment = toGeneral;
-        toColorAttachment.oldLayout = vk::ImageLayout::eGeneral;
-        toColorAttachment.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
-        toColorAttachment.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-        toColorAttachment.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
-
-        commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                                      vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                                      {}, nullptr, nullptr, toColorAttachment);
-
-        vk::RenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.renderPass = *m_guiRenderPass;
-        renderPassInfo.framebuffer = *m_guiFramebuffers[imageIndex];
-        renderPassInfo.renderArea = vk::Rect2D{{0, 0}, m_swapchainExtent};
-        commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
+        vk::RenderingAttachmentInfo colorAttachment{*m_swapchainImageViews[imageIndex],
+                                                    vk::ImageLayout::eColorAttachmentOptimal};
+        colorAttachment.loadOp = vk::AttachmentLoadOp::eLoad;
+        colorAttachment.storeOp = vk::AttachmentStoreOp::eStore;
+        commandBuffer.beginRendering(vk::RenderingInfo{{}, {{0, 0}, m_swapchainExtent}, 1, 0, colorAttachment});
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), static_cast<VkCommandBuffer>(*commandBuffer));
-        commandBuffer.endRenderPass();
+        commandBuffer.endRendering();
 
+        imageBarrier(Stage::eColorAttachmentOutput, Access::eColorAttachmentWrite, Stage::eNone, Access::eNone,
+                     vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::ePresentSrcKHR);
         commandBuffer.end();
-        m_swapchainLayouts[imageIndex] = vk::ImageLayout::ePresentSrcKHR;
     }
 
-    // Wait for the current in-flight slot, acquire a swapchain image,
-    // record + submit the frame's command buffer, then present.
-    // Handles VK_ERROR_OUT_OF_DATE_KHR by recreating the swapchain.
     void RenderFrame()
     {
         FrameResources& frame = m_frames[m_currentFrame];
-        while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
-        {
+        const std::array fences{*frame.inFlight, *frame.presentDone};
+        while (m_device.waitForFences(fences, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {
         }
-        if (m_benchmark.frames != 0) CollectGpuTiming(m_currentFrame);
 
         const auto [acquireResult, imageIndex] = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable);
-        if (acquireResult != vk::Result::eSuccess && acquireResult != vk::Result::eSuboptimalKHR)
-        {
+        if (acquireResult != vk::Result::eSuccess && acquireResult != vk::Result::eSuboptimalKHR) {
             throw std::runtime_error("Failed to acquire swapchain image.");
         }
 
-        m_device.resetFences(*frame.inFlight);
-        const vk::raii::CommandBuffer& commandBuffer = m_commandBuffers[m_currentFrame];
+        m_device.resetFences(fences);
+        const vk::raii::CommandBuffer& commandBuffer = frame.commandBuffer;
         commandBuffer.reset();
         RecordCommandBuffer(commandBuffer, imageIndex);
 
@@ -1532,19 +763,17 @@ private:
         submitInfo.setWaitSemaphores(*frame.imageAvailable);
         submitInfo.setWaitDstStageMask(waitStage);
         submitInfo.setCommandBuffers(*commandBuffer);
-        const vk::raii::Semaphore& renderFinished = m_presentSemaphores[imageIndex];
-        submitInfo.setSignalSemaphores(*renderFinished);
+        submitInfo.setSignalSemaphores(*frame.renderFinished);
         m_graphicsQueue.submit(submitInfo, *frame.inFlight);
-        frame.submittedFrame = m_frameIndex;
-        frame.hasGpuTiming = m_benchmark.frames != 0;
 
+        const vk::SwapchainPresentFenceInfoKHR presentFence{*frame.presentDone};
         vk::PresentInfoKHR presentInfo{};
-        presentInfo.setWaitSemaphores(*renderFinished);
+        presentInfo.pNext = &presentFence;
+        presentInfo.setWaitSemaphores(*frame.renderFinished);
         presentInfo.setSwapchains(*m_swapchain);
         presentInfo.setImageIndices(imageIndex);
-        const vk::Result present = m_presentQueue.presentKHR(presentInfo);
-        if (present != vk::Result::eSuccess && present != vk::Result::eSuboptimalKHR)
-        {
+        const vk::Result present = m_graphicsQueue.presentKHR(presentInfo);
+        if (present != vk::Result::eSuccess && present != vk::Result::eSuboptimalKHR) {
             throw std::runtime_error("Failed to present swapchain image.");
         }
 
@@ -1552,136 +781,54 @@ private:
         m_currentFrame = (m_currentFrame + 1) % static_cast<uint32_t>(m_frames.size());
     }
 
-    // Throttled window-title update displaying live FPS and per-frame
-    // milliseconds — cheap diagnostic for performance tuning.
-    void UpdateWindowTitle(double fps, double frameMs)
-    {
-        const std::wstring title = std::format(L"Vulkan Path Tracer - {:.1f} FPS ({:.2f} ms)", fps, frameMs);
-        SetWindowTextW(m_window, title.c_str());
-    }
-
-    // Main loop: pump Win32 messages, hot-reload config, advance camera,
-    // and render until WM_QUIT. Uses a fixed-timestep clock for the
-    // camera integration so movement speed is independent of frame
-    // rate.
     void MessageLoop()
     {
         using Clock = std::chrono::steady_clock;
-        MSG message{};
-        auto statsStart = Clock::now();
-        auto previousFrameStart = statsStart;
-        uint32_t framesSinceUpdate = 0;
+        auto previousFrame = Clock::now();
+        auto titleUpdate = previousFrame;
+        uint32_t frames = 0;
 
-        while (true)
-        {
-            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
-            {
-                if (message.message == WM_QUIT)
-                {
-                    return;
-                }
+        while (!glfwWindowShouldClose(m_window)) {
+            glfwPollEvents();
+            ProcessConfigChanges();
 
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            const auto now = Clock::now();
+            const double deltaSeconds = std::chrono::duration<double>(now - previousFrame).count();
+            previousFrame = now;
 
-            const auto frameStart = Clock::now();
-            if (m_benchmark.frames == 0)
-            {
-                ProcessConfigCommands();
-                ReloadRuntimeConfigIfNeeded();
-            }
-            const double deltaSeconds = std::chrono::duration<double>(frameStart - previousFrameStart).count();
-            previousFrameStart = frameStart;
             BuildGuiFrame();
             const ImGuiIO& io = ImGui::GetIO();
-            if (m_benchmark.frames == 0 && !io.WantCaptureMouse && !io.WantCaptureKeyboard)
-            {
+            if (!io.WantCaptureMouse && !io.WantCaptureKeyboard) {
                 m_camera.Update(deltaSeconds, m_window, m_config);
             }
             RenderFrame();
-            if (m_benchmark.frames != 0
-                && m_frameIndex >= uint64_t{m_benchmark.warmupFrames} + m_benchmark.frames)
-                return;
-            const auto frameEnd = Clock::now();
 
-            ++framesSinceUpdate;
-            const double elapsedSeconds = std::chrono::duration<double>(frameEnd - statsStart).count();
-            if (elapsedSeconds >= 1.0)
-            {
-                const double fps = static_cast<double>(framesSinceUpdate) / elapsedSeconds;
-                const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
-                UpdateWindowTitle(fps, frameMs);
-                framesSinceUpdate = 0;
-                statsStart = frameEnd;
+            // Show the average FPS / frame time over the last second in the title.
+            ++frames;
+            const double elapsed = std::chrono::duration<double>(now - titleUpdate).count();
+            if (elapsed >= 1.0) {
+                const std::string title = std::format("Vulkan Path Tracer - {:.1f} FPS ({:.2f} ms)",
+                                                      frames / elapsed, 1000.0 * elapsed / frames);
+                glfwSetWindowTitle(m_window, title.c_str());
+                frames = 0;
+                titleUpdate = now;
             }
         }
     }
 
-    void CollectGpuTiming(uint32_t slot)
-    {
-        auto& frame = m_frames[slot];
-        if (!frame.hasGpuTiming) return;
-        std::array<uint64_t, 3> timestamps{};
-        ThrowVk(vkGetQueryPoolResults(static_cast<VkDevice>(*m_device),
-                                     static_cast<VkQueryPool>(*m_timestampPool), slot * 3, 3,
-                                     sizeof(timestamps), timestamps.data(), sizeof(uint64_t),
-                                     VK_QUERY_RESULT_64_BIT), "Failed to read GPU timestamps");
-        if (frame.submittedFrame >= m_benchmark.warmupFrames)
-            m_gpuTimings.push_back({
-                double((timestamps[1] - timestamps[0]) & m_timestampMask) * m_timestampPeriodMs,
-                double((timestamps[2] - timestamps[1]) & m_timestampMask) * m_timestampPeriodMs});
-        frame.hasGpuTiming = false;
-    }
-
-    void FinishBenchmark()
-    {
-        for (uint32_t slot = 0; slot < m_frames.size(); ++slot) CollectGpuTiming(slot);
-        if (m_gpuTimings.size() != m_benchmark.frames)
-            throw std::runtime_error("Benchmark interrupted before all requested frames completed.");
-        for (size_t pass = 0; pass < 2; ++pass)
-        {
-            std::vector<double> values;
-            double sum = 0.0;
-            for (const auto& timing : m_gpuTimings) { values.push_back(timing[pass]); sum += timing[pass]; }
-            std::ranges::sort(values);
-            const size_t middle = values.size() / 2;
-            const double median = values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) * 0.5;
-            std::println("[Benchmark] {}: mean={:.6f} ms median={:.6f} ms p95={:.6f} ms samples={}",
-                         pass == 0 ? "sky+rainbow" : "display", sum / values.size(), median,
-                         values[(values.size() * 95 - 1) / 100], values.size());
-        }
-        if (!m_benchmark.captureHdrPath.empty())
-        {
-            ThrowVk(vmaInvalidateAllocation(m_allocator, m_accumulationBuffer.allocation, 0,
-                                             m_accumulationBuffer.size), "Failed to invalidate HDR capture memory");
-            std::ofstream file(m_benchmark.captureHdrPath, std::ios::binary);
-            const std::array<uint32_t, 2> dimensions{m_swapchainExtent.width, m_swapchainExtent.height};
-            file.write(reinterpret_cast<const char*>(dimensions.data()), sizeof(dimensions));
-            file.write(static_cast<const char*>(m_accumulationBuffer.mapped),
-                       static_cast<std::streamsize>(m_accumulationBuffer.size));
-            if (!file) throw std::runtime_error("Failed to write HDR capture.");
-            std::println("[Benchmark] HDR capture: {}", m_benchmark.captureHdrPath.string());
-        }
-    }
-
-    struct FrameResources
-    {
+    // The present fence signals once presentation no longer needs
+    // renderFinished, so the whole set can be reused together.
+    struct FrameResources {
+        vk::raii::CommandBuffer commandBuffer{nullptr};
         vk::raii::Semaphore imageAvailable{nullptr};
+        vk::raii::Semaphore renderFinished{nullptr};
+        vk::raii::Fence presentDone{nullptr};
         vk::raii::Fence inFlight{nullptr};
-        uint64_t submittedFrame = 0;
-        bool hasGpuTiming = false;
     };
 
-    HWND m_window = nullptr;
+    GLFWwindow* m_window = nullptr;
     bool m_imguiInitialized = false;
     bool m_showGui = true;
-
-    // vk-bootstrap wrappers retained for the lifetime of the app: they own the
-    // builder-side metadata used to fetch queue family indices.
-    vkb::Instance m_vkbInstance;
-    vkb::PhysicalDevice m_vkbPhysicalDevice;
-    vkb::Device m_vkbDevice;
 
     // RAII Vulkan handles. Declaration order is destruction-reverse order:
     // device-child objects are declared after the device so they are destroyed
@@ -1691,72 +838,54 @@ private:
     vk::raii::SurfaceKHR m_surface{nullptr};
     vk::raii::PhysicalDevice m_physicalDevice{nullptr};
     vk::raii::Device m_device{nullptr};
-    vk::raii::QueryPool m_timestampPool{nullptr};
+    // One queue does compute, ImGui drawing, and presentation.
+    uint32_t m_queueFamily = 0;
     vk::raii::Queue m_graphicsQueue{nullptr};
-    vk::raii::Queue m_presentQueue{nullptr};
-    QueueFamilyIndices m_queueFamilies;
 
-    // VMA allocator + its buffers are released manually in the destructor body
-    // (before the raii members, while the device is still alive).
-    VmaAllocator m_allocator = VK_NULL_HANDLE;
-    BufferAllocation m_sceneDataBuffer{};
-    BufferAllocation m_mieScatteringBuffer{};
-    BufferAllocation m_rainbowScatteringBuffer{};
-    BufferAllocation m_accumulationBuffer{};
+    // Declared after the device and before the buffers, so the buffers are
+    // freed first, then the allocator, then the device.
+    vma::UniqueAllocator m_allocator;
+    GpuBuffer m_sceneDataBuffer;
+    GpuBuffer m_mieScatteringBuffer;
+    GpuBuffer m_rainbowScatteringBuffer;
+    GpuBuffer m_accumulationBuffer;
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Format m_swapchainFormat = vk::Format::eUndefined;
     vk::Extent2D m_swapchainExtent{};
     std::vector<vk::Image> m_swapchainImages;
     std::vector<vk::raii::ImageView> m_swapchainImageViews;
-    std::vector<vk::ImageLayout> m_swapchainLayouts;
-    std::vector<vk::raii::Semaphore> m_presentSemaphores;
-    vk::raii::RenderPass m_guiRenderPass{nullptr};
-    std::vector<vk::raii::Framebuffer> m_guiFramebuffers;
 
     vk::raii::DescriptorSetLayout m_descriptorSetLayout{nullptr};
     vk::raii::PipelineLayout m_pipelineLayout{nullptr};
     vk::raii::Pipeline m_computePipeline{nullptr};
     vk::raii::Pipeline m_postProcessPipeline{nullptr};
-    vk::raii::DescriptorPool m_descriptorPool{nullptr};
-    std::vector<vk::raii::DescriptorSet> m_descriptorSets;
 
     vk::raii::CommandPool m_commandPool{nullptr};
-    std::vector<vk::raii::CommandBuffer> m_commandBuffers;
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
-    BenchmarkOptions m_benchmark;
-    uint64_t m_timestampMask = UINT64_MAX;
-    double m_timestampPeriodMs = 0.0;
-    std::vector<std::array<double, 2>> m_gpuTimings;
     bool m_accumulationResetRequested = true;
-    bool m_accumulationStateInitialized = false;
-    Vec3 m_previousAccumulationForward{};
-    Vec3 m_previousAccumulationPosition{};
-    bool m_previousPolarizerEnabled = false;
-    float m_previousPolarizerAngle = 0.0f;
-    float m_previousPolarizerEllipticity = 0.0f;
+    // Camera + analyzer state of the last frame; any change restarts accumulation.
+    struct ViewState {
+        Vec3 position;
+        Vec3 forward;
+        bool polarizerEnabled;
+        float polarizerAngle;
+        float polarizerEllipticity;
+        friend bool operator==(const ViewState&, const ViewState&) = default;
+    };
+    std::optional<ViewState> m_lastView;
     RuntimeConfig m_config{};
-    std::filesystem::path m_configPath;
-    std::vector<std::filesystem::path> m_configFiles;
-    size_t m_configIndex = 0;
+    ConfigFile m_configFile;
     bool m_cycleConfigRequested = false;
     bool m_saveConfigRequested = false;
-    std::filesystem::file_time_type m_configLastWriteTime{};
-    std::chrono::steady_clock::time_point m_lastConfigPollTime{};
 
-    // Look-only camera + polarization-filter state and the Win32 input that
-    // drives them. The renderer only reads the resulting basis / polarizer
-    // parameters when building push constants.
     CameraController m_camera;
 };
 
-// Public C-style entry point exported by VulkanPathTracer.h. Constructs a
-// VulkanPathTracer instance on the stack and runs it; any throw escapes
-// upward to main().
-void RunVulkanPathTracer(const BenchmarkOptions& benchmark)
+void RunVulkanPathTracer()
 {
-    VulkanPathTracer app(benchmark);
+    VulkanPathTracer app;
     app.Run();
 }
