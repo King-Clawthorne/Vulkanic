@@ -5,13 +5,11 @@
 // clang-format off
 // NOLINTBEGIN(modernize-use-std-numbers)
 
-// Refractive index of water at the 13 band centres, 400-700 nm in 25 nm steps.
 inline constexpr std::array<double, 13> kWaterIor = {
     1.34350, 1.34055, 1.33795, 1.33570, 1.33370, 1.33225, 1.33110,
     1.33020, 1.32945, 1.32885, 1.32835, 1.32795, 1.32760,
 };
 
-// Ozone absorption cross-section, m^2/molecule, 360-830 nm in 10 nm steps.
 inline constexpr std::array<double, 48> kOzoneCrossSection = {
     1.18e-27, 2.182e-28, 2.818e-28, 6.636e-28, 1.527e-27, 2.763e-27, 5.52e-27, 8.451e-27,
     1.582e-26, 2.316e-26, 3.669e-26, 4.924e-26, 7.752e-26, 9.016e-26, 1.48e-25, 1.602e-25,
@@ -21,7 +19,6 @@ inline constexpr std::array<double, 48> kOzoneCrossSection = {
     2.451e-26, 2.801e-26, 2.534e-26, 1.624e-26, 1.465e-26, 2.078e-26, 1.383e-26, 7.105e-27,
 };
 
-// ASTM G173 extraterrestrial (AM0) spectral irradiance, W/m^2/nm, 390-710 nm in 5 nm steps.
 inline constexpr std::array<double, 65> kSolarIrradiance = {
     1.2519, 1.245, 1.6885, 1.715, 1.537, 1.7688, 1.599, 1.755, 1.212, 1.709, 1.83, 1.965, 2.069,
     2.001, 1.9973, 1.984, 1.939, 2.08, 2.068, 1.979, 2.032, 2.051, 1.916, 1.9472, 1.91, 1.875,
@@ -30,7 +27,6 @@ inline constexpr std::array<double, 65> kSolarIrradiance = {
     1.526, 1.523, 1.558, 1.567, 1.534, 1.499, 1.494, 1.465, 1.479, 1.435, 1.422, 1.433, 1.404,
 };
 
-// CIE 1931 2-degree colour matching functions (x, y, z), 380-715 nm in 5 nm steps.
 inline constexpr std::array<std::array<double, 3>, 68> kCie1931 = {{
     {0.001368, 0.000039, 0.006450}, {0.002236, 0.000064, 0.010550}, {0.004243, 0.000120, 0.020050}, {0.007650, 0.000217, 0.036210},
     {0.014310, 0.000396, 0.067850}, {0.023190, 0.000640, 0.110200}, {0.043510, 0.001210, 0.207400}, {0.077630, 0.002180, 0.371300},

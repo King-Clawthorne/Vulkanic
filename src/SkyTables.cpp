@@ -34,10 +34,8 @@ namespace {
         a.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
         b.assign(static_cast<size_t>(nmax) + 1u, Complex(0.0, 0.0));
 
-        double psiPrev = std::cos(x);
-        double psi = std::sin(x);
-        double chiPrev = -std::sin(x);
-        double chi = std::cos(x);
+        double psiPrev = std::cos(x), psi = std::sin(x);
+        double chiPrev = -std::sin(x), chi = std::cos(x);
 
         for (int n : std::views::iota(1, nmax + 1)) {
             const auto dn = static_cast<double>(n);
@@ -71,18 +69,16 @@ namespace {
 
 std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<MieCrossSection, kSpectralBandCount>& crossSections) {
     const int bins = std::max(2, static_cast<int>(sky.mieTableAngleBins));
-    const bool coarse = aerosol == 1;
-    const Complex m(coarse ? sky.aerosol2RefractiveIndexReal : sky.aerosolRefractiveIndexReal,
-                    std::max(0.0, static_cast<double>(coarse ? sky.aerosol2RefractiveIndexImag : sky.aerosolRefractiveIndexImag)));
+    const AerosolConfig& species = sky.aerosols[static_cast<size_t>(aerosol)];
+    const Complex m(species.refractiveIndexReal, std::max(0.0, static_cast<double>(species.refractiveIndexImag)));
 
     std::vector<double> mu(static_cast<size_t>(bins));
     for (int i : std::views::iota(0, bins)) mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
 
     const int radiusSamples = 48;
-    const double lnSigma = std::log(std::max(1.0001, static_cast<double>(coarse ? sky.aerosol2Sigma : sky.aerosolSigma)));
-    const double lnRg = std::log(std::max(1e-4, static_cast<double>(coarse ? sky.aerosol2MeanRadiusMicrometers : sky.aerosolMeanRadiusMicrometers)));
-    const double lnMin = lnRg - (4.0 * lnSigma);
-    const double lnMax = lnRg + (4.0 * lnSigma);
+    const double lnSigma = std::log(std::max(1.0001, static_cast<double>(species.sigma)));
+    const double lnRg = std::log(std::max(1e-4, static_cast<double>(species.meanRadiusMicrometers)));
+    const double lnMin = lnRg - (4.0 * lnSigma), lnMax = lnRg + (4.0 * lnSigma);
     const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
 
     std::vector<MieMatrixEntry> table(static_cast<size_t>(bins) * kSpectralBandCount);
@@ -122,10 +118,8 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
             for (int i : std::views::iota(0, bins)) {
                 const double u = mu[static_cast<size_t>(i)];
 
-                double piPrev = 0.0;
-                double piCur = 1.0;
-                Complex s1(0.0, 0.0);
-                Complex s2(0.0, 0.0);
+                double piPrev = 0.0, piCur = 1.0;
+                Complex s1(0.0, 0.0), s2(0.0, 0.0);
 
                 for (int n : std::views::iota(1, nmax + 1)) {
                     const auto dn = static_cast<double>(n);
@@ -139,8 +133,7 @@ std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& s
                     piCur = piNext;
                 }
 
-                const double i1 = std::norm(s1);
-                const double i2 = std::norm(s2);
+                const double i1 = std::norm(s1), i2 = std::norm(s2);
                 const Complex cross = s2 * std::conj(s1);
                 p11[static_cast<size_t>(i)] += weight * 0.5 * (i2 + i1);
                 p12[static_cast<size_t>(i)] += weight * 0.5 * (i2 - i1);
@@ -169,26 +162,19 @@ namespace {
     double WaterIor(double wavelengthNm) {
         const double position = std::clamp((wavelengthNm - kSpectralLambdaMinNm) / kSpectralLambdaStepNm,
                                            0.0, static_cast<double>(kSpectralBandCount - 1));
-        const int lower = static_cast<int>(std::floor(position));
-        const int upper = std::min(lower + 1, kSpectralBandCount - 1);
+        const int lower = static_cast<int>(std::floor(position)), upper = std::min(lower + 1, kSpectralBandCount - 1);
         return std::lerp(kWaterIor[static_cast<size_t>(lower)], kWaterIor[static_cast<size_t>(upper)],
                          position - lower);
     }
 
     struct FresnelPower {
-        double reflectS;
-        double reflectP;
-        double transmitS;
-        double transmitP;
+        double reflectS, reflectP, transmitS, transmitP;
     };
 
     FresnelPower AirToWaterFresnel(double incidence, double refraction, double n) {
-        const double ci = std::cos(incidence);
-        const double cr = std::cos(refraction);
-        const double rs = (ci - (n * cr)) / (ci + (n * cr));
-        const double rp = ((n * ci) - cr) / ((n * ci) + cr);
-        const double reflectS = rs * rs;
-        const double reflectP = rp * rp;
+        const double ci = std::cos(incidence), cr = std::cos(refraction);
+        const double rs = (ci - (n * cr)) / (ci + (n * cr)), rp = ((n * ci) - cr) / ((n * ci) + cr);
+        const double reflectS = rs * rs, reflectP = rp * rp;
         return {.reflectS = reflectS, .reflectP = reflectP, .transmitS = 1.0 - reflectS, .transmitP = 1.0 - reflectP};
     }
 
@@ -434,9 +420,9 @@ std::vector<std::array<float, 4>> ComputeTransmittanceTable(const SkySpectralCon
                 const double t = (i + 0.5) * ds;
                 const double altitude = std::max(std::sqrt((r * r) + (t * t) + (2.0 * r * mu * t)) - re, 0.0);
                 rayleigh += std::exp(-altitude / sky.scaleHeightRayleigh) * ds;
-                mie += std::exp(-altitude / sky.scaleHeightMie) * ds;
+                mie += std::exp(-altitude / sky.aerosols[0].scaleHeight) * ds;
                 ozone += OzoneProfile(altitude) * ds;
-                coarse += std::exp(-altitude / sky.scaleHeightMie2) * ds;
+                coarse += std::exp(-altitude / sky.aerosols[1].scaleHeight) * ds;
             }
             table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone), static_cast<float>(coarse)};
         }
