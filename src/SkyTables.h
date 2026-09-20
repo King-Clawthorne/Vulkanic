@@ -83,6 +83,13 @@ struct MieMatrixEntry {
     float f11, f12, f33, f34;
 };
 
+struct PhaseQuad {
+    double f11 = 0.0, f12 = 0.0, f33 = 0.0, f34 = 0.0;
+    PhaseQuad& operator+=(const PhaseQuad& o) { f11 += o.f11; f12 += o.f12; f33 += o.f33; f34 += o.f34; return *this; }
+    friend PhaseQuad operator*(const PhaseQuad& q, double s) { return {.f11 = q.f11 * s, .f12 = q.f12 * s, .f33 = q.f33 * s, .f34 = q.f34 * s}; }
+    friend PhaseQuad operator/(const PhaseQuad& q, double s) { return {.f11 = q.f11 / s, .f12 = q.f12 / s, .f33 = q.f33 / s, .f34 = q.f34 / s}; }
+};
+
 struct MieCrossSection {
     double extinction, scattering;
 };
@@ -107,10 +114,11 @@ struct SpectralBand {
 
 SpectralBand ComputeSpectralBand(int band);
 
-inline double PhaseNormalization(const std::vector<double>& f11) {
-    const int bins = static_cast<int>(f11.size());
+inline double PhaseNormalization(const std::vector<PhaseQuad>& phase) {
+    const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i) integral += 0.5 * ((f11[i] * std::sin(i * dTheta)) + (f11[i + 1] * std::sin((i + 1) * dTheta))) * dTheta;
+    for (int i = 0; i + 1 < bins; ++i)
+        integral += 0.5 * ((phase[i].f11 * std::sin(i * dTheta)) + (phase[i + 1].f11 * std::sin((i + 1) * dTheta))) * dTheta;
     return 0.5 * integral;
 }

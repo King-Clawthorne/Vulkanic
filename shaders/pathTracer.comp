@@ -116,11 +116,9 @@ void beam_basis(vec3 d, out vec3 a, out vec3 b) {
     b = cross(d, a);
 }
 
-Stokes stokes_reframe(Stokes s, vec3 oldA, vec3 oldB, vec3 newA, vec3 newB) {
-    float c = dot(newA, oldA), sn = dot(newA, oldB);
-    float c2 = c * c - sn * sn, s2 = 2.0 * c * sn;
-    return Stokes(s.x, s.y * c2 + s.z * s2, -s.y * s2 + s.z * c2, s.w);
-}
+vec2 rotation(float c, float sn) { return vec2(c * c - sn * sn, 2.0 * c * sn); }
+Stokes rotate(Stokes s, vec2 r) { return Stokes(s.x, s.y * r.x + s.z * r.y, -s.y * r.y + s.z * r.x, s.w); }
+Stokes stokes_reframe(Stokes s, vec3 oldA, vec3 oldB, vec3 newA, vec3 newB) { return rotate(s, rotation(dot(newA, oldA), dot(newA, oldB))); }
 
 mat4 rainbow_mueller(float cosTheta, int band) {
     int bins = max(16, RainbowAngleBins());
@@ -140,26 +138,30 @@ mat4 rayleigh_mueller(float cosTheta) {
     return mueller(delta * base + (1.0 - delta), -delta * 0.75 * (1.0 - mu2), delta * base, delta * p33, 0.0, delta * deltaP * p33);
 }
 
-Stokes scatter_mueller(mat4 m, Stokes sIn, vec3 din, vec3 dout) {
+void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 flip) {
+    rot = vec4(1.0, 0.0, 1.0, 0.0);
+    flip = vec4(1.0);
     vec3 p = cross(din, dout);
     float pl = length(p);
     if (pl < 1.0e-6) {
-        Stokes r = m * sIn;
-        return dot(din, dout) < 0.0 ? Stokes(r.xy, -r.zw) : r;
+        if (cosTheta < 0.0) flip = vec4(1.0, 1.0, -1.0, -1.0);
+        return;
     }
     p /= pl;
     vec3 ain, bin, aout, bout;
     beam_basis(din, ain, bin);
     beam_basis(dout, aout, bout);
-    return stokes_reframe(m * stokes_reframe(sIn, ain, bin, cross(p, din), p), cross(p, dout), p, aout, bout);
+    vec3 inAxis = cross(p, din);
+    rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
 }
+
+Stokes apply_mueller(mat4 m, Stokes s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
 
 Stokes scatter_rainbow(Stokes sIn, vec3 din, vec3 dout, int band) {
-    return scatter_mueller(rainbow_mueller(dot(din, dout), band), sIn, din, dout);
+    vec4 rot, flip;
+    scatter_frame(din, dout, dot(din, dout), rot, flip);
+    return apply_mueller(rainbow_mueller(dot(din, dout), band), sIn, rot, flip);
 }
-
-vec2 rotation(float c, float sn) { return vec2(c * c - sn * sn, 2.0 * c * sn); }
-Stokes rotate(Stokes s, vec2 r) { return Stokes(s.x, s.y * r.x + s.z * r.y, -s.y * r.y + s.z * r.x, s.w); }
 
 struct ScatterGeom { mat4 rayleigh; vec4 rot, flip; int bin; float frac; };
 
@@ -170,20 +172,7 @@ ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
     float fbin = acos(cosTheta) / PI * float(max(2, int(sceneData.skyVrtParams.z)) - 1);
     g.bin = int(floor(fbin));
     g.frac = fbin - float(g.bin);
-    g.rot = vec4(1.0, 0.0, 1.0, 0.0);
-    g.flip = vec4(1.0);
-    vec3 p = cross(din, dout);
-    float pl = length(p);
-    if (pl < 1.0e-6) {
-        if (cosTheta < 0.0) g.flip = vec4(1.0, 1.0, -1.0, -1.0);
-        return g;
-    }
-    p /= pl;
-    vec3 ain, bin, aout, bout;
-    beam_basis(din, ain, bin);
-    beam_basis(dout, aout, bout);
-    vec3 inAxis = cross(p, din);
-    g.rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
+    scatter_frame(din, dout, cosTheta, g.rot, g.flip);
     return g;
 }
 
@@ -197,7 +186,7 @@ Stokes scatter_band(ScatterGeom g, Stokes s, vec3 w, int band) {
     mat4 m = SkyBetaR(band) * w.x * g.rayleigh + sceneData.mieBands[band].y * w.y * mie_mueller(g, 0, band);
     if (w.z > 0.0) m += sceneData.mieBands[band].w * w.z * mie_mueller(g, 1, band);
     m /= 4.0 * PI;
-    return rotate(m * rotate(s, g.rot.xy), g.rot.zw) * g.flip;
+    return apply_mueller(m, s, g.rot, g.flip);
 }
 
 struct Level {
