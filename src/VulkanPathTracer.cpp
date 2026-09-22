@@ -54,8 +54,8 @@ namespace {
 }
 
 void CameraController::Reset(const RuntimeConfig& config) {
-    const Vec3& from = config.camera.initialPosition;
-    const Vec3& to = config.camera.initialLookAt;
+    const glm::vec3& from = config.camera.initialPosition;
+    const glm::vec3& to = config.camera.initialLookAt;
     m_yaw = std::atan2(to.x - from.x, to.z - from.z);
     m_pitch = std::atan2(to.y - from.y, std::hypot(to.x - from.x, to.z - from.z));
 }
@@ -221,11 +221,11 @@ private:
         sceneData.rainbowAxisZ[2] = az;
         for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
             const double beta = s.aerosols[aerosol].beta;
-            const double reference = m_mieCrossSections[aerosol][6].extinction;
+            const double reference = m_mieCrossSections[aerosol][6].x;
             for (int band = 0; band < kSpectralBandCount; ++band) {
-                const MieCrossSection& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
-                sceneData.mieBands[band][2 * aerosol] = static_cast<float>(beta * cross.extinction / reference);
-                sceneData.mieBands[band][(2 * aerosol) + 1] = static_cast<float>(beta * cross.scattering / reference);
+                const glm::dvec2& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
+                sceneData.mieBands[band][2 * aerosol] = static_cast<float>(beta * cross.x / reference);
+                sceneData.mieBands[band][(2 * aerosol) + 1] = static_cast<float>(beta * cross.y / reference);
             }
         }
         return sceneData;
@@ -242,14 +242,14 @@ private:
         const SkySpectralConfig& s = m_config.sky.spectral;
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
 
-        std::vector<MieMatrixEntry> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
+        std::vector<glm::vec4> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
         std::ranges::copy(ComputeMieScatteringTable(s, 1, m_mieCrossSections[1]), std::back_inserter(mie));
         const int bins = std::max(2, static_cast<int>(s.mieTableAngleBins));
         AppendSamplingCdf(mie, bins, 0);
         AppendSamplingCdf(mie, bins, static_cast<size_t>(kSpectralBandCount) * static_cast<size_t>(bins));
         m_mieScatteringBuffer = CreateTableBuffer(mie);
 
-        std::vector<MieMatrixEntry> rainbow = ComputeRainbowScatteringTable(m_config.rainbow, s.sunRadius);
+        std::vector<glm::vec4> rainbow = ComputeRainbowScatteringTable(m_config.rainbow, s.sunRadius);
         AppendSamplingCdf(rainbow, static_cast<int>(m_config.rainbow.angleBins), 0);
         m_rainbowScatteringBuffer = CreateTableBuffer(rainbow);
         m_transmittanceBuffer = CreateTableBuffer(ComputeTransmittanceTable(s));
@@ -543,7 +543,7 @@ private:
     vma::raii::Allocator m_allocator{nullptr};
     vma::raii::Buffer m_sceneDataBuffer{nullptr}, m_mieScatteringBuffer{nullptr}, m_rainbowScatteringBuffer{nullptr};
     vma::raii::Buffer m_transmittanceBuffer{nullptr}, m_accumulationBuffer{nullptr};
-    std::array<std::array<MieCrossSection, kSpectralBandCount>, 2> m_mieCrossSections{};
+    std::array<std::array<glm::dvec2, kSpectralBandCount>, 2> m_mieCrossSections{};
 
     vk::raii::SwapchainKHR m_swapchain{nullptr};
     vk::Extent2D m_swapchainExtent{};

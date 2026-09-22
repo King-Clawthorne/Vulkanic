@@ -31,7 +31,7 @@ layout(constant_id = 4) const bool SpecializedRainbow = true;
 const float PI = 3.14159265358979323846;
 const int SPECTRAL_BANDS = 13;
 const float GOLDEN_ANGLE = 2.39996322972865332;
-const int MAX_SCATTER_ORDER = 16;
+const int MAX_SCATTER_ORDER = 4;
 const int LUT_ALT = 64, LUT_MU = 256;
 
 float SkyBetaR(int band) { return sceneData.spectralBands[band].x; }
@@ -45,8 +45,8 @@ int SkyViewSteps() { return int(SpecializedViewSteps != 0 ? SpecializedViewSteps
 int SkySamples() { return int(SpecializedSamples != 0 ? SpecializedSamples : sceneData.skySampleCounts.z); }
 int SkyScatteringOrders() { return int(SpecializedOrders != 0 ? SpecializedOrders : sceneData.skySampleCounts.w); }
 vec3 RainbowCenter() { return sceneData.rainbowCenterEnabled.xyz; }
-vec3 rain_frame(vec3 v) { return vec3(dot(v, sceneData.rainbowAxisX.xyz), v.y, dot(v, sceneData.rainbowAxisZ.xyz)); }
 vec3 RainbowRadii() { return sceneData.rainbowRadiiEdge.xyz; }
+vec3 rain_frame(vec3 v) { return vec3(dot(v, sceneData.rainbowAxisX.xyz), v.y, dot(v, sceneData.rainbowAxisZ.xyz)) / RainbowRadii(); }
 float RainbowScattering() { return sceneData.rainbowOptical.x; }
 float RainbowExtinction() { return sceneData.rainbowOptical.y; }
 int RainbowAngleBins() { return int(sceneData.rainbowOptical.z); }
@@ -182,9 +182,8 @@ mat4 mie_mueller(ScatterGeom g, int aerosol, int band) {
 
 vec4 scatter_band(ScatterGeom g, vec4 s, vec3 w, int band) {
     mat4 m = SkyBetaR(band) * w.x * g.rayleigh + sceneData.mieBands[band].y * w.y * mie_mueller(g, 0, band);
-    if (w.z > 0.0) m += sceneData.mieBands[band].w * w.z * mie_mueller(g, 1, band);
-    m /= 4.0 * PI;
-    return apply_mueller(m, s, g.rot, g.flip);
+    m += w.z > 0.0 ? sceneData.mieBands[band].w * w.z * mie_mueller(g, 1, band) : mat4(0.0);
+    return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
 struct Level {
@@ -299,7 +298,7 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             else if (choice < 0.8) next = mie_sample(1, current);
             float cosSun = dot(next, L), cosCurrent = dot(next, current);
             float pdf = 0.2 / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
-            if (coarse > 0.0) pdf += coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent));
+            pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
             S[d].sampleWeight = 1.0 / (pdf * float(samples));
             S[++d].dir = next;
             entering = true;
@@ -351,15 +350,15 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     bool sunVisible = disk > 0.0 && groundT <= 0.0;
     for (int b = 0; b < SPECTRAL_BANDS; ++b) {
         float alpha = sceneData.spectralBands[b].z;
-        if (sunVisible) sky[b].x += disk * SkySunRadiance(b) * 0.5 * (alpha + 2.0) * pow(limbMu, alpha) * band_transmittance(depth, b);
+        sky[b].x += sunVisible ? disk * SkySunRadiance(b) * 0.5 * (alpha + 2.0) * pow(limbMu, alpha) * band_transmittance(depth, b) : 0.0;
         sky[b] = stokes_make_physical(sky[b]);
     }
     return sky;
 }
 
 vec2 ray_ellipsoid(vec3 origin, vec3 dir) {
-    vec3 o = rain_frame(origin - RainbowCenter()) / RainbowRadii();
-    vec3 d = rain_frame(dir) / RainbowRadii();
+    vec3 o = rain_frame(origin - RainbowCenter());
+    vec3 d = rain_frame(dir);
     float a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1.0;
     float discriminant = b * b - a * c;
     if (discriminant < 0.0) return vec2(-1.0);
@@ -367,7 +366,7 @@ vec2 ray_ellipsoid(vec3 origin, vec3 dir) {
 }
 
 float rainbow_density(vec3 localPosition) {
-    float q = length(rain_frame(localPosition - RainbowCenter()) / RainbowRadii());
+    float q = length(rain_frame(localPosition - RainbowCenter()));
     float softness = sceneData.rainbowRadiiEdge.w;
     if (softness <= 0.0) return q <= 1.0 ? 1.0 : 0.0;
     return 1.0 - smoothstep(1.0 - softness, 1.0, q);
@@ -383,7 +382,7 @@ vec2 rain_segment(vec3 origin, vec3 direction) {
     vec2 hit = ray_ellipsoid(origin, direction);
     hit.x = max(hit.x, 0.0);
     float ground = ray_sphere(origin + vec3(0.0, SkyEarthRadius() + 1.0, 0.0), direction, SkyEarthRadius()).x;
-    if (ground > 0.0) hit.y = min(hit.y, ground);
+    hit.y = ground > 0.0 ? min(hit.y, ground) : hit.y;
     return hit;
 }
 
@@ -512,12 +511,12 @@ void main() {
     vec3 xyz = accumulatedXyz / float(max(1u, samplesPerPixel));
     uint index = pixel.y * pc.imageSize.x + pixel.x;
     vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
-    if (previous.w > 8.0 && xyz.y > 4.0 * previous.y) xyz *= 4.0 * previous.y / xyz.y;
+    xyz *= previous.w > 8.0 && xyz.y > 4.0 * previous.y ? 4.0 * previous.y / xyz.y : 1.0;
     xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);
     accumulation.pixels[index] = vec4(xyz, previous.w + 1.0);
     vec3 rgb = mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * xyz;
     float lowest = min(rgb.r, min(rgb.g, rgb.b));
-    if (lowest < 0.0 && xyz.y > 0.0) rgb = xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest));
+    rgb = lowest < 0.0 && xyz.y > 0.0 ? xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest)) : rgb;
     rgb = max(rgb, vec3(0.0)) * pc.frame.y;
 
     const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336,
