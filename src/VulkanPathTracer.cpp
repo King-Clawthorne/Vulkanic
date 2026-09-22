@@ -493,15 +493,14 @@ private:
     }
 
     void MessageLoop() {
-        using Clock = std::chrono::steady_clock;
-        auto previousFrame = Clock::now();
+        auto previousFrame = std::chrono::steady_clock::now();
         auto titleUpdate = previousFrame;
         uint32_t frames = 0;
 
         while (glfwWindowShouldClose(m_window) == 0) {
             glfwPollEvents();
 
-            const auto now = Clock::now();
+            const auto now = std::chrono::steady_clock::now();
             const double deltaSeconds = std::chrono::duration<double>(now - previousFrame).count();
             previousFrame = now;
 
