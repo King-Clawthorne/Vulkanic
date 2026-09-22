@@ -14,7 +14,7 @@
 
 namespace {
     void MieCoefficients(double x, std::complex<double> m, std::vector<std::complex<double>>& a, std::vector<std::complex<double>>& b) {
-        const int nmax = static_cast<int>(x + (4.0 * std::cbrt(std::max(x, 1e-8))) + 2.0) + 2;
+        const int nmax = static_cast<int>(x + 4.0 * std::cbrt(std::max(x, 1e-8)) + 4.0);
         const std::complex<double> mx = m * x;
 
         const int nstart = nmax + 15;
@@ -32,8 +32,8 @@ namespace {
 
         for (int n : std::views::iota(1, nmax + 1)) {
             const auto dn = static_cast<double>(n);
-            const double psiN = (((2.0 * dn) - 1.0) / x * psi) - psiPrev;
-            const double chiN = (((2.0 * dn) - 1.0) / x * chi) - chiPrev;
+            const double psiN = (2.0 * dn - 1.0) / x * psi - psiPrev;
+            const double chiN = (2.0 * dn - 1.0) / x * chi - chiPrev;
             const std::complex<double> ksiN(psiN, -chiN);
             const std::complex<double> ksiPrev(psiPrev, -chiPrev);
 
@@ -76,14 +76,14 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
     auto tableView = std::mdspan(table.data(), static_cast<size_t>(kSpectralBandCount), static_cast<size_t>(bins));
 
     ParallelFor(kSpectralBandCount, [&](int band) {
-        const double lambdaUm = (kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band)) * 1e-3;
+        const double lambdaUm = (kSpectralLambdaMinNm + kSpectralLambdaStepNm * band) * 1e-3;
         const double k = 2.0 * std::numbers::pi / lambdaUm;
 
         std::vector<glm::dvec4> phase(static_cast<size_t>(bins));
         glm::dvec2 cross{0.0, 0.0};
 
         for (int rs : std::views::iota(0, radiusSamples)) {
-            const double lnR = lnMin + (dLn * static_cast<double>(rs));
+            const double lnR = lnMin + dLn * static_cast<double>(rs);
             const double z = (lnR - lnRg) / lnSigma;
             const double weight = std::exp(-0.5 * z * z) * dLn;
             if (weight < 1e-12) continue;
@@ -150,7 +150,7 @@ namespace {
 
     glm::dvec4 AirToWaterFresnel(double incidence, double refraction, double n) {
         const double ci = std::cos(incidence), cr = std::cos(refraction);
-        const double rs = (ci - (n * cr)) / (ci + (n * cr)), rp = ((n * ci) - cr) / ((n * ci) + cr);
+        const double rs = (ci - n * cr) / (ci + n * cr), rp = (n * ci - cr) / (n * ci + cr);
         const double reflectS = rs * rs, reflectP = rp * rp;
         return {reflectS, reflectP, 1.0 - reflectS, 1.0 - reflectP};
     }
