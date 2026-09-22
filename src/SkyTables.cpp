@@ -179,9 +179,9 @@ namespace {
             const auto count = static_cast<size_t>(std::lround((hi - lo) / h)) + 1;
             std::vector<double> table(count);
             const double zeta = 2.0 / 3.0 * std::pow(hi, 1.5);
-            const double scale = std::exp(-zeta) / (2.0 * std::sqrt(std::numbers::pi));
-            double y = scale / std::pow(hi, 0.25) * (1.0 - (5.0 / (72.0 * zeta)) + (385.0 / (10368.0 * zeta * zeta)));
-            double v = -scale * std::pow(hi, 0.25) * (1.0 + (7.0 / (72.0 * zeta)) - (455.0 / (10368.0 * zeta * zeta)));
+            const double scale = 0.5 * std::exp(-zeta) / std::sqrt(std::numbers::pi);
+            double y = scale / std::pow(hi, 0.25) * (1.0 - 5.0 / (72.0 * zeta) + 385.0 / (10368.0 * zeta * zeta));
+            double v = -scale * std::pow(hi, 0.25) * (1.0 + 7.0 / (72.0 * zeta) - 455.0 / (10368.0 * zeta * zeta));
             for (size_t i = count; i-- > 0;) {
                 table[i] = y;
                 const double x0 = lo + static_cast<double>(i) * h;
@@ -206,7 +206,7 @@ namespace {
     }
 
     double AiryBlend(double z) {
-        const double t = std::clamp((20.0 - z) / 8.0, 0.0, 1.0);
+        const double t = std::clamp(2.5 - 0.125 * z, 0.0, 1.0);
         return t * t * (3.0 - 2.0 * t);
     }
 
@@ -321,13 +321,12 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
         for (int i = 0; i < bins; ++i) {
             const double lo = std::max(0.0, (i - 0.5) * binWidth);
             const double hi = std::min(std::numbers::pi, (i + 0.5) * binWidth);
-            const double solidAngle = 2.0 * std::numbers::pi * (std::cos(lo) - std::cos(hi));
-            f[static_cast<size_t>(i)] = f[static_cast<size_t>(i)] / solidAngle;
+            f[static_cast<size_t>(i)] /= 2.0 * std::numbers::pi * (std::cos(lo) - std::cos(hi));
         }
         const double normalization = PhaseNormalization(f);
         for (int i = 0; i < bins; ++i) {
             const glm::dvec4 q = f[static_cast<size_t>(i)] / normalization;
-            table[(static_cast<size_t>(band) * static_cast<size_t>(bins)) + static_cast<size_t>(i)] = {
+            table[static_cast<size_t>(band) * static_cast<size_t>(bins) + static_cast<size_t>(i)] = {
                 static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z), 0.0f};
         }
     });
@@ -342,10 +341,11 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
     };
     std::vector<double> cdf(bins, 0.0);
+    double a = phase(0);
     for (int i = 1; i < bins; ++i) {
-        const double a = phase(i - 1);
         const double b = phase(i);
         cdf[i] = cdf[i - 1] + std::max(0.0, a + b);
+        a = b;
     }
     for (double value : cdf) table.push_back(glm::vec4{static_cast<float>(value / cdf.back()), 0.0f, 0.0f, 0.0f});
 }
@@ -362,7 +362,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
             const double v = 2.0 * m / (kTransmittanceMuBins - 1) - 1.0;
             const double mu = v * std::abs(v);
             const double b = r * mu;
-            const double ds = (-b + std::sqrt(std::max((b * b) - r * r + ra * ra, 0.0))) / steps;
+            const double ds = (std::sqrt(std::max(b * b - r * r + ra * ra, 0.0)) - b) / steps;
             double rayleigh = 0.0;
             double mie = 0.0;
             double ozone = 0.0;
@@ -375,7 +375,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
                 ozone += OzoneProfile(altitude) * ds;
                 coarse += std::exp(-altitude / sky.aerosols[1].scaleHeight) * ds;
             }
-            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone), static_cast<float>(coarse)};
+            table[static_cast<size_t>(a) * kTransmittanceMuBins + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone), static_cast<float>(coarse)};
         }
     });
     return table;
@@ -384,7 +384,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 namespace {
 
     double OzoneCrossSection(double wavelengthNm) {
-        const double position = std::clamp((wavelengthNm - 360.0) / 10.0, 0.0, 46.999);
+        const double position = std::clamp(0.1 * wavelengthNm - 36.0, 0.0, 46.999);
         const auto i = static_cast<size_t>(position);
         return std::lerp(kOzoneCrossSection[i], kOzoneCrossSection[i + 1], position - static_cast<double>(i));
     }
@@ -403,9 +403,9 @@ SpectralBand ComputeSpectralBand(int band) {
     for (int offset = -10; offset <= 10; offset += 5) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
-        result.ozoneCrossSection += OzoneCrossSection(wavelength) / 5.0;
-        result.sunIrradianceScale += kSolarIrradiance[static_cast<size_t>((wavelength - 390.0) / 5.0)] / 5.0;
-        for (size_t i = 0; i < 3; ++i) result.cie[i] += kCie1931[static_cast<size_t>((wavelength - 380.0) / 5.0)][i] / 5.0;
+        result.ozoneCrossSection += OzoneCrossSection(wavelength) * 0.2;
+        result.sunIrradianceScale += kSolarIrradiance[static_cast<size_t>(0.2 * wavelength - 78.0)] * 0.2;
+        result.cie += kCie1931[static_cast<size_t>(0.2 * wavelength - 76.0)] * 0.2;
     }
     return result;
 }
