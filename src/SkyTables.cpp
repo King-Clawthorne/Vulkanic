@@ -157,7 +157,7 @@ namespace {
 
     void Deposit(std::vector<glm::dvec4>& f, double theta, double weightS, double weightP, double sigma, int bins) {
         theta = std::acos(std::clamp(std::cos(theta), -1.0, 1.0));
-        const double scale = static_cast<double>(bins - 1) / std::numbers::pi;
+        const double scale = static_cast<double>(bins - 1) * std::numbers::inv_pi;
         const double centre = theta * scale;
         const double sigmaBins = std::max(sigma * scale, 0.65);
         const int radius = std::max(2, static_cast<int>(std::ceil(4.0 * sigmaBins)));
