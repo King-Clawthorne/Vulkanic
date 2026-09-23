@@ -7,7 +7,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
     vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    uvec4 skySampleCounts;
+    uvec4 skySampleCountsReserved;
     vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     uvec4 rainbowMultiple;
     vec4 spectralBands[17], cieXyz[17], sunDisk;
@@ -123,62 +123,28 @@ uint Hash(uint x) {
     return (x >> 22u) ^ x;
 }
 
-const uint SOBOL_DIMENSIONS = 8u;
-const uint SOBOL_DIRECTION[256] = uint[256](
-    0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
-    0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
-    0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u,
-    0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u,
-    0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u,
-    0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u,
-    0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u,
-    0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu,
-    0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u,
-    0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u,
-    0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u,
-    0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u,
-    0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u,
-    0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u,
-    0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u,
-    0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u,
-    0x80000000u, 0x40000000u, 0x20000000u, 0xb0000000u, 0xf8000000u, 0xdc000000u, 0x7a000000u, 0x9d000000u,
-    0x5a800000u, 0x2fc00000u, 0xa1600000u, 0xf0b00000u, 0xda880000u, 0x6fc40000u, 0x81620000u, 0x40bb0000u,
-    0x22878000u, 0xb3c9c000u, 0xfb65a000u, 0xddb2d000u, 0x78022800u, 0x9c0b3c00u, 0x5a0fb600u, 0x2d0ddb00u,
-    0xa2878080u, 0xf3c9c040u, 0xdb65a020u, 0x6db2d0b0u, 0x800228f8u, 0x400b3cdcu, 0x200fb67au, 0xb00ddb9du,
-    0x80000000u, 0x40000000u, 0x60000000u, 0x30000000u, 0xc8000000u, 0x24000000u, 0x56000000u, 0xfb000000u,
-    0xe0800000u, 0x70400000u, 0xa8600000u, 0x14300000u, 0x9ec80000u, 0xdf240000u, 0xb6d60000u, 0x8bbb0000u,
-    0x48008000u, 0x64004000u, 0x36006000u, 0xcb003000u, 0x2880c800u, 0x54402400u, 0xfe605600u, 0xef30fb00u,
-    0x7e48e080u, 0xaf647040u, 0x1eb6a860u, 0x9f8b1430u, 0xd6c81ec8u, 0xbb249f24u, 0x80d6d6d6u, 0x40bbbbbbu,
-    0x80000000u, 0xc0000000u, 0xa0000000u, 0xd0000000u, 0x58000000u, 0x94000000u, 0x3e000000u, 0xe3000000u,
-    0xbe800000u, 0x23c00000u, 0x1e200000u, 0xf3100000u, 0x46780000u, 0x67840000u, 0x78460000u, 0x84670000u,
-    0xc6788000u, 0xa784c000u, 0xd846a000u, 0x5467d000u, 0x9e78d800u, 0x33845400u, 0xe6469e00u, 0xb7673300u,
-    0x20f86680u, 0x104477c0u, 0xf8668020u, 0x4477c010u, 0x668020f8u, 0x77c01044u, 0x8020f866u, 0xc0104477u,
-    0x80000000u, 0x40000000u, 0xa0000000u, 0x50000000u, 0x88000000u, 0x24000000u, 0x12000000u, 0x2d000000u,
-    0x76800000u, 0x9e400000u, 0x08200000u, 0x64100000u, 0xb2280000u, 0x7d140000u, 0xfea20000u, 0xba490000u,
-    0x1a248000u, 0x491b4000u, 0xc4b5a000u, 0xe3739000u, 0xf6800800u, 0xde400400u, 0xa8200a00u, 0x34100500u,
-    0x3a280880u, 0x59140240u, 0xeca20120u, 0x974902d0u, 0x6ca48768u, 0xd75b49e4u, 0xcc95a082u, 0x87639641u
-);
+const uint SAMPLE_DIMENSIONS = 8u;
 
-uint SobolBits(uint index, uint dimension) {
-    uint gray = index ^ (index >> 1u), value = 0u;
-    dimension = min(dimension, SOBOL_DIMENSIONS - 1u);
-    uint directionBase = dimension * 32u;
-    while (gray != 0u) {
-        uint bit = uint(findLSB(gray));
-        value ^= SOBOL_DIRECTION[directionBase + bit];
-        gray &= gray - 1u;
-    }
-    return value;
+uint OwenScramble(uint value, uint seed) {
+    value = bitfieldReverse(value);
+    value ^= value * 0x3d20adeau;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
+    return bitfieldReverse(value);
 }
 
-float SobolFloat(uint index, uint dimension, uint scramble) {
-    uint bits = SobolBits(index, dimension) ^ Hash(scramble + dimension * 0x9e3779b9u);
+float SampleFloat(uint index, uint dimension, uint scramble) {
+    // Rank-1 base-2 sequence: bit-reversed indices, independently scrambled per dimension.
+    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
+    uint bits = OwenScramble(bitfieldReverse(index), seed);
     return (float(bits >> 8u) + 0.5) * (1.0 / 16777216.0);
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
-    float value = SobolFloat(index, dimension, scramble);
-    dimension = (dimension + 1u) % SOBOL_DIMENSIONS;
+    float value = SampleFloat(index, dimension, scramble);
+    dimension = (dimension + 1u) % SAMPLE_DIMENSIONS;
     if (dimension == 0u) ++index;
     return value;
 }
@@ -248,12 +214,13 @@ mat4 rainbow_mueller(float cosTheta, int band) {
 }
 
 mat4 rayleigh_mueller(float cosTheta) {
-    float rho = sceneData.skyVrtParams.y;
-    float delta = (1.0 - rho) / (1.0 + 0.5 * rho);
-    float deltaP = (1.0 - 2.0 * rho) / max(1.0 - rho, 1.0e-4);
+    // King correction for molecular depolarization, with rho ~ 0.0279 for air.
+    float kingDepolarization = sceneData.skyVrtParams.y;
+    float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
+    float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
     float mu2 = cosTheta * cosTheta;
     float base = 0.75 * (1.0 + mu2), p33 = 1.5 * cosTheta;
-    return mueller(delta * base + (1.0 - delta), -delta * 0.75 * (1.0 - mu2), delta * base, delta * p33, 0.0, delta * deltaP * p33);
+    return mueller(kingFactor * base + (1.0 - kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base, kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
 }
 
 void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 flip) {
@@ -457,9 +424,9 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     vec4 sky[SPECTRAL_BANDS];
     for (int b = 0; b < SPECTRAL_BANDS; ++b) sky[b] = vec4(0.0);
     float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
-    int orders = groundT > 0.0 ? 1 : int(SpecializedOrders != 0 ? SpecializedOrders : sceneData.skySampleCounts.w);
+    int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
     for (int order = 1; order <= orders; ++order)
-        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps != 0 ? SpecializedViewSteps : sceneData.skySampleCounts.y), int(SpecializedSecondarySamples != 0 ? SpecializedSecondarySamples : sceneData.skySampleCounts.x), int(SpecializedSamples != 0 ? SpecializedSamples : sceneData.skySampleCounts.z), sky);
+        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), int(SpecializedSamples), sky);
     vec3 apparent = sceneData.apparentSun.xyz;
     vec3 vertical = normalize(vec3(0.0, 1.0, 0.0) - apparent * apparent.y);
     vec2 offset = vec2(dot(viewDir, cross(vertical, apparent)), dot(viewDir, vertical) / sceneData.apparentSun.w);
@@ -583,7 +550,7 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
             if (lengthInRain <= 0.0) break;
             float tau = extinction * lengthInRain;
             float mass = tau < 0.001 ? tau * (1.0 - 0.5 * tau + tau * tau / 6.0) : 1.0 - exp(-tau);
-            float u = SobolFloat(sobolIndex, dimension++, scramble ^ uint(sampleIndex) * 1973u ^ uint(vertex) * 0x68bc21ebu);
+            float u = SampleFloat(sobolIndex, dimension++, scramble ^ uint(sampleIndex) * 1973u ^ uint(vertex) * 0x68bc21ebu);
             float distance = tau < 0.001 ? u * lengthInRain : -log(1.0 - u * mass) / extinction;
             float pdf = tau < 0.001 ? 1.0 / lengthInRain : extinction * exp(-extinction * distance) / mass;
             vec3 p = origin + direction * (hit.x + distance);
@@ -631,7 +598,7 @@ void main() {
     vec3 accumulatedXyz = vec3(0.0);
     for (uint localSample = 0; localSample < samplesPerPixel; ++localSample) {
         uint sampleNumber = frameSampleBase + localSample;
-        vec2 jitter = vec2(SobolFloat(sampleNumber, 0u, pixelSeed), SobolFloat(sampleNumber, 1u, pixelSeed));
+        vec2 jitter = vec2(SampleFloat(sampleNumber, 0u, pixelSeed), SampleFloat(sampleNumber, 1u, pixelSeed));
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
         vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);

@@ -1,5 +1,6 @@
 #include "SkyTables.h"
 #include <vulkan/vulkan_raii.hpp>
+#include <VkBootstrap.h>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #ifndef __clang_analyzer__
@@ -107,7 +108,7 @@ constexpr uint32_t kPathTracerSpirv[] = {
 
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    glm::uvec4 skySampleCounts;
+    glm::uvec4 skySampleCountsReserved;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     glm::uvec4 rainbowMultiple;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
@@ -172,7 +173,7 @@ private:
             .skySpectralParams = {s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550},
             .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
-            .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
+            .skySampleCountsReserved = {},
             .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
@@ -260,13 +261,11 @@ private:
     }
 
     void CreateWindowAndShow() {
-        if (glfwInit() != GLFW_TRUE) throw std::runtime_error("GLFW initialization failed.");
+        glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height), "Vulkanic", nullptr, nullptr);
-        if (m_window == nullptr) throw std::runtime_error("GLFW could not create the application window.");
-        
         glfwSetWindowUserPointer(m_window, this);
         glfwSetKeyCallback(m_window, KeyCallback);
         std::println("Controls: right-drag to look, R resets the view.");
@@ -274,81 +273,52 @@ private:
     }
 
     void CreateInstance() {
-        uint32_t glfwExtensionCount = 0;
-        const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-        if (glfwExtensions == nullptr || glfwExtensionCount == 0)
-            throw std::runtime_error("GLFW did not provide the required Vulkan instance extensions.");
-        std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
-        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
-        extensions.push_back(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
-        vk::ApplicationInfo appInfo{"Vulkan Path Tracer", 1, "None", 1, VK_API_VERSION_1_4};
-        vk::InstanceCreateInfo createInfo{};
-        createInfo.setPApplicationInfo(&appInfo).setPEnabledExtensionNames(extensions);
-        m_instance = vk::raii::Instance(m_context, createInfo);
+        auto instanceResult = vkb::InstanceBuilder{}
+                                  .set_app_name("Vulkan Path Tracer")
+                                  .set_engine_name("Vulkanic")
+                                  .require_api_version(1, 4)
+                                  .enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+                                  .enable_extension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+                                  .build();
+        m_selectedInstance = instanceResult.value();
+        m_instance = vk::raii::Instance(m_context, m_selectedInstance.instance);
     }
-
     void CreateSurface() {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        const VkResult result = glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
-        if (result != VK_SUCCESS)
-            throw std::runtime_error(std::format("GLFW failed to create the Vulkan surface (VkResult {}).", static_cast<int>(result)));
+        glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
     }
 
     void PickPhysicalDevice() {
-        constexpr std::array requiredExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-        for (const auto& candidate : m_instance.enumeratePhysicalDevices()) {
-            if (candidate.getProperties().apiVersion < VK_API_VERSION_1_4) continue;
+        VkPhysicalDeviceFeatures requiredFeatures{};
+        requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+        VkPhysicalDeviceVulkan13Features requiredFeatures13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        requiredFeatures13.synchronization2 = VK_TRUE;
+        VkPhysicalDeviceVulkan14Features requiredFeatures14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+        requiredFeatures14.pushDescriptor = VK_TRUE;
 
-            const auto extensions = candidate.enumerateDeviceExtensionProperties();
-            const bool hasExtensions = std::ranges::all_of(requiredExtensions, [&](const char* required) {
-                return std::ranges::any_of(extensions, [&](const vk::ExtensionProperties& available) {
-                    return std::strcmp(available.extensionName, required) == 0;
-                });
-            });
-            if (!hasExtensions) continue;
-
-            const auto features = candidate.getFeatures2<vk::PhysicalDeviceFeatures2,
-                                                         vk::PhysicalDeviceVulkan13Features,
-                                                         vk::PhysicalDeviceVulkan14Features>();
-            if (!features.get<vk::PhysicalDeviceFeatures2>().features.shaderStorageImageWriteWithoutFormat ||
-                !features.get<vk::PhysicalDeviceVulkan13Features>().synchronization2 ||
-                !features.get<vk::PhysicalDeviceVulkan14Features>().pushDescriptor) continue;
-
-            const auto families = candidate.getQueueFamilyProperties();
-            for (uint32_t i = 0; i < families.size(); ++i) {
-                if (!(families[i].queueFlags & vk::QueueFlagBits::eGraphics) ||
-                    !candidate.getSurfaceSupportKHR(i, *m_surface)) continue;
-                const auto capabilities = candidate.getSurfaceCapabilitiesKHR(*m_surface);
-                const auto formats = candidate.getSurfaceFormatsKHR(*m_surface);
-                const auto modes = candidate.getSurfacePresentModesKHR(*m_surface);
-                if (!(capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage) || formats.empty() || modes.empty()) continue;
-                m_physicalDevice = candidate;
-                m_queueFamily = i;
-                return;
-            }
-        }
-        throw std::runtime_error("No Vulkan 1.4 device supports the required features, extensions, graphics, and presentation.");
+        vkb::PhysicalDeviceSelector selector{m_selectedInstance};
+        auto physicalDeviceResult = selector.set_minimum_version(1, 4)
+                                        .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
+                                        .add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+                                        .set_required_features(requiredFeatures)
+                                        .set_required_features_13(requiredFeatures13)
+                                        .set_required_features_14(requiredFeatures14)
+                                        .select();
+        m_selectedPhysicalDevice = physicalDeviceResult.value();
+        m_physicalDevice = vk::raii::PhysicalDevice(m_instance, m_selectedPhysicalDevice.physical_device);
     }
 
     void CreateLogicalDevice() {
-        constexpr std::array extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-        vk::PhysicalDeviceFeatures features{};
-        features.shaderStorageImageWriteWithoutFormat = true;
-        vk::PhysicalDeviceVulkan13Features features13{};
-        features13.synchronization2 = true;
-        vk::PhysicalDeviceVulkan14Features features14{};
-        features14.pushDescriptor = true;
-        features13.setPNext(&features14);
-        const float priority = 1.0f;
-        vk::DeviceQueueCreateInfo queueInfo{};
-        queueInfo.setQueueFamilyIndex(m_queueFamily).setQueuePriorities(priority);
-        vk::DeviceCreateInfo createInfo{};
-        createInfo.setPNext(&features13).setPEnabledFeatures(&features).setQueueCreateInfos(queueInfo).setPEnabledExtensionNames(extensions);
-        m_device = vk::raii::Device(m_physicalDevice, createInfo);
+        auto deviceResult = vkb::DeviceBuilder{m_selectedPhysicalDevice}.build();
+        m_selectedDevice = deviceResult.value();
+        const auto graphicsQueueFamily = m_selectedDevice.get_queue_index(vkb::QueueType::graphics);
+        const auto presentQueueFamily = m_selectedDevice.get_queue_index(vkb::QueueType::present);
+        m_queueFamily = graphicsQueueFamily.value();
+        m_device = vk::raii::Device(m_physicalDevice, m_selectedDevice.device);
         m_graphicsQueue = m_device.getQueue(m_queueFamily, 0);
+        m_presentQueue = m_device.getQueue(presentQueueFamily.value(), 0);
     }
-
     [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
                                                  vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
         return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage}, vma::AllocationCreateInfo{flags, vma::MemoryUsage::eAuto});
@@ -359,47 +329,32 @@ private:
     }
 
     void CreateSwapchain() {
-        const auto capabilities = m_physicalDevice.getSurfaceCapabilitiesKHR(*m_surface);
-        const auto formats = m_physicalDevice.getSurfaceFormatsKHR(*m_surface);
-        const auto modes = m_physicalDevice.getSurfacePresentModesKHR(*m_surface);
-        const vk::SurfaceFormatKHR desiredFormat{vk::Format::eB8G8R8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
-        const auto formatIt = std::ranges::find(formats, desiredFormat);
-        if (formatIt == formats.end()) throw std::runtime_error("Surface does not support B8G8R8A8_UNORM with SRGB_NONLINEAR.");
-        const vk::PresentModeKHR presentMode = std::ranges::contains(modes, vk::PresentModeKHR::eImmediate)
-                                                   ? vk::PresentModeKHR::eImmediate
-                                                   : vk::PresentModeKHR::eMailbox;
-        if (!std::ranges::contains(modes, presentMode)) throw std::runtime_error("Surface supports neither immediate nor mailbox presentation.");
-        vk::Extent2D extent{m_config.render.width, m_config.render.height};
-        if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
-            extent = capabilities.currentExtent;
-        } else {
-            extent.width = std::clamp(extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
-            extent.height = std::clamp(extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
-        }
-        const uint32_t imageCount = std::max(kFramesInFlight, capabilities.minImageCount);
-        vk::SwapchainCreateInfoKHR createInfo{};
-        createInfo.setSurface(*m_surface).setMinImageCount(imageCount).setImageFormat(desiredFormat.format).setImageColorSpace(desiredFormat.colorSpace)
-            .setImageExtent(extent).setImageArrayLayers(1).setImageUsage(vk::ImageUsageFlagBits::eStorage)
-            .setImageSharingMode(vk::SharingMode::eExclusive).setPreTransform(capabilities.currentTransform)
-            .setCompositeAlpha(vk::CompositeAlphaFlagBitsKHR::eOpaque).setPresentMode(presentMode).setClipped(true);
-        m_swapchain = vk::raii::SwapchainKHR(m_device, createInfo);
-        m_swapchainExtent = extent;
-        m_swapchainImages = m_swapchain.getImages();
+        auto swapchainResult = vkb::SwapchainBuilder{m_selectedDevice}
+                                   .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                                   .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
+                                   .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+                                   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
+                                   .set_desired_extent(m_config.render.width, m_config.render.height)
+                                   .set_desired_min_image_count(kFramesInFlight)
+                                   .build();
+        m_selectedSwapchain = swapchainResult.value();
+        m_swapchainExtent = vk::Extent2D{m_selectedSwapchain.extent.width, m_selectedSwapchain.extent.height};
+        m_swapchain = vk::raii::SwapchainKHR(m_device, m_selectedSwapchain.swapchain);
+        auto imagesAndViews = m_selectedSwapchain.get_images_and_image_views();
+        const auto& [images, imageViews] = imagesAndViews.value();
+        m_swapchainImages.assign(images.begin(), images.end());
         m_swapchainImageViews.clear();
         m_renderFinished.clear();
-
-        for (const auto image : m_swapchainImages) {
-            m_swapchainImageViews.emplace_back(m_device, vk::ImageViewCreateInfo{{}, image, vk::ImageViewType::e2D,
-                desiredFormat.format, {}, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+        for (size_t i = 0; i < images.size(); ++i) {
+            m_swapchainImageViews.emplace_back(m_device, imageViews[i]);
             m_renderFinished.emplace_back(m_device.createSemaphore({}));
         }
+        m_selectedSwapchain.swapchain = VK_NULL_HANDLE;
     }
-
     void CreateDescriptorSetLayout() {
         std::array<vk::DescriptorSetLayoutBinding, kDescriptorTypes.size()> layoutBindings{};
-        for (uint32_t i = 0; i < layoutBindings.size(); ++i) {
-            layoutBindings[i] = {i, kDescriptorTypes[i], 1, vk::ShaderStageFlagBits::eCompute};
-        }
+        for (const auto [binding, type] : std::views::enumerate(kDescriptorTypes))
+            layoutBindings[binding] = {static_cast<uint32_t>(binding), type, 1, vk::ShaderStageFlagBits::eCompute};
         
         vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
         createInfo.setBindings(layoutBindings);
@@ -532,7 +487,7 @@ private:
         presentInfo.setWaitSemaphores(*m_renderFinished[imageIndex]);
         presentInfo.setSwapchains(*m_swapchain);
         presentInfo.setImageIndices(imageIndex);
-        std::ignore = m_graphicsQueue.presentKHR(presentInfo);
+        std::ignore = m_presentQueue.presentKHR(presentInfo);
 
         ++m_frameIndex;
         m_currentFrame = (m_currentFrame + 1) % static_cast<uint32_t>(m_frames.size());
@@ -573,12 +528,17 @@ private:
     GLFWwindow* m_window = nullptr;
 
     vk::raii::Context m_context;
+    vkb::Instance m_selectedInstance{};
+    vkb::PhysicalDevice m_selectedPhysicalDevice{};
+    vkb::Device m_selectedDevice{};
+    vkb::Swapchain m_selectedSwapchain{};
     vk::raii::Instance m_instance{nullptr};
     vk::raii::SurfaceKHR m_surface{nullptr};
     vk::raii::PhysicalDevice m_physicalDevice{nullptr};
     vk::raii::Device m_device{nullptr};
     uint32_t m_queueFamily = 0;
     vk::raii::Queue m_graphicsQueue{nullptr};
+    vk::raii::Queue m_presentQueue{nullptr};
 
     vma::raii::Allocator m_allocator{nullptr};
     vma::raii::Buffer m_sceneDataBuffer{nullptr}, m_mieScatteringBuffer{nullptr}, m_rainbowScatteringBuffer{nullptr};
@@ -605,11 +565,7 @@ private:
 };
 
 int main() {
-    try {
-        VulkanPathTracer app;
-        app.Run();
-    } catch (const std::exception& e) {
-        std::fputs(e.what(), stderr);
-        return 1;
-    }
+    VulkanPathTracer app;
+    app.Run();
+    return 0;
 }

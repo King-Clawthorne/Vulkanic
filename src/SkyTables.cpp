@@ -1,6 +1,5 @@
 #include "SkyTables.h"
 #include "SpectralData.h"
-#include "Cie2006Data.h"
 
 #include <algorithm>
 #include <cmath>
