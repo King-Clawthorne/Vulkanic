@@ -2,7 +2,6 @@
 #include <vulkan/vulkan_raii.hpp>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
-#include <VkBootstrap.h>
 #ifndef __clang_analyzer__
 #define VMA_IMPLEMENTATION
 #endif
@@ -20,6 +19,9 @@
 #include <vector>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
 
 class CameraController {
 public:
@@ -135,9 +137,10 @@ public:
     void Run() {
         m_camera.Reset(m_config);
         CreateWindowAndShow();
-        const vkb::Instance vkbInstance = CreateInstance();
+        CreateInstance();
         CreateSurface();
-        CreateLogicalDevice(PickPhysicalDevice(vkbInstance));
+        PickPhysicalDevice();
+        CreateLogicalDevice();
         m_allocator = vma::raii::Allocator(m_instance, m_device, vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
         m_commandPool = vk::raii::CommandPool(m_device, {vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily});
         CreateSceneBuffers();
@@ -176,7 +179,7 @@ private:
             const SpectralBand spectral = ComputeSpectralBand(band);
             sceneData.spectralBands[band][0] = static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale);
             sceneData.spectralBands[band][1] = static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550);
-            sceneData.spectralBands[band][2] = static_cast<float>(spectral.limbDarkening);
+            sceneData.spectralBands[band][2] = static_cast<float>(kSpectralLambdaMinNm + kSpectralLambdaStepNm * band);
             sceneData.spectralBands[band][3] = static_cast<float>(spectral.ozoneCrossSection * s.ozoneDobsonUnits * 2.687e20 / 15000.0);
             for (size_t i = 0; i < 3; ++i) sceneData.cieXyz[band][i] = static_cast<float>(spectral.cie[i]);
             ySum += sceneData.cieXyz[band][1];
@@ -263,18 +266,13 @@ private:
         std::println("Polarizer: P toggles it, C switches linear/elliptical, [ ] adjusts it.");
     }
 
-    vkb::Instance CreateInstance() {
-        auto instanceResult = vkb::InstanceBuilder{}
-                                  .set_app_name("Vulkan Path Tracer")
-                                  .set_engine_name("None")
-                                  .require_api_version(1, 4, 0)
-                                  .enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
-                                  .enable_extension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
-                                  .request_validation_layers()
-                                  .build();
-
-        m_instance = vk::raii::Instance(m_context, instanceResult.value().instance);
-        return instanceResult.value();
+    void CreateInstance() {
+        const std::array extensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+                                       VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME};
+        vk::ApplicationInfo appInfo{"Vulkan Path Tracer", 1, "None", 1, VK_API_VERSION_1_4};
+        vk::InstanceCreateInfo createInfo{};
+        createInfo.setPApplicationInfo(&appInfo).setPEnabledExtensionNames(extensions);
+        m_instance = vk::raii::Instance(m_context, createInfo);
     }
 
     void CreateSurface() {
@@ -283,36 +281,66 @@ private:
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
     }
 
-    vkb::PhysicalDevice PickPhysicalDevice(const vkb::Instance& vkbInstance) {
-        VkPhysicalDeviceFeatures requiredFeatures{};
-        requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-        VkPhysicalDeviceVulkan13Features features13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-        features13.synchronization2 = VK_TRUE;
-        VkPhysicalDeviceVulkan14Features features14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
-        features14.pushDescriptor = VK_TRUE;
-        VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchainMaintenance{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR};
-        swapchainMaintenance.swapchainMaintenance1 = VK_TRUE;
+    void PickPhysicalDevice() {
+        constexpr std::array requiredExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                                   VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                                                   VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME};
+        for (const auto& candidate : m_instance.enumeratePhysicalDevices()) {
+            if (candidate.getProperties().apiVersion < VK_API_VERSION_1_4) continue;
 
-        auto deviceResult = vkb::PhysicalDeviceSelector{vkbInstance}
-                                .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
-                                .set_minimum_version(1, 4)
-                                .set_required_features(requiredFeatures)
-                                .set_required_features_13(features13)
-                                .add_required_extension_features(features14)
-                                .add_required_extension_features(swapchainMaintenance)
-                                .add_required_extension(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)
-                                .add_required_extension(VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME)
-                                .require_present()
-                                .select();
+            const auto extensions = candidate.enumerateDeviceExtensionProperties();
+            const bool hasExtensions = std::ranges::all_of(requiredExtensions, [&](const char* required) {
+                return std::ranges::any_of(extensions, [&](const vk::ExtensionProperties& available) {
+                    return std::strcmp(available.extensionName, required) == 0;
+                });
+            });
+            if (!hasExtensions) continue;
 
-        m_physicalDevice = vk::raii::PhysicalDevice(m_instance, deviceResult.value().physical_device);
-        return deviceResult.value();
+            const auto features = candidate.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                         vk::PhysicalDeviceVulkan13Features,
+                                                         vk::PhysicalDeviceVulkan14Features,
+                                                         vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR>();
+            if (!features.get<vk::PhysicalDeviceFeatures2>().features.shaderStorageImageWriteWithoutFormat ||
+                !features.get<vk::PhysicalDeviceVulkan13Features>().synchronization2 ||
+                !features.get<vk::PhysicalDeviceVulkan14Features>().pushDescriptor ||
+                !features.get<vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR>().swapchainMaintenance1) continue;
+
+            const auto families = candidate.getQueueFamilyProperties();
+            for (uint32_t i = 0; i < families.size(); ++i) {
+                if (!(families[i].queueFlags & vk::QueueFlagBits::eGraphics) ||
+                    !candidate.getSurfaceSupportKHR(i, *m_surface)) continue;
+                const auto capabilities = candidate.getSurfaceCapabilitiesKHR(*m_surface);
+                const auto formats = candidate.getSurfaceFormatsKHR(*m_surface);
+                const auto modes = candidate.getSurfacePresentModesKHR(*m_surface);
+                if (!(capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage) || formats.empty() || modes.empty()) continue;
+                m_physicalDevice = candidate;
+                m_queueFamily = i;
+                return;
+            }
+        }
+        throw std::runtime_error("No Vulkan 1.4 device supports the required features, extensions, graphics, and presentation.");
     }
 
-    void CreateLogicalDevice(const vkb::PhysicalDevice& vkbPhysicalDevice) {
-        auto deviceResult = vkb::DeviceBuilder{vkbPhysicalDevice}.build();
-        m_device = vk::raii::Device(m_physicalDevice, deviceResult.value().device);
-        m_queueFamily = deviceResult.value().get_queue_index(vkb::QueueType::graphics).value();
+    void CreateLogicalDevice() {
+        constexpr std::array extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                           VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+                                           VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME};
+        vk::PhysicalDeviceFeatures features{};
+        features.shaderStorageImageWriteWithoutFormat = true;
+        vk::PhysicalDeviceVulkan13Features features13{};
+        features13.synchronization2 = true;
+        vk::PhysicalDeviceVulkan14Features features14{};
+        features14.pushDescriptor = true;
+        vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchainMaintenance{};
+        swapchainMaintenance.swapchainMaintenance1 = true;
+        features13.setPNext(&features14);
+        features14.setPNext(&swapchainMaintenance);
+        const float priority = 1.0f;
+        vk::DeviceQueueCreateInfo queueInfo{};
+        queueInfo.setQueueFamilyIndex(m_queueFamily).setQueuePriorities(priority);
+        vk::DeviceCreateInfo createInfo{};
+        createInfo.setPNext(&features13).setPEnabledFeatures(&features).setQueueCreateInfos(queueInfo).setPEnabledExtensionNames(extensions);
+        m_device = vk::raii::Device(m_physicalDevice, createInfo);
         m_graphicsQueue = m_device.getQueue(m_queueFamily, 0);
     }
 
@@ -326,23 +354,37 @@ private:
     }
 
     void CreateSwapchain() {
-        vkb::SwapchainBuilder builder{*m_physicalDevice, *m_device, *m_surface, m_queueFamily, m_queueFamily};
-        builder.set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-            .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
-            .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
-            .set_desired_extent(m_config.render.width, m_config.render.height)
-            .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
-            .set_required_min_image_count(kFramesInFlight);
-        
-        auto swapchainResult = builder.build();
-        vkb::Swapchain swapchain = swapchainResult.value();
-        m_swapchain = vk::raii::SwapchainKHR(m_device, swapchain.swapchain);
-        m_swapchainExtent = swapchain.extent;
+        const auto capabilities = m_physicalDevice.getSurfaceCapabilitiesKHR(*m_surface);
+        const auto formats = m_physicalDevice.getSurfaceFormatsKHR(*m_surface);
+        const auto modes = m_physicalDevice.getSurfacePresentModesKHR(*m_surface);
+        const vk::SurfaceFormatKHR desiredFormat{vk::Format::eB8G8R8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
+        const auto formatIt = std::ranges::find(formats, desiredFormat);
+        if (formatIt == formats.end()) throw std::runtime_error("Surface does not support B8G8R8A8_UNORM with SRGB_NONLINEAR.");
+        const vk::PresentModeKHR presentMode = std::ranges::contains(modes, vk::PresentModeKHR::eImmediate)
+                                                   ? vk::PresentModeKHR::eImmediate
+                                                   : vk::PresentModeKHR::eMailbox;
+        if (!std::ranges::contains(modes, presentMode)) throw std::runtime_error("Surface supports neither immediate nor mailbox presentation.");
+        vk::Extent2D extent{m_config.render.width, m_config.render.height};
+        if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+            extent = capabilities.currentExtent;
+        } else {
+            extent.width = std::clamp(extent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+            extent.height = std::clamp(extent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+        }
+        const uint32_t imageCount = std::max(kFramesInFlight, capabilities.minImageCount);
+        vk::SwapchainCreateInfoKHR createInfo{};
+        createInfo.setSurface(*m_surface).setMinImageCount(imageCount).setImageFormat(desiredFormat.format).setImageColorSpace(desiredFormat.colorSpace)
+            .setImageExtent(extent).setImageArrayLayers(1).setImageUsage(vk::ImageUsageFlagBits::eStorage)
+            .setImageSharingMode(vk::SharingMode::eExclusive).setPreTransform(capabilities.currentTransform)
+            .setCompositeAlpha(vk::CompositeAlphaFlagBitsKHR::eOpaque).setPresentMode(presentMode).setClipped(true);
+        m_swapchain = vk::raii::SwapchainKHR(m_device, createInfo);
+        m_swapchainExtent = extent;
         m_swapchainImages = m_swapchain.getImages();
         m_swapchainImageViews.clear();
-        
-        for (VkImageView view : swapchain.get_image_views().value()) {
-            m_swapchainImageViews.emplace_back(m_device, view);
+
+        for (const auto image : m_swapchainImages) {
+            m_swapchainImageViews.emplace_back(m_device, vk::ImageViewCreateInfo{{}, image, vk::ImageViewType::e2D,
+                desiredFormat.format, {}, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
         }
     }
 

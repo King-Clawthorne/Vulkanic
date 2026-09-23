@@ -399,13 +399,15 @@ namespace {
 
 SpectralBand ComputeSpectralBand(int band) {
     const double centre = kSpectralLambdaMinNm + kSpectralLambdaStepNm * band;
-    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = -0.023 + 0.292e3 / centre, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
+    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = centre, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
     for (int offset = -10; offset <= 10; offset += 5) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
         result.ozoneCrossSection += OzoneCrossSection(wavelength) * 0.2;
-        result.sunIrradianceScale += kSolarIrradiance[static_cast<size_t>(0.2 * wavelength - 78.0)] * 0.2;
-        result.cie += kCie1931[static_cast<size_t>(0.2 * wavelength - 76.0)] * 0.2;
+        const size_t solarIndex = static_cast<size_t>(std::lround(0.2 * wavelength - 78.0));
+        const size_t cieIndex = static_cast<size_t>(std::lround(0.2 * wavelength - 72.0));
+        result.sunIrradianceScale += kSolarIrradiance[solarIndex] * 0.2;
+        result.cie += kCie1931[cieIndex] * 0.2;
     }
     return result;
 }

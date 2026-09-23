@@ -71,8 +71,8 @@ struct RuntimeConfig {
     SkyConfig sky{};
 };
 
-inline constexpr int kSpectralBandCount = 13;
-inline constexpr double kSpectralLambdaMinNm = 400.0;
+inline constexpr int kSpectralBandCount = 17;
+inline constexpr double kSpectralLambdaMinNm = 380.0;
 inline constexpr double kSpectralLambdaStepNm = 25.0;
 
 std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
