@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <exception>
 #include <format>
 #include <iterator>
 #include <optional>
@@ -47,7 +49,10 @@ struct CameraController {
     }
 
     void Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config) {
-        if (glfwGetWindowAttrib(window, GLFW_FOCUSED) != GLFW_TRUE) { mouseLookActive = false; return; }
+        if (glfwGetWindowAttrib(window, GLFW_FOCUSED) != GLFW_TRUE) {
+            mouseLookActive = false;
+            return;
+        }
         const float dt = static_cast<float>(std::min(deltaSeconds, 0.1));
         double x = 0.0, y = 0.0;
         glfwGetCursorPos(window, &x, &y);
@@ -57,7 +62,8 @@ struct CameraController {
             pitch -= static_cast<float>(y - lastMouseY) * config.input.mouseSensitivity;
         }
         mouseLookActive = mouseLook;
-        lastMouseX = x; lastMouseY = y;
+        lastMouseX = x;
+        lastMouseY = y;
         const float maxPitch = config.camera.maxPitchDegrees * kPi / 180.0f;
         pitch = std::clamp(pitch, -maxPitch, maxPitch);
         const float axis = static_cast<float>(glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) -
@@ -88,7 +94,7 @@ static_assert(offsetof(SceneData, rainbowMultiple) == 112);
 static_assert(offsetof(SceneData, spectralBands) == 128);
 static_assert(sizeof(SceneData) == 1008);
 
-constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
+constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer};
 
@@ -105,14 +111,14 @@ public:
             glfwDestroyWindow(m_window);
             m_window = nullptr;
         }
-        
+
         glfwTerminate();
     }
 
-    void Run() {
+    int Run() {
         m_camera.Reset(m_config);
-        CreateWindowAndShow();
-        CreateVulkan();
+        if (!CreateWindowAndShow()) return 1;
+        if (!CreateVulkan()) return 1;
         m_allocator = vma::raii::Allocator(m_instance, m_device, vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
         m_commandPool = vk::raii::CommandPool(m_device, {vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily});
         CreateSceneBuffers();
@@ -122,6 +128,7 @@ public:
         CreateFrameResources();
         MessageLoop();
         m_device.waitIdle();
+        return 0;
     }
 
 private:
@@ -143,60 +150,54 @@ private:
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
-        
+
         float ySum = 0.0f;
         const double sun550 = ComputeSpectralBand(6).sunIrradianceScale;
         for (int band = 0; band < kSpectralBandCount; ++band) {
             const SpectralBand spectral = ComputeSpectralBand(band);
-            sceneData.spectralBands[band][0] = static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale);
-            sceneData.spectralBands[band][1] = static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550);
-            sceneData.spectralBands[band][2] = static_cast<float>(kSpectralLambdaMinNm + kSpectralLambdaStepNm * band);
-            sceneData.spectralBands[band][3] = static_cast<float>(spectral.ozoneCrossSection * s.ozoneDobsonUnits * 2.687e20 / 15000.0);
-            for (size_t i = 0; i < 3; ++i) sceneData.cieXyz[band][i] = static_cast<float>(spectral.cie[i]);
+            sceneData.spectralBands[band] = {
+                static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale),
+                static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550),
+                static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band)),
+                static_cast<float>(spectral.ozoneCrossSection * s.ozoneDobsonUnits * 2.687e20 / 15000.0)};
+            sceneData.cieXyz[band] = glm::vec4{spectral.cie, 0.0};
             ySum += sceneData.cieXyz[band][1];
         }
-        
+
         for (auto& xyz : sceneData.cieXyz)
             for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
-        
-        sceneData.sunDisk[0] = 2.0f * kPi * (1.0f - std::cos(s.sunRadius));
-        sceneData.sunDisk[1] = std::cos(s.sunRadius + s.sunAa);
-        sceneData.sunDisk[2] = std::cos(s.sunRadius - s.sunAa);
+
+        sceneData.sunDisk = {2.0f * kPi * (1.0f - std::cos(s.sunRadius)), std::cos(s.sunRadius + s.sunAa),
+                             std::cos(s.sunRadius - s.sunAa), 0.0f};
         const float sunNorm = std::hypot(s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
-        const float trueAltitude = std::asin(s.sunDirection[1] / sunNorm) * 180.0f / kPi;
+        const float trueAltitude = std::asin(s.sunDirection[1] / sunNorm) * 180.0f * std::numbers::inv_pi_v<float>;
         const auto refraction = [](float altitude) {
             const float h = std::max(altitude, -1.0f);
-            return 1.02f / 60.0f / std::tan((h + 10.3f / (h + 5.11f)) * kPi / 180.0f);
+            return 1.02f / 60.0f / std::tan((h + (10.3f / (h + 5.11f))) * kPi / 180.0f);
         };
-        
+
         const float apparentAltitude = (trueAltitude + refraction(trueAltitude)) * kPi / 180.0f;
         const float horizontal = std::hypot(s.sunDirection[0], s.sunDirection[2]);
-        sceneData.apparentSun[0] = std::cos(apparentAltitude) * s.sunDirection[0] / horizontal;
-        sceneData.apparentSun[1] = std::sin(apparentAltitude);
-        sceneData.apparentSun[2] = std::cos(apparentAltitude) * s.sunDirection[2] / horizontal;
-        sceneData.apparentSun[3] = 1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f);
+        sceneData.apparentSun = {std::cos(apparentAltitude) * s.sunDirection[0] / horizontal, std::sin(apparentAltitude),
+                                 std::cos(apparentAltitude) * s.sunDirection[2] / horizontal,
+                                 1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f)};
         const float sunLength = std::hypot(s.sunDirection[0], s.sunDirection[2]);
         const float ax = -s.sunDirection[0] / sunLength;
         const float az = -s.sunDirection[2] / sunLength;
-        sceneData.rainbowCenterEnabled[0] = ax * r.distance;
-        sceneData.rainbowCenterEnabled[1] = r.height;
-        sceneData.rainbowCenterEnabled[2] = az * r.distance;
-        sceneData.rainbowCenterEnabled[3] = static_cast<float>(r.enabled);
-        sceneData.rainbowAxisX[0] = az;
-        sceneData.rainbowAxisX[2] = -ax;
-        sceneData.rainbowAxisZ[0] = ax;
-        sceneData.rainbowAxisZ[2] = az;
-        
+        sceneData.rainbowCenterEnabled = {ax * r.distance, r.height, az * r.distance, static_cast<float>(r.enabled)};
+        sceneData.rainbowAxisX = {az, 0.0f, -ax, 0.0f};
+        sceneData.rainbowAxisZ = {ax, 0.0f, az, 0.0f};
+
         for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
             const double beta = s.aerosols[aerosol].beta;
             const double reference = m_mieCrossSections[aerosol][6].x;
             for (int band = 0; band < kSpectralBandCount; ++band) {
                 const glm::dvec2& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
-                sceneData.mieBands[band][2 * aerosol] = static_cast<float>(beta * cross.x / reference);
-                sceneData.mieBands[band][2 * aerosol + 1] = static_cast<float>(beta * cross.y / reference);
+                sceneData.mieBands[band][static_cast<int>(2 * aerosol)] = static_cast<float>(beta * cross.x / reference);
+                sceneData.mieBands[band][static_cast<int>((2 * aerosol) + 1)] = static_cast<float>(beta * cross.y / reference);
             }
         }
-        
+
         return sceneData;
     }
 
@@ -224,19 +225,34 @@ private:
         UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span{&sceneData, 1}));
     }
 
-    void CreateWindowAndShow() {
-        glfwInit();
+    bool CreateWindowAndShow() {
+        if (glfwInit() != GLFW_TRUE) {
+            const char* description = nullptr;
+            const int error = glfwGetError(&description);
+            std::println(stderr, "GLFW initialization failed ({}): {}", error,
+                         description != nullptr ? description : "no details");
+            return false;
+        }
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height), "Vulkanic", nullptr, nullptr);
+        if (m_window == nullptr) {
+            const char* description = nullptr;
+            const int error = glfwGetError(&description);
+            std::println(stderr, "GLFW window creation failed ({}): {}", error,
+                         description != nullptr ? description : "no details");
+            glfwTerminate();
+            return false;
+        }
         glfwSetWindowUserPointer(m_window, this);
         glfwSetKeyCallback(m_window, KeyCallback);
         std::println("Controls: right-drag to look, R resets the view.");
         std::println("Polarizer: P toggles it, C switches linear/elliptical, [ ] adjusts it.");
+        return true;
     }
 
-    void CreateVulkan() {
+    bool CreateVulkan() {
         m_selectedInstance = vkb::InstanceBuilder{}
                                  .set_app_name("Vulkan Path Tracer")
                                  .set_engine_name("Vulkanic")
@@ -247,14 +263,18 @@ private:
                                  .value();
         m_instance = vk::raii::Instance(m_context, m_selectedInstance.instance);
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
+        const VkResult surfaceResult = glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
+        if (surfaceResult != VK_SUCCESS) {
+            std::println(stderr, "Vulkan surface creation failed (VkResult {}).", static_cast<int>(surfaceResult));
+            return false;
+        }
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
 
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-        VkPhysicalDeviceVulkan13Features requiredFeatures13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceVulkan13Features requiredFeatures13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         requiredFeatures13.synchronization2 = VK_TRUE;
-        VkPhysicalDeviceVulkan14Features requiredFeatures14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+        VkPhysicalDeviceVulkan14Features requiredFeatures14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
         requiredFeatures14.pushDescriptor = VK_TRUE;
 
         m_selectedPhysicalDevice = vkb::PhysicalDeviceSelector{m_selectedInstance}
@@ -275,6 +295,7 @@ private:
         m_device = vk::raii::Device(m_physicalDevice, m_selectedDevice.device);
         m_graphicsQueue = m_device.getQueue(m_queueFamily, 0);
         m_presentQueue = m_device.getQueue(presentQueueFamily.value(), 0);
+        return true;
     }
     [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
                                                  vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
@@ -287,7 +308,7 @@ private:
 
     void CreateSwapchain() {
         auto swapchainResult = vkb::SwapchainBuilder{m_selectedDevice}
-                                   .set_desired_format({VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                                   .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
                                    .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
                                    .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
                                    .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
@@ -312,7 +333,7 @@ private:
         std::array<vk::DescriptorSetLayoutBinding, kDescriptorTypes.size()> layoutBindings{};
         for (const auto [binding, type] : std::views::enumerate(kDescriptorTypes))
             layoutBindings[binding] = {static_cast<uint32_t>(binding), type, 1, vk::ShaderStageFlagBits::eCompute};
-        
+
         vk::DescriptorSetLayoutCreateInfo createInfo{vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor};
         createInfo.setBindings(layoutBindings);
         m_descriptorSetLayout = vk::raii::DescriptorSetLayout(m_device, createInfo);
@@ -366,7 +387,7 @@ private:
         const PushConstants constants{
             .forward = {fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel)},
             .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
-            .up = {fy * rz * tanHalfFov, (fz * rx - fx * rz) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
+            .up = {fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
             .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0f},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
@@ -522,7 +543,16 @@ private:
 };
 
 int main() {
-    VulkanPathTracer app;
-    app.Run();
-    return 0;
+    try {
+        VulkanPathTracer app;
+        return app.Run();
+    } catch (const std::exception& error) {
+        std::fputs("Vulkanic failed: ", stderr);
+        std::fputs(error.what(), stderr);
+        std::fputc('\n', stderr);
+        return 1;
+    } catch (...) {
+        std::fputs("Vulkanic failed with an unknown exception.\n", stderr);
+        return 1;
+    }
 }

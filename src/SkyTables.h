@@ -86,7 +86,7 @@ inline constexpr int kTransmittanceMuBins = 256;
 
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
-inline double OzoneProfile(double altitude) { return std::max(0.0, std::min(altitude / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - altitude / 15000.0)); }
+inline double OzoneProfile(double altitude) { return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0))); }
 
 struct SpectralBand {
     double betaRayleighScale, ozoneCrossSection, sunIrradianceScale;
@@ -99,6 +99,6 @@ inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i) integral += phase[i].x * std::sin(i * dTheta) + phase[i + 1].x * std::sin((i + 1) * dTheta);
+    for (int i = 0; i + 1 < bins; ++i) integral += (phase[i].x * std::sin(i * dTheta)) + (phase[i + 1].x * std::sin((i + 1) * dTheta));
     return 0.25 * integral * dTheta;
 }

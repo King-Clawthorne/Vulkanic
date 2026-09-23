@@ -8,6 +8,7 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -modernize-avoid-c-arrays,
   -modernize-use-trailing-return-type,
+  -modernize-use-std-numbers,
   -readability-braces-around-statements,
   -readability-function-cognitive-complexity,
   -readability-identifier-length,

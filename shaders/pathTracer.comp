@@ -48,8 +48,6 @@ float solar_limb_intensity(float mu, float wavelengthNm) {
         coefficients[4] = -1.71150 + 0.011977 * inv5;
         coefficients[5] = 0.49062 - 0.003347 * inv5;
     } else {
-        // The measured fit has separate short-wavelength parameterizations and a gap near the Balmer jump.
-        // Use its published disk-average power-law approximation below the polynomial fit's valid range.
         float alpha = clamp(-0.507 + 0.441 * inv, 0.0, 1.0);
         return 0.5 * (alpha + 2.0) * pow(max(mu, 0.0), alpha);
     }
@@ -60,9 +58,6 @@ float solar_limb_intensity(float mu, float wavelengthNm) {
     return profile / diskAverage;
 }
 
-// Semi-empirical quiet-Sun continuum polarization (Stenflo 2005).
-// Empirical p_c at mu=0.1 is linearly interpolated from 25 nm averages of the
-// IRSOL SS2 atlas continuum column, in percent. The atlas reaches 698.7 nm.
 float solar_limb_polarization(float mu, float wavelengthNm, float intensityRatio) {
     const float continuumPercent[12] = float[12](0.188052, 0.115055, 0.073447, 0.048919, 0.033996, 0.024649,
                                                   0.018648, 0.014720, 0.012123, 0.010416, 0.009340, 0.008744);
@@ -85,7 +80,7 @@ vec4 procedural_star(vec3 direction) {
     vec2 cellPosition = uv * grid;
     ivec2 baseCell = ivec2(floor(cellPosition));
     vec2 localPosition = fract(cellPosition);
-    vec4 stars = vec4(0.0); // brightness, temperature, angular radius, reserved
+    vec4 stars = vec4(0.0);
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             ivec2 cell = baseCell + ivec2(x, y);
@@ -123,22 +118,14 @@ uint Hash(uint x) {
 }
 
 const uint SAMPLE_DIMENSIONS = 8u;
-
-uint OwenScramble(uint value, uint seed) {
-    value = bitfieldReverse(value);
-    value ^= value * 0x3d20adeau;
-    value += seed;
-    value *= (seed >> 16u) | 1u;
-    value ^= value * 0x05526c56u;
-    value ^= value * 0x53a22864u;
-    return bitfieldReverse(value);
-}
+const float R2_ALPHA[SAMPLE_DIMENSIONS] = float[SAMPLE_DIMENSIONS](
+    0.754877666247, 0.569840290998, 0.430159709002, 0.324717957245,
+    0.245122333753, 0.185037375249, 0.139680581996, 0.105441751757);
 
 float SampleFloat(uint index, uint dimension, uint scramble) {
-    // Rank-1 base-2 sequence: bit-reversed indices, independently scrambled per dimension.
-    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
-    uint bits = OwenScramble(bitfieldReverse(index), seed);
-    return (float(bits >> 8u) + 0.5) * (1.0 / 16777216.0);
+    dimension = min(dimension, SAMPLE_DIMENSIONS - 1u);
+    float rotation = (float(Hash(scramble ^ (dimension * 0x9e3779b9u)) >> 8u) + 0.5) * (1.0 / 16777216.0);
+    return fract(float(index) * R2_ALPHA[dimension] + rotation);
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
@@ -213,7 +200,6 @@ mat4 rainbow_mueller(float cosTheta, int band) {
 }
 
 mat4 rayleigh_mueller(float cosTheta) {
-    // King correction for molecular depolarization, with rho ~ 0.0279 for air.
     float kingDepolarization = sceneData.skyVrtParams.y;
     float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
     float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
@@ -425,7 +411,7 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
     int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
     for (int order = 1; order <= orders; ++order)
-        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), int(SpecializedSamples), sky);
+        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples), int(SpecializedSecondarySamples), sky);
     vec3 apparent = sceneData.apparentSun.xyz;
     vec3 vertical = normalize(vec3(0.0, 1.0, 0.0) - apparent * apparent.y);
     vec2 offset = vec2(dot(viewDir, cross(vertical, apparent)), dot(viewDir, vertical) / sceneData.apparentSun.w);
