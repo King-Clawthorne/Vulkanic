@@ -6,13 +6,9 @@
 #include <cstdint>
 #include <numbers>
 #include <vector>
+#include <glm/glm.hpp>
 
 inline constexpr float kPi = std::numbers::pi_v<float>;
-
-struct Vec3 {
-    float x, y, z;
-    friend bool operator==(const Vec3&, const Vec3&) = default;
-};
 
 struct AerosolConfig {
     float beta, scaleHeight, refractiveIndexReal, refractiveIndexImag, meanRadiusMicrometers, sigma;
@@ -22,7 +18,7 @@ struct AerosolConfig {
 struct SkySpectralConfig {
     float betaRayleigh550 = 13.5e-6f;
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
-    std::array<float, 3> sunDirection{0.35f, 0.01f, 0.25f};
+    glm::vec3 sunDirection{0.35f, 0.01f, 0.25f};
     float sunRadius = 0.00465f, sunAa = 0.0005f;
     uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 3;
 
@@ -39,7 +35,7 @@ struct SkySpectralConfig {
 struct RainbowConfig {
     uint32_t enabled = 1;
     float distance = 4000.0f, height = 0.0f;
-    Vec3 radii{.x = 6000.0f, .y = 6000.0f, .z = 1500.0f};
+    glm::vec3 radii{6000.0f, 6000.0f, 1500.0f};
     float edgeSoftness = 0.15f, scatteringCoefficient = 5.0e-4f, extinctionCoefficient = 5.0e-4f;
     float effectiveRadiusMicrometers = 500.0f, effectiveVariance = 0.08f;
     uint32_t angleBins = 4097, viewSteps = 24, includeSecondary = 1;
@@ -53,8 +49,8 @@ struct RenderConfig {
 };
 
 struct CameraConfig {
-    Vec3 initialPosition{.x = 0.0f, .y = 2.0f, .z = -10.0f};
-    Vec3 initialLookAt{.x = 0.0f, .y = 0.5f, .z = 0.0f};
+    glm::vec3 initialPosition{0.0f, 2.0f, -10.0f};
+    glm::vec3 initialLookAt{0.0f, 0.5f, 0.0f};
     float fovYDegrees = 40.0f, maxPitchDegrees = 89.0f;
 };
 
@@ -79,46 +75,30 @@ inline constexpr int kSpectralBandCount = 13;
 inline constexpr double kSpectralLambdaMinNm = 400.0;
 inline constexpr double kSpectralLambdaStepNm = 25.0;
 
-struct MieMatrixEntry {
-    float f11, f12, f33, f34;
-};
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
-struct PhaseQuad {
-    double f11 = 0.0, f12 = 0.0, f33 = 0.0, f34 = 0.0;
-    PhaseQuad& operator+=(const PhaseQuad& o) { f11 += o.f11; f12 += o.f12; f33 += o.f33; f34 += o.f34; return *this; }
-    friend PhaseQuad operator*(const PhaseQuad& q, double s) { return {.f11 = q.f11 * s, .f12 = q.f12 * s, .f33 = q.f33 * s, .f34 = q.f34 * s}; }
-    friend PhaseQuad operator/(const PhaseQuad& q, double s) { return {.f11 = q.f11 / s, .f12 = q.f12 / s, .f33 = q.f33 / s, .f34 = q.f34 / s}; }
-};
+std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
-struct MieCrossSection {
-    double extinction, scattering;
-};
-
-std::vector<MieMatrixEntry> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<MieCrossSection, kSpectralBandCount>& crossSections);
-
-std::vector<MieMatrixEntry> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
-
-void AppendSamplingCdf(std::vector<MieMatrixEntry>& table, int bins, size_t firstEntry);
+void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry);
 
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;
 
-std::vector<std::array<float, 4>> ComputeTransmittanceTable(const SkySpectralConfig& sky);
+std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
-inline double OzoneProfile(double altitude) { return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0))); }
+inline double OzoneProfile(double altitude) { return std::max(0.0, std::min(altitude / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - altitude / 15000.0)); }
 
 struct SpectralBand {
     double betaRayleighScale, limbDarkening, ozoneCrossSection, sunIrradianceScale;
-    std::array<double, 3> cie;
+    glm::dvec3 cie;
 };
 
 SpectralBand ComputeSpectralBand(int band);
 
-inline double PhaseNormalization(const std::vector<PhaseQuad>& phase) {
+inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i)
-        integral += 0.5 * ((phase[i].f11 * std::sin(i * dTheta)) + (phase[i + 1].f11 * std::sin((i + 1) * dTheta))) * dTheta;
-    return 0.5 * integral;
+    for (int i = 0; i + 1 < bins; ++i) integral += phase[i].x * std::sin(i * dTheta) + phase[i + 1].x * std::sin((i + 1) * dTheta);
+    return 0.25 * integral * dTheta;
 }
