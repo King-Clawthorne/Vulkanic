@@ -89,7 +89,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 inline double OzoneProfile(double altitude) { return std::max(0.0, std::min(altitude / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - altitude / 15000.0)); }
 
 struct SpectralBand {
-    double betaRayleighScale, limbDarkening, ozoneCrossSection, sunIrradianceScale;
+    double betaRayleighScale, ozoneCrossSection, sunIrradianceScale;
     glm::dvec3 cie;
 };
 

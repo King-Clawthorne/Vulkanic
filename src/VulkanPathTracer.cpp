@@ -7,25 +7,22 @@
 #define VMA_IMPLEMENTATION
 #endif
 #include <vk_mem_alloc_raii.hpp>
-#include <array>
 #include <algorithm>
+#include <array>
 #include <chrono>
-#include <format>
-#include <print>
+#include <cmath>
 #include <cstddef>
-#include <memory>
+#include <format>
+#include <iterator>
 #include <optional>
+#include <print>
 #include <ranges>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
-#include <limits>
-#include <stdexcept>
 
-class CameraController {
-public:
+struct CameraController {
     struct View {
         float yaw, pitch;
         bool polarizerEnabled;
@@ -33,73 +30,45 @@ public:
         friend bool operator==(const View&, const View&) = default;
     };
 
-    void Reset(const RuntimeConfig& config);
-    void ClampPitch(const RuntimeConfig& config);
-    void OnKeyPress(int key, const RuntimeConfig& config);
-    void Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config);
-    [[nodiscard]] View GetView() const;
+    float yaw = 0.0f, pitch = 0.0f, polarizerAngle = 0.0f, ellipticity = kPi * 0.125f;
+    double lastMouseX = 0.0, lastMouseY = 0.0;
+    bool mouseLookActive = false, polarizerEnabled = false, elliptical = false;
 
-private:
-    float m_yaw = 0.0f, m_pitch = 0.0f;
-    bool m_mouseLookActive = false;
-    double m_lastMouseX = 0.0, m_lastMouseY = 0.0;
-    bool m_polarizerEnabled = false, m_polarizerElliptical = false;
-    float m_polarizerAngle = 0.0f, m_polarizerEllipticity = kPi * 0.125f;
+    void Reset(const RuntimeConfig& config) {
+        const glm::vec3 delta = config.camera.initialLookAt - config.camera.initialPosition;
+        yaw = std::atan2(delta.x, delta.z);
+        pitch = std::atan2(delta.y, std::hypot(delta.x, delta.z));
+    }
+
+    void OnKeyPress(int key, const RuntimeConfig& config) {
+        if (key == GLFW_KEY_R) Reset(config);
+        if (key == GLFW_KEY_P) polarizerEnabled = !polarizerEnabled;
+        if (key == GLFW_KEY_C) elliptical = !elliptical;
+    }
+
+    void Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config) {
+        if (glfwGetWindowAttrib(window, GLFW_FOCUSED) != GLFW_TRUE) { mouseLookActive = false; return; }
+        const float dt = static_cast<float>(std::min(deltaSeconds, 0.1));
+        double x = 0.0, y = 0.0;
+        glfwGetCursorPos(window, &x, &y);
+        const bool mouseLook = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        if (mouseLook && mouseLookActive) {
+            yaw += static_cast<float>(x - lastMouseX) * config.input.mouseSensitivity;
+            pitch -= static_cast<float>(y - lastMouseY) * config.input.mouseSensitivity;
+        }
+        mouseLookActive = mouseLook;
+        lastMouseX = x; lastMouseY = y;
+        const float maxPitch = config.camera.maxPitchDegrees * kPi / 180.0f;
+        pitch = std::clamp(pitch, -maxPitch, maxPitch);
+        const float axis = static_cast<float>(glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) -
+                           static_cast<float>(glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS);
+        const float rotation = axis * config.input.polarizerRotateSpeed * dt;
+        if (elliptical) ellipticity = std::clamp(ellipticity + rotation, -kPi * 0.25f, kPi * 0.25f);
+        else polarizerAngle += rotation;
+    }
+
+    [[nodiscard]] View GetView() const { return {.yaw = yaw, .pitch = pitch, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f}; }
 };
-
-namespace {
-    float MaxPitchRadians(const RuntimeConfig& config) { return config.camera.maxPitchDegrees * kPi / 180.0f; }
-    float Axis(GLFWwindow* window, int negativeKey, int positiveKey) {
-        return static_cast<float>(glfwGetKey(window, positiveKey) == GLFW_PRESS) - static_cast<float>(glfwGetKey(window, negativeKey) == GLFW_PRESS);
-    }
-}
-
-void CameraController::Reset(const RuntimeConfig& config) {
-    const glm::vec3& from = config.camera.initialPosition;
-    const glm::vec3& to = config.camera.initialLookAt;
-    m_yaw = std::atan2(to.x - from.x, to.z - from.z);
-    m_pitch = std::atan2(to.y - from.y, std::hypot(to.x - from.x, to.z - from.z));
-}
-
-void CameraController::ClampPitch(const RuntimeConfig& config) {
-    m_pitch = std::clamp(m_pitch, -MaxPitchRadians(config), MaxPitchRadians(config));
-}
-
-void CameraController::OnKeyPress(int key, const RuntimeConfig& config) {
-    if (key == GLFW_KEY_R) Reset(config);
-    if (key == GLFW_KEY_P) m_polarizerEnabled = !m_polarizerEnabled;
-    if (key == GLFW_KEY_C) m_polarizerElliptical = !m_polarizerElliptical;
-}
-
-void CameraController::Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config) {
-    if (glfwGetWindowAttrib(window, GLFW_FOCUSED) != GLFW_TRUE) {
-        m_mouseLookActive = false;
-        return;
-    }
-    
-    const float dt = static_cast<float>(std::min(deltaSeconds, 0.1));
-
-    double cursorX = 0.0, cursorY = 0.0;
-    glfwGetCursorPos(window, &cursorX, &cursorY);
-    const bool mouseLook = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-    if (mouseLook && m_mouseLookActive) {
-        m_yaw += static_cast<float>(cursorX - m_lastMouseX) * config.input.mouseSensitivity;
-        m_pitch -= static_cast<float>(cursorY - m_lastMouseY) * config.input.mouseSensitivity;
-    }
-    
-    m_mouseLookActive = mouseLook;
-    m_lastMouseX = cursorX;
-    m_lastMouseY = cursorY;
-    ClampPitch(config);
-
-    const float analyzer = Axis(window, GLFW_KEY_LEFT_BRACKET, GLFW_KEY_RIGHT_BRACKET) * config.input.polarizerRotateSpeed * dt;
-    if (m_polarizerElliptical) m_polarizerEllipticity = std::clamp(m_polarizerEllipticity + analyzer, -kPi * 0.25f, kPi * 0.25f);
-    else m_polarizerAngle += analyzer;
-}
-
-CameraController::View CameraController::GetView() const {
-    return {.yaw = m_yaw, .pitch = m_pitch, .polarizerEnabled = m_polarizerEnabled, .polarizerAngle = m_polarizerAngle, .polarizerEllipticity = m_polarizerElliptical ? m_polarizerEllipticity : 0.0f};
-}
 
 constexpr uint32_t kFramesInFlight = 2;
 constexpr uint32_t kPathTracerSpirv[] = {
@@ -108,17 +77,16 @@ constexpr uint32_t kPathTracerSpirv[] = {
 
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    glm::uvec4 skySampleCountsReserved;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
-    glm::uvec4 rainbowMultiple;
+    std::array<uint32_t, 4> rainbowMultiple;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
     glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun;
 };
 
-static_assert(offsetof(SceneData, skyVrtParams) == 64);
-static_assert(offsetof(SceneData, rainbowMultiple) == 128);
-static_assert(offsetof(SceneData, spectralBands) == 144);
-static_assert(sizeof(SceneData) == 1024);
+static_assert(offsetof(SceneData, skyVrtParams) == 48);
+static_assert(offsetof(SceneData, rainbowMultiple) == 112);
+static_assert(offsetof(SceneData, spectralBands) == 128);
+static_assert(sizeof(SceneData) == 1008);
 
 constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
@@ -144,10 +112,7 @@ public:
     void Run() {
         m_camera.Reset(m_config);
         CreateWindowAndShow();
-        CreateInstance();
-        CreateSurface();
-        PickPhysicalDevice();
-        CreateLogicalDevice();
+        CreateVulkan();
         m_allocator = vma::raii::Allocator(m_instance, m_device, vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
         m_commandPool = vk::raii::CommandPool(m_device, {vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily});
         CreateSceneBuffers();
@@ -173,7 +138,6 @@ private:
             .skySpectralParams = {s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550},
             .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
-            .skySampleCountsReserved = {},
             .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
@@ -272,24 +236,20 @@ private:
         std::println("Polarizer: P toggles it, C switches linear/elliptical, [ ] adjusts it.");
     }
 
-    void CreateInstance() {
-        auto instanceResult = vkb::InstanceBuilder{}
-                                  .set_app_name("Vulkan Path Tracer")
-                                  .set_engine_name("Vulkanic")
-                                  .require_api_version(1, 4)
-                                  .enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
-                                  .enable_extension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
-                                  .build();
-        m_selectedInstance = instanceResult.value();
+    void CreateVulkan() {
+        m_selectedInstance = vkb::InstanceBuilder{}
+                                 .set_app_name("Vulkan Path Tracer")
+                                 .set_engine_name("Vulkanic")
+                                 .require_api_version(1, 4)
+                                 .enable_extension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME)
+                                 .enable_extension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME)
+                                 .build()
+                                 .value();
         m_instance = vk::raii::Instance(m_context, m_selectedInstance.instance);
-    }
-    void CreateSurface() {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
         glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
-    }
 
-    void PickPhysicalDevice() {
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
         VkPhysicalDeviceVulkan13Features requiredFeatures13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -297,21 +257,18 @@ private:
         VkPhysicalDeviceVulkan14Features requiredFeatures14{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
         requiredFeatures14.pushDescriptor = VK_TRUE;
 
-        vkb::PhysicalDeviceSelector selector{m_selectedInstance};
-        auto physicalDeviceResult = selector.set_minimum_version(1, 4)
-                                        .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
-                                        .add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME)
-                                        .set_required_features(requiredFeatures)
-                                        .set_required_features_13(requiredFeatures13)
-                                        .set_required_features_14(requiredFeatures14)
-                                        .select();
-        m_selectedPhysicalDevice = physicalDeviceResult.value();
+        m_selectedPhysicalDevice = vkb::PhysicalDeviceSelector{m_selectedInstance}
+                                       .set_minimum_version(1, 4)
+                                       .set_surface(static_cast<VkSurfaceKHR>(*m_surface))
+                                       .add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+                                       .set_required_features(requiredFeatures)
+                                       .set_required_features_13(requiredFeatures13)
+                                       .set_required_features_14(requiredFeatures14)
+                                       .select()
+                                       .value();
         m_physicalDevice = vk::raii::PhysicalDevice(m_instance, m_selectedPhysicalDevice.physical_device);
-    }
 
-    void CreateLogicalDevice() {
-        auto deviceResult = vkb::DeviceBuilder{m_selectedPhysicalDevice}.build();
-        m_selectedDevice = deviceResult.value();
+        m_selectedDevice = vkb::DeviceBuilder{m_selectedPhysicalDevice}.build().value();
         const auto graphicsQueueFamily = m_selectedDevice.get_queue_index(vkb::QueueType::graphics);
         const auto presentQueueFamily = m_selectedDevice.get_queue_index(vkb::QueueType::present);
         m_queueFamily = graphicsQueueFamily.value();

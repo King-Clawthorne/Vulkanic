@@ -7,7 +7,6 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
     vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    uvec4 skySampleCountsReserved;
     vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     uvec4 rainbowMultiple;
     vec4 spectralBands[17], cieXyz[17], sunDisk;

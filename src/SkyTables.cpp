@@ -13,19 +13,22 @@
 #include <stdexcept>
 
 namespace {
-    void MieCoefficients(double x, std::complex<double> m, std::vector<std::complex<double>>& a, std::vector<std::complex<double>>& b) {
+    void MieCoefficients(double x, std::complex<double> m, std::vector<std::complex<double>>& a,
+                        std::vector<std::complex<double>>& b, std::vector<std::complex<double>>& D) {
         const int nmax = static_cast<int>(x + 4.0 * std::cbrt(std::max(x, 1e-8)) + 4.0);
         const std::complex<double> mx = m * x;
 
         const int nstart = nmax + 15;
-        std::vector<std::complex<double>> D(static_cast<size_t>(nstart) + 1u, std::complex<double>(0.0, 0.0));
+        D.resize(static_cast<size_t>(nstart) + 1u);
+        D[static_cast<size_t>(nstart)] = {0.0, 0.0};
         for (int n = nstart; n > 0; --n) {
             const std::complex<double> nOverMx = std::complex<double>(static_cast<double>(n), 0.0) / mx;
             D[static_cast<size_t>(n) - 1u] = nOverMx - std::complex<double>(1.0, 0.0) / (D[static_cast<size_t>(n)] + nOverMx);
         }
 
-        a.assign(static_cast<size_t>(nmax) + 1u, std::complex<double>(0.0, 0.0));
-        b.assign(static_cast<size_t>(nmax) + 1u, std::complex<double>(0.0, 0.0));
+        a.resize(static_cast<size_t>(nmax) + 1u);
+        b.resize(static_cast<size_t>(nmax) + 1u);
+        a[0] = b[0] = {0.0, 0.0};
 
         double psiPrev = std::cos(x), psi = std::sin(x);
         double chiPrev = -std::sin(x), chi = std::cos(x);
@@ -52,8 +55,7 @@ namespace {
 namespace {
     template <class Body>
     void ParallelFor(int count, Body body) {
-        std::vector<int> indices(static_cast<size_t>(count));
-        std::ranges::iota(indices, 0);
+        const auto indices = std::views::iota(0, count);
         std::for_each(std::execution::par, indices.begin(), indices.end(), body);
     }
 }
@@ -81,6 +83,7 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
 
         std::vector<glm::dvec4> phase(static_cast<size_t>(bins));
         glm::dvec2 cross{0.0, 0.0};
+        std::vector<std::complex<double>> a, b, D;
 
         for (int rs : std::views::iota(0, radiusSamples)) {
             const double lnR = lnMin + dLn * static_cast<double>(rs);
@@ -90,8 +93,7 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
 
             const double r = std::exp(lnR);
             const double x = k * r;
-            std::vector<std::complex<double>> a, b;
-            MieCoefficients(x, m, a, b);
+            MieCoefficients(x, m, a, b, D);
             const int nmax = static_cast<int>(a.size()) - 1;
             for (int n : std::views::iota(1, nmax + 1)) {
                 const double order = 2.0 * n + 1.0;
@@ -228,31 +230,30 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
     constexpr int subWavelengths = 5;
     constexpr int radiusSamples = 64;
     constexpr int raySamples = 16384 / subWavelengths;
+    const double sigmaLn = std::sqrt(std::log1p(static_cast<double>(rainbow.effectiveVariance)));
+    const double geometricRadiusUm = static_cast<double>(rainbow.effectiveRadiusMicrometers) / std::exp(2.5 * sigmaLn * sigmaLn);
+    double radiusWeightSum = 0.0;
+    std::array<double, radiusSamples> radiiUm{};
+    std::array<double, radiusSamples> radiusWeights{};
+    for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
+        const double z = sigmaLn > 1.0e-8
+                             ? -3.5 + 7.0 * (static_cast<double>(radiusIndex) + 0.5) / radiusSamples
+                             : 0.0;
+        const double radiusUm = geometricRadiusUm * std::exp(sigmaLn * z);
+        const double numberWeight = sigmaLn > 1.0e-8 ? std::exp(-0.5 * z * z) : 1.0;
+        const double weight = numberWeight * radiusUm * radiusUm;
+        radiiUm[static_cast<size_t>(radiusIndex)] = radiusUm;
+        radiusWeights[static_cast<size_t>(radiusIndex)] = weight;
+        radiusWeightSum += weight;
+    }
+    const int bows = rainbow.includeSecondary != 0 ? 2 : 1;
 
     ParallelFor(kSpectralBandCount, [&](int band) {
         std::vector<glm::dvec4> f(static_cast<size_t>(bins));
 
-        const double sigmaLn = std::sqrt(std::log1p(static_cast<double>(rainbow.effectiveVariance)));
-        const double geometricRadiusUm = static_cast<double>(rainbow.effectiveRadiusMicrometers) / std::exp(2.5 * sigmaLn * sigmaLn);
-        double radiusWeightSum = 0.0;
-        std::array<double, radiusSamples> radiiUm{};
-        std::array<double, radiusSamples> radiusWeights{};
-        for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
-            const double z = sigmaLn > 1.0e-8
-                                 ? -3.5 + 7.0 * (static_cast<double>(radiusIndex) + 0.5) / radiusSamples
-                                 : 0.0;
-            const double radiusUm = geometricRadiusUm * std::exp(sigmaLn * z);
-            const double numberWeight = sigmaLn > 1.0e-8 ? std::exp(-0.5 * z * z) : 1.0;
-            const double weight = numberWeight * radiusUm * radiusUm;
-            radiiUm[static_cast<size_t>(radiusIndex)] = radiusUm;
-            radiusWeights[static_cast<size_t>(radiusIndex)] = weight;
-            radiusWeightSum += weight;
-        }
-
         const double solarSigma = 0.5 * static_cast<double>(sunRadius);
         const double binWidth = std::numbers::pi / (bins - 1);
         const double kernelSum = std::max(solarSigma / binWidth, 0.65) * std::sqrt(2.0 * std::numbers::pi);
-        const int bows = rainbow.includeSecondary != 0 ? 2 : 1;
         std::vector<glm::dvec4> a(static_cast<size_t>(bins));
         for (int sub = 0; sub < subWavelengths; ++sub) {
             const double wavelengthNm = kSpectralLambdaMinNm + kSpectralLambdaStepNm * (band + (sub + 0.5) / subWavelengths - 0.5);
@@ -407,7 +408,7 @@ namespace {
 
 SpectralBand ComputeSpectralBand(int band) {
     const double centre = kSpectralLambdaMinNm + kSpectralLambdaStepNm * band;
-    SpectralBand result{.betaRayleighScale = 0.0, .limbDarkening = centre, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
+    SpectralBand result{.betaRayleighScale = 0.0, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
     for (int offset = -10; offset <= 10; offset += 5) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
