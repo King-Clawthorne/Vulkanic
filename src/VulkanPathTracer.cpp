@@ -105,7 +105,7 @@ constexpr uint32_t kPathTracerSpirv[] = {
 
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    uint32_t skySampleCounts[4], rainbowMultiple[4];
+    glm::uvec4 skySampleCounts, rainbowMultiple;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
     glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun;
@@ -117,7 +117,7 @@ constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::De
 
 struct PushConstants {
     glm::vec4 forward, right, up, frame, polarizer;
-    uint32_t imageSize[2];
+    glm::uvec2 imageSize;
 };
 
 class VulkanPathTracer {
