@@ -8,6 +8,7 @@
 #define VMA_IMPLEMENTATION
 #endif
 #include <vk_mem_alloc_raii.hpp>
+#include <glm/glm.hpp>
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -109,12 +110,12 @@ constexpr uint32_t kPathTracerSpirv[] = {
 };
 
 struct alignas(16) SceneData {
-    float skySpectralParams[4], skyRadiiScaleHeights[4], skySunDirectionRadius[4];
+    glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
     uint32_t skySampleCounts[4];
-    float skyVrtParams[4], rainbowCenterEnabled[4], rainbowRadiiEdge[4], rainbowOptical[4];
+    glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     uint32_t rainbowMultiple[4];
-    float spectralBands[kSpectralBandCount][4], cieXyz[kSpectralBandCount][4], sunDisk[4];
-    float mieBands[kSpectralBandCount][4], rainbowAxisX[4], rainbowAxisZ[4], apparentSun[4];
+    glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
+    glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun;
 };
 
 constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
@@ -122,7 +123,7 @@ constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::De
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer};
 
 struct PushConstants {
-    float forward[4], right[4], up[4], frame[4], polarizer[4];
+    glm::vec4 forward, right, up, frame, polarizer;
     uint32_t imageSize[2];
 };
 
