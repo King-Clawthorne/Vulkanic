@@ -107,11 +107,17 @@ constexpr uint32_t kPathTracerSpirv[] = {
 
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    glm::uvec4 skySampleCounts, rainbowMultiple;
+    glm::uvec4 skySampleCounts;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
+    glm::uvec4 rainbowMultiple;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
     glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun;
 };
+
+static_assert(offsetof(SceneData, skyVrtParams) == 64);
+static_assert(offsetof(SceneData, rainbowMultiple) == 128);
+static_assert(offsetof(SceneData, spectralBands) == 144);
+static_assert(sizeof(SceneData) == 1024);
 
 constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
@@ -167,10 +173,10 @@ private:
             .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
             .skySampleCounts = {s.secondarySamples, s.viewSteps, s.samples, s.scatteringOrders},
-            .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
             .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
+            .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
         
         float ySum = 0.0f;
@@ -254,11 +260,12 @@ private:
     }
 
     void CreateWindowAndShow() {
-        glfwInit();
+        if (glfwInit() != GLFW_TRUE) throw std::runtime_error("GLFW initialization failed.");
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height), "Vulkanic", nullptr, nullptr);
+        if (m_window == nullptr) throw std::runtime_error("GLFW could not create the application window.");
         
         glfwSetWindowUserPointer(m_window, this);
         glfwSetKeyCallback(m_window, KeyCallback);
@@ -267,8 +274,13 @@ private:
     }
 
     void CreateInstance() {
-        const std::array extensions = {VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
-                                       VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME};
+        uint32_t glfwExtensionCount = 0;
+        const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+        if (glfwExtensions == nullptr || glfwExtensionCount == 0)
+            throw std::runtime_error("GLFW did not provide the required Vulkan instance extensions.");
+        std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
         vk::ApplicationInfo appInfo{"Vulkan Path Tracer", 1, "None", 1, VK_API_VERSION_1_4};
         vk::InstanceCreateInfo createInfo{};
         createInfo.setPApplicationInfo(&appInfo).setPEnabledExtensionNames(extensions);
@@ -277,14 +289,14 @@ private:
 
     void CreateSurface() {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
+        const VkResult result = glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
+        if (result != VK_SUCCESS)
+            throw std::runtime_error(std::format("GLFW failed to create the Vulkan surface (VkResult {}).", static_cast<int>(result)));
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
     }
 
     void PickPhysicalDevice() {
-        constexpr std::array requiredExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                                   VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
-                                                   VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME};
+        constexpr std::array requiredExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         for (const auto& candidate : m_instance.enumeratePhysicalDevices()) {
             if (candidate.getProperties().apiVersion < VK_API_VERSION_1_4) continue;
 
@@ -298,12 +310,10 @@ private:
 
             const auto features = candidate.getFeatures2<vk::PhysicalDeviceFeatures2,
                                                          vk::PhysicalDeviceVulkan13Features,
-                                                         vk::PhysicalDeviceVulkan14Features,
-                                                         vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR>();
+                                                         vk::PhysicalDeviceVulkan14Features>();
             if (!features.get<vk::PhysicalDeviceFeatures2>().features.shaderStorageImageWriteWithoutFormat ||
                 !features.get<vk::PhysicalDeviceVulkan13Features>().synchronization2 ||
-                !features.get<vk::PhysicalDeviceVulkan14Features>().pushDescriptor ||
-                !features.get<vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR>().swapchainMaintenance1) continue;
+                !features.get<vk::PhysicalDeviceVulkan14Features>().pushDescriptor) continue;
 
             const auto families = candidate.getQueueFamilyProperties();
             for (uint32_t i = 0; i < families.size(); ++i) {
@@ -322,19 +332,14 @@ private:
     }
 
     void CreateLogicalDevice() {
-        constexpr std::array extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                                           VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
-                                           VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME};
+        constexpr std::array extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         vk::PhysicalDeviceFeatures features{};
         features.shaderStorageImageWriteWithoutFormat = true;
         vk::PhysicalDeviceVulkan13Features features13{};
         features13.synchronization2 = true;
         vk::PhysicalDeviceVulkan14Features features14{};
         features14.pushDescriptor = true;
-        vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR swapchainMaintenance{};
-        swapchainMaintenance.swapchainMaintenance1 = true;
         features13.setPNext(&features14);
-        features14.setPNext(&swapchainMaintenance);
         const float priority = 1.0f;
         vk::DeviceQueueCreateInfo queueInfo{};
         queueInfo.setQueueFamilyIndex(m_queueFamily).setQueuePriorities(priority);
@@ -381,10 +386,12 @@ private:
         m_swapchainExtent = extent;
         m_swapchainImages = m_swapchain.getImages();
         m_swapchainImageViews.clear();
+        m_renderFinished.clear();
 
         for (const auto image : m_swapchainImages) {
             m_swapchainImageViews.emplace_back(m_device, vk::ImageViewCreateInfo{{}, image, vk::ImageViewType::e2D,
                 desiredFormat.format, {}, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+            m_renderFinished.emplace_back(m_device.createSemaphore({}));
         }
     }
 
@@ -424,7 +431,7 @@ private:
         m_frames.clear();
 
         for (uint32_t i = 0; i < count; ++i) {
-            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .renderFinished = m_device.createSemaphore({}), .presentDone = m_device.createFence(signaled), .inFlight = m_device.createFence(signaled)});
+            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .inFlight = m_device.createFence(signaled)});
         }
 
         const vk::DeviceSize pixels = static_cast<vk::DeviceSize>(m_swapchainExtent.width) * m_swapchainExtent.height;
@@ -505,11 +512,10 @@ private:
 
     void RenderFrame() {
         FrameResources& frame = m_frames[m_currentFrame];
-        const std::array fences{*frame.inFlight, *frame.presentDone};
-        while (m_device.waitForFences(fences, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {}
+        while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {}
         const uint32_t imageIndex = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable).value;
 
-        m_device.resetFences(fences);
+        m_device.resetFences(*frame.inFlight);
         const vk::raii::CommandBuffer& commandBuffer = frame.commandBuffer;
         commandBuffer.reset();
         RecordCommandBuffer(commandBuffer, imageIndex);
@@ -519,13 +525,11 @@ private:
         submitInfo.setWaitSemaphores(*frame.imageAvailable);
         submitInfo.setWaitDstStageMask(waitStage);
         submitInfo.setCommandBuffers(*commandBuffer);
-        submitInfo.setSignalSemaphores(*frame.renderFinished);
+        submitInfo.setSignalSemaphores(*m_renderFinished[imageIndex]);
         m_graphicsQueue.submit(submitInfo, *frame.inFlight);
 
-        const vk::SwapchainPresentFenceInfoKHR presentFence{*frame.presentDone};
         vk::PresentInfoKHR presentInfo{};
-        presentInfo.pNext = &presentFence;
-        presentInfo.setWaitSemaphores(*frame.renderFinished);
+        presentInfo.setWaitSemaphores(*m_renderFinished[imageIndex]);
         presentInfo.setSwapchains(*m_swapchain);
         presentInfo.setImageIndices(imageIndex);
         std::ignore = m_graphicsQueue.presentKHR(presentInfo);
@@ -562,8 +566,8 @@ private:
 
     struct FrameResources {
         vk::raii::CommandBuffer commandBuffer{nullptr};
-        vk::raii::Semaphore imageAvailable{nullptr}, renderFinished{nullptr};
-        vk::raii::Fence presentDone{nullptr}, inFlight{nullptr};
+        vk::raii::Semaphore imageAvailable{nullptr};
+        vk::raii::Fence inFlight{nullptr};
     };
 
     GLFWwindow* m_window = nullptr;
@@ -585,6 +589,7 @@ private:
     vk::Extent2D m_swapchainExtent{};
     std::vector<vk::Image> m_swapchainImages;
     std::vector<vk::raii::ImageView> m_swapchainImageViews;
+    std::vector<vk::raii::Semaphore> m_renderFinished;
 
     vk::raii::DescriptorSetLayout m_descriptorSetLayout{nullptr};
     vk::raii::PipelineLayout m_pipelineLayout{nullptr};
