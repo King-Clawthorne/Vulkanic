@@ -1,5 +1,6 @@
 #include "SkyTables.h"
 #include "SpectralData.h"
+#include "Cie2006Data.h"
 
 #include <algorithm>
 #include <cmath>
@@ -383,6 +384,14 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 
 namespace {
 
+    glm::dvec3 Cie2006Xyz(double wavelengthNm) {
+        if (wavelengthNm < 390.0 || wavelengthNm > 830.0) return {};
+        const double position = 0.2 * wavelengthNm - 78.0;
+        const size_t lower = static_cast<size_t>(position);
+        const size_t upper = std::min(lower + 1, kCie2006Xyz.size() - 1);
+        return glm::mix(kCie2006Xyz[lower], kCie2006Xyz[upper], position - static_cast<double>(lower));
+    }
+
     double OzoneCrossSection(double wavelengthNm) {
         const double position = std::clamp(0.1 * wavelengthNm - 36.0, 0.0, 46.999);
         const auto i = static_cast<size_t>(position);
@@ -405,9 +414,9 @@ SpectralBand ComputeSpectralBand(int band) {
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
         result.ozoneCrossSection += OzoneCrossSection(wavelength) * 0.2;
         const size_t solarIndex = static_cast<size_t>(std::lround(0.2 * wavelength - 78.0));
-        const size_t cieIndex = static_cast<size_t>(std::lround(0.2 * wavelength - 72.0));
         result.sunIrradianceScale += kSolarIrradiance[solarIndex] * 0.2;
-        result.cie += kCie1931[cieIndex] * 0.2;
     }
+    for (int sample = 0; sample < 25; ++sample)
+        result.cie += Cie2006Xyz(centre - 11.5 + sample) / 25.0;
     return result;
 }

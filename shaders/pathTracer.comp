@@ -448,9 +448,23 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     float limbMu = sqrt(max(0.0, 1.0 - r * r / (SkySunRadius() * SkySunRadius())));
     vec4 depth = sun_air_depth(origin, viewDir);
     bool sunVisible = disk > 0.0 && groundT <= 0.0;
+    vec3 solarRadial = cross(vertical, apparent) * offset.x + vertical * offset.y * sceneData.apparentSun.w;
+    float radialLength = length(solarRadial);
+    vec3 sunA, sunB;
+    beam_basis(-viewDir, sunA, sunB);
+    float cos2Limb = 0.0, sin2Limb = 0.0;
+    if (radialLength > 1.0e-8) {
+        vec3 limbTangent = cross(apparent, solarRadial / radialLength);
+        float tangentA = dot(limbTangent, sunA), tangentB = dot(limbTangent, sunB);
+        float tangentNorm = max(tangentA * tangentA + tangentB * tangentB, 1.0e-12);
+        cos2Limb = (tangentA * tangentA - tangentB * tangentB) / tangentNorm;
+        sin2Limb = 2.0 * tangentA * tangentB / tangentNorm;
+    }
     for (int b = 0; b < SPECTRAL_BANDS; ++b) {
         float wavelengthNm = sceneData.spectralBands[b].z;
-        sky[b].x += sunVisible ? disk * SkySunRadiance(b) * solar_limb_intensity(limbMu, wavelengthNm) * band_transmittance(depth, b) : 0.0;
+        float limbPolarization = min(0.001, 0.0001 * pow(550.0 / wavelengthNm, 2.0) * (1.0 - limbMu) / max(limbMu + 0.08, 1.0e-4));
+        float intensity = sunVisible ? disk * SkySunRadiance(b) * solar_limb_intensity(limbMu, wavelengthNm) * band_transmittance(depth, b) : 0.0;
+        sky[b] += intensity * vec4(1.0, limbPolarization * cos2Limb, limbPolarization * sin2Limb, 0.0);
         sky[b] = stokes_make_physical(sky[b]);
     }
     return sky;
@@ -487,14 +501,14 @@ float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
     float inner = 1.0 - softness;
     float integral = 0.0;
     if (qMin < inner) {
-        float innerRoot = sqrt(max(a * inner * inner - (a * c - b * b), 0.0));
+        float innerRoot = sqrt(max(a * inner * inner - a * c + b * b, 0.0));
         float lo = clamp((-b - innerRoot) / a, start, end);
         float hi = clamp((-b + innerRoot) / a, start, end);
         integral += max(hi - lo, 0.0);
     }
 
-    float smoothLo = max(start, (-b - sqrt(max(a - (a * c - b * b), 0.0))) / a);
-    float smoothHi = min(end, (-b + sqrt(max(a - (a * c - b * b), 0.0))) / a);
+    float smoothLo = max(start, (-b - sqrt(max(a * a - a * c + b * b, 0.0))) / a);
+    float smoothHi = min(end, (-b + sqrt(max(a * a - a * c + b * b, 0.0))) / a);
     if (smoothHi > smoothLo) {
         float t0 = smoothLo, t1 = smoothHi;
         float x0 = clamp((sqrt(max(a * t0 * t0 + 2.0 * b * t0 + c, 0.0)) - inner) / softness, 0.0, 1.0);
