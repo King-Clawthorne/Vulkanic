@@ -1,0 +1,19 @@
+# Normalize text files across platforms.
+* text=auto
+
+# Keep source and build configuration files as text.
+*.c        text
+*.cc       text
+*.cpp      text
+*.h        text
+*.hpp      text
+*.glsl     text
+*.comp     text
+*.cmake    text
+*.ps1      text
+*.md       text
+*.txt      text
+
+# Generated shader binaries are not text.
+*.spv      binary
+*.spv.inc  text
