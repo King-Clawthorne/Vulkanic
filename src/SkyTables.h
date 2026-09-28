@@ -30,9 +30,18 @@ struct SkySpectralConfig {
     float rayleighDepolarization = 0.0279f, ozoneDobsonUnits = 300.0f;
     uint32_t mieTableAngleBins = 181;
 
-    std::array<AerosolConfig, 2> aerosols{
-        {{.beta = 21e-6f, .scaleHeight = 1200.0f, .refractiveIndexReal = 1.33f, .refractiveIndexImag = 0.0f, .meanRadiusMicrometers = 0.2f, .sigma = 1.5f},
-         {.beta = 4.0e-6f, .scaleHeight = 1500.0f, .refractiveIndexReal = 1.53f, .refractiveIndexImag = 0.008f, .meanRadiusMicrometers = 1.0f, .sigma = 2.0f}}};
+    std::array<AerosolConfig, 2> aerosols{{{.beta = 21e-6f,
+                                            .scaleHeight = 1200.0f,
+                                            .refractiveIndexReal = 1.33f,
+                                            .refractiveIndexImag = 0.0f,
+                                            .meanRadiusMicrometers = 0.2f,
+                                            .sigma = 1.5f},
+                                           {.beta = 4.0e-6f,
+                                            .scaleHeight = 1500.0f,
+                                            .refractiveIndexReal = 1.53f,
+                                            .refractiveIndexImag = 0.008f,
+                                            .meanRadiusMicrometers = 1.0f,
+                                            .sigma = 2.0f}}};
 
     [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
@@ -91,7 +100,8 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 /// Builds normalized Stokes phase data for one aerosol and each spectral band.
 /// Rows are laid out band-major with one vec4 per angular bin. crossSections
 /// receives the corresponding scattering and extinction cross sections.
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol,
+                                                 std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
 /// Builds band-major rainbow phase data over [0, pi], including finite-sun blur.
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
@@ -108,7 +118,9 @@ inline constexpr int kTransmittanceMuBins = 256;
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
 /// Piecewise-linear ozone number-density profile used by the LUT integration.
-inline double OzoneProfile(double altitude) { return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0))); }
+inline double OzoneProfile(double altitude) {
+    return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0)));
+}
 
 /// Wavelength-dependent factors packed for one shader spectral band.
 struct SpectralBand {
@@ -124,6 +136,7 @@ inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i) integral += (phase[i].x * std::sin(i * dTheta)) + (phase[i + 1].x * std::sin((i + 1) * dTheta));
+    for (int i = 0; i + 1 < bins; ++i)
+        integral += (phase[i].x * std::sin(i * dTheta)) + (phase[i + 1].x * std::sin((i + 1) * dTheta));
     return 0.25 * integral * dTheta;
 }

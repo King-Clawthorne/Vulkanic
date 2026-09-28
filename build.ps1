@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 # Treat non-zero exit codes from native tools such as CMake as PowerShell errors.
 $PSNativeCommandUseErrorActionPreference = $true
 Set-StrictMode -Version Latest
@@ -7,7 +7,10 @@ Set-StrictMode -Version Latest
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     # This helper intentionally performs a clean configure and build.
-    if (Test-Path build) { Remove-Item -Recurse -Force build }
+    if (Test-Path -LiteralPath 'build') {
+        Remove-Item -LiteralPath 'build' -Recurse -Force
+    }
+
     cmake --preset default
     cmake --build --preset default --parallel
 } finally {

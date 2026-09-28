@@ -45,9 +45,12 @@ struct CameraController {
     }
 
     void OnKeyPress(int key, const RuntimeConfig& config) {
-        if (key == GLFW_KEY_R) Reset(config);
-        if (key == GLFW_KEY_P) polarizerEnabled = !polarizerEnabled;
-        if (key == GLFW_KEY_C) elliptical = !elliptical;
+        if (key == GLFW_KEY_R)
+            Reset(config);
+        if (key == GLFW_KEY_P)
+            polarizerEnabled = !polarizerEnabled;
+        if (key == GLFW_KEY_C)
+            elliptical = !elliptical;
     }
 
     void Update(double deltaSeconds, GLFWwindow* window, const RuntimeConfig& config) {
@@ -71,11 +74,19 @@ struct CameraController {
         const float axis = static_cast<float>(glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) -
                            static_cast<float>(glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS);
         const float rotation = axis * config.input.polarizerRotateSpeed * dt;
-        if (elliptical) ellipticity = std::clamp(ellipticity + rotation, -kPi * 0.25f, kPi * 0.25f);
-        else polarizerAngle += rotation;
+        if (elliptical)
+            ellipticity = std::clamp(ellipticity + rotation, -kPi * 0.25f, kPi * 0.25f);
+        else
+            polarizerAngle += rotation;
     }
 
-    [[nodiscard]] View GetView() const { return {.yaw = yaw, .pitch = pitch, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f}; }
+    [[nodiscard]] View GetView() const {
+        return {.yaw = yaw,
+                .pitch = pitch,
+                .polarizerEnabled = polarizerEnabled,
+                .polarizerAngle = polarizerAngle,
+                .polarizerEllipticity = elliptical ? ellipticity : 0.0f};
+    }
 };
 
 // Two reusable command buffers let CPU submission overlap GPU execution.
@@ -99,7 +110,7 @@ static_assert(offsetof(SceneData, rainbowMultiple) == 112);
 static_assert(offsetof(SceneData, spectralBands) == 128);
 static_assert(sizeof(SceneData) == 1008);
 
-constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer,
+constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer};
 
@@ -113,7 +124,8 @@ struct PushConstants {
 class VulkanPathTracer {
 public:
     ~VulkanPathTracer() {
-        if (*m_device) vkDeviceWaitIdle(*m_device);
+        if (*m_device)
+            vkDeviceWaitIdle(*m_device);
         if (m_window != nullptr) {
             glfwDestroyWindow(m_window);
             m_window = nullptr;
@@ -124,10 +136,15 @@ public:
 
     int Run() {
         m_camera.Reset(m_config);
-        if (!CreateWindowAndShow()) return 1;
-        if (!CreateVulkan()) return 1;
-        m_allocator = vma::raii::Allocator(m_instance, m_device, vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
-        m_commandPool = vk::raii::CommandPool(m_device, {vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily});
+        if (!CreateWindowAndShow())
+            return 1;
+        if (!CreateVulkan())
+            return 1;
+        m_allocator = vma::raii::Allocator(
+            m_instance, m_device,
+            vma::AllocatorCreateInfo{}.setPhysicalDevice(*m_physicalDevice).setVulkanApiVersion(VK_API_VERSION_1_4));
+        m_commandPool =
+            vk::raii::CommandPool(m_device, {vk::CommandPoolCreateFlagBits::eResetCommandBuffer, m_queueFamily});
         CreateSceneBuffers();
         CreateSwapchain();
         CreateDescriptorSetLayout();
@@ -139,9 +156,11 @@ public:
     }
 
 private:
-    static void KeyCallback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) {
+    static void KeyCallback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action,
+                            [[maybe_unused]] int mods) {
         auto* app = static_cast<VulkanPathTracer*>(glfwGetWindowUserPointer(window));
-        if (app == nullptr || action != GLFW_PRESS) return;
+        if (app == nullptr || action != GLFW_PRESS)
+            return;
         app->m_camera.OnKeyPress(key, app->m_config);
     }
 
@@ -150,11 +169,14 @@ private:
         const RainbowConfig& r = m_config.rainbow;
         SceneData sceneData{
             .skySpectralParams = {s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550},
-            .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight},
+            .skyRadiiScaleHeights = {s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh,
+                                     s.aerosols[0].scaleHeight},
             .skySunDirectionRadius = {s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius},
-            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight},
+            .skyVrtParams = {s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins),
+                             s.aerosols[1].scaleHeight},
             .rainbowRadiiEdge = {r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness},
-            .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps)},
+            .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins),
+                               static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
 
@@ -174,7 +196,8 @@ private:
         }
 
         for (auto& xyz : sceneData.cieXyz)
-            for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
+            for (int i = 0; i < 3; ++i)
+                xyz[i] /= ySum;
 
         sceneData.sunDisk = {2.0f * kPi * (1.0f - std::cos(s.sunRadius)), std::cos(s.sunRadius + s.sunAa),
                              std::cos(s.sunRadius - s.sunAa), 0.0f};
@@ -189,7 +212,8 @@ private:
 
         const float apparentAltitude = (trueAltitude + refraction(trueAltitude)) * kPi / 180.0f;
         const float horizontal = std::hypot(s.sunDirection[0], s.sunDirection[2]);
-        sceneData.apparentSun = {std::cos(apparentAltitude) * s.sunDirection[0] / horizontal, std::sin(apparentAltitude),
+        sceneData.apparentSun = {std::cos(apparentAltitude) * s.sunDirection[0] / horizontal,
+                                 std::sin(apparentAltitude),
                                  std::cos(apparentAltitude) * s.sunDirection[2] / horizontal,
                                  1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f)};
         const float sunLength = std::hypot(s.sunDirection[0], s.sunDirection[2]);
@@ -204,16 +228,17 @@ private:
             const double reference = m_mieCrossSections[aerosol][6].x;
             for (int band = 0; band < kSpectralBandCount; ++band) {
                 const glm::dvec2& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
-                sceneData.mieBands[band][static_cast<int>(2 * aerosol)] = static_cast<float>(beta * cross.x / reference);
-                sceneData.mieBands[band][static_cast<int>((2 * aerosol) + 1)] = static_cast<float>(beta * cross.y / reference);
+                sceneData.mieBands[band][static_cast<int>(2 * aerosol)] =
+                    static_cast<float>(beta * cross.x / reference);
+                sceneData.mieBands[band][static_cast<int>((2 * aerosol) + 1)] =
+                    static_cast<float>(beta * cross.y / reference);
             }
         }
 
         return sceneData;
     }
 
-    template <typename T>
-    [[nodiscard]] vma::raii::Buffer CreateTableBuffer(const std::vector<T>& table) const {
+    template <typename T> [[nodiscard]] vma::raii::Buffer CreateTableBuffer(const std::vector<T>& table) const {
         vma::raii::Buffer buffer = CreateBuffer(table.size() * sizeof(T), vk::BufferUsageFlagBits::eStorageBuffer);
         UploadToBuffer(buffer, std::as_bytes(std::span{table}));
         return buffer;
@@ -249,7 +274,8 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-        m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height), "Vulkanic", nullptr, nullptr);
+        m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height),
+                                    "Vulkanic", nullptr, nullptr);
         if (m_window == nullptr) {
             const char* description = nullptr;
             const int error = glfwGetError(&description);
@@ -276,7 +302,8 @@ private:
                                  .value();
         m_instance = vk::raii::Instance(m_context, m_selectedInstance.instance);
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        const VkResult surfaceResult = glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
+        const VkResult surfaceResult =
+            glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window, nullptr, &surface);
         if (surfaceResult != VK_SUCCESS) {
             std::println(stderr, "Vulkan surface creation failed (VkResult {}).", static_cast<int>(surfaceResult));
             return false;
@@ -287,9 +314,11 @@ private:
         // on synchronization2 and push descriptors from the Vulkan 1.3/1.4 APIs.
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-        VkPhysicalDeviceVulkan13Features requiredFeatures13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceVulkan13Features requiredFeatures13{.sType =
+                                                                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         requiredFeatures13.synchronization2 = VK_TRUE;
-        VkPhysicalDeviceVulkan14Features requiredFeatures14{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+        VkPhysicalDeviceVulkan14Features requiredFeatures14{.sType =
+                                                                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
         requiredFeatures14.pushDescriptor = VK_TRUE;
 
         m_selectedPhysicalDevice = vkb::PhysicalDeviceSelector{m_selectedInstance}
@@ -312,9 +341,11 @@ private:
         m_presentQueue = m_device.getQueue(presentQueueFamily.value(), 0);
         return true;
     }
-    [[nodiscard]] vma::raii::Buffer CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
-                                                 vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
-        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage}, vma::AllocationCreateInfo{flags, vma::MemoryUsage::eAuto});
+    [[nodiscard]] vma::raii::Buffer
+    CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage,
+                 vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
+        return vma::raii::Buffer(m_allocator, vk::BufferCreateInfo{{}, size, usage},
+                                 vma::AllocationCreateInfo{flags, vma::MemoryUsage::eAuto});
     }
 
     static void UploadToBuffer(const vma::raii::Buffer& buffer, std::span<const std::byte> data) {
@@ -325,7 +356,8 @@ private:
         // Storage usage is required because the compute shader writes the
         // acquired swapchain image without an intermediate graphics pass.
         auto swapchainResult = vkb::SwapchainBuilder{m_selectedDevice}
-                                   .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                                   .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM,
+                                                        .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
                                    .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
                                    .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
                                    .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
@@ -359,23 +391,29 @@ private:
     }
 
     void CreatePipeline() {
-        const vk::raii::ShaderModule computeModule{m_device, vk::ShaderModuleCreateInfo{{}, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv)}};
+        const vk::raii::ShaderModule computeModule{
+            m_device, vk::ShaderModuleCreateInfo{{}, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv)}};
 
         // Specialization constants let the driver fold quality settings and the
         // optional rainbow path into the compute pipeline at creation time.
         const std::array<uint32_t, 5> settings = {std::max(1u, m_config.sky.spectral.scatteringOrders),
                                                   m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples,
-                                                  m_config.sky.spectral.secondarySamples, (m_config.rainbow.enabled != 0u) ? 1u : 0u};
+                                                  m_config.sky.spectral.secondarySamples,
+                                                  (m_config.rainbow.enabled != 0u) ? 1u : 0u};
 
-        const std::array<vk::SpecializationMapEntry, 5> entries = {{{0, 0, 4}, {1, 4, 4}, {2, 8, 4}, {3, 12, 4}, {4, 16, 4}}};
-        const vk::SpecializationInfo specialization{static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data()};
+        const std::array<vk::SpecializationMapEntry, 5> entries = {
+            {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}, {3, 12, 4}, {4, 16, 4}}};
+        const vk::SpecializationInfo specialization{static_cast<uint32_t>(entries.size()), entries.data(),
+                                                    sizeof(settings), settings.data()};
         const vk::PushConstantRange pushRange{vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants)};
         vk::PipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.setSetLayouts(*m_descriptorSetLayout);
         layoutInfo.setPushConstantRanges(pushRange);
         m_pipelineLayout = vk::raii::PipelineLayout(m_device, layoutInfo);
-        const vk::PipelineShaderStageCreateInfo stage{{}, vk::ShaderStageFlagBits::eCompute, *computeModule, "main", &specialization};
-        m_computePipeline = vk::raii::Pipeline(m_device, nullptr, vk::ComputePipelineCreateInfo{{}, stage, *m_pipelineLayout});
+        const vk::PipelineShaderStageCreateInfo stage{
+            {}, vk::ShaderStageFlagBits::eCompute, *computeModule, "main", &specialization};
+        m_computePipeline =
+            vk::raii::Pipeline(m_device, nullptr, vk::ComputePipelineCreateInfo{{}, stage, *m_pipelineLayout});
     }
 
     void CreateFrameResources() {
@@ -385,7 +423,9 @@ private:
         m_frames.clear();
 
         for (uint32_t i = 0; i < count; ++i) {
-            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({}), .inFlight = m_device.createFence(signaled)});
+            m_frames.push_back({.commandBuffer = std::move(commandBuffers[i]),
+                                .imageAvailable = m_device.createSemaphore({}),
+                                .inFlight = m_device.createFence(signaled)});
         }
 
         const vk::DeviceSize pixels = static_cast<vk::DeviceSize>(m_swapchainExtent.width) * m_swapchainExtent.height;
@@ -425,20 +465,31 @@ private:
         const auto imageBarrier = [&](vk::PipelineStageFlags2 srcStage, vk::AccessFlags2 srcAccess,
                                       vk::PipelineStageFlags2 dstStage, vk::AccessFlags2 dstAccess,
                                       vk::ImageLayout oldLayout, vk::ImageLayout newLayout) {
-            const vk::ImageMemoryBarrier2 barrier{srcStage, srcAccess, dstStage, dstAccess, oldLayout, newLayout,
-                                                  VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, image, colorRange};
+            const vk::ImageMemoryBarrier2 barrier{srcStage,
+                                                  srcAccess,
+                                                  dstStage,
+                                                  dstAccess,
+                                                  oldLayout,
+                                                  newLayout,
+                                                  VK_QUEUE_FAMILY_IGNORED,
+                                                  VK_QUEUE_FAMILY_IGNORED,
+                                                  image,
+                                                  colorRange};
             commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setImageMemoryBarriers(barrier));
         };
 
         commandBuffer.begin({});
-        const vk::MemoryBarrier2 accumulation{Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eComputeShader, Access::eShaderStorageRead | Access::eShaderStorageWrite};
+        const vk::MemoryBarrier2 accumulation{Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eComputeShader,
+                                              Access::eShaderStorageRead | Access::eShaderStorageWrite};
         commandBuffer.pipelineBarrier2(vk::DependencyInfo{}.setMemoryBarriers(accumulation));
         imageBarrier(Stage::eNone, Access::eNone, Stage::eComputeShader, Access::eShaderStorageWrite,
                      vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
 
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
         const vk::DescriptorImageInfo imageInfo{{}, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral};
-        const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo{*b, 0, vk::WholeSize}; };
+        const auto bufferInfo = [](const vma::raii::Buffer& b) {
+            return vk::DescriptorBufferInfo{*b, 0, vk::WholeSize};
+        };
         const std::array bufferInfos{bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer),
                                      bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer),
                                      bufferInfo(m_accumulationBuffer)};
@@ -466,7 +517,8 @@ private:
 
     void RenderFrame() {
         FrameResources& frame = m_frames[m_currentFrame];
-        while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {}
+        while (m_device.waitForFences(*frame.inFlight, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout) {
+        }
         const uint32_t imageIndex = m_swapchain.acquireNextImage(UINT64_MAX, *frame.imageAvailable).value;
 
         m_device.resetFences(*frame.inFlight);
@@ -510,7 +562,8 @@ private:
             ++frames;
             const double elapsed = std::chrono::duration<double>(now - titleUpdate).count();
             if (elapsed >= 1.0) {
-                const std::string title = std::format("Vulkanic - {:.1f} FPS ({:.2f} ms)", frames / elapsed, 1000.0 * elapsed / frames);
+                const std::string title =
+                    std::format("Vulkanic - {:.1f} FPS ({:.2f} ms)", frames / elapsed, 1000.0 * elapsed / frames);
                 glfwSetWindowTitle(m_window, title.c_str());
                 frames = 0;
                 titleUpdate = now;

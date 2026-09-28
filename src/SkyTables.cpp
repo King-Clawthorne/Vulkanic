@@ -25,7 +25,8 @@ namespace {
         D[static_cast<size_t>(nstart)] = {0.0, 0.0};
         for (int n = nstart; n > 0; --n) {
             const std::complex<double> nOverMx = std::complex<double>(static_cast<double>(n), 0.0) / mx;
-            D[static_cast<size_t>(n) - 1u] = nOverMx - std::complex<double>(1.0, 0.0) / (D[static_cast<size_t>(n)] + nOverMx);
+            D[static_cast<size_t>(n) - 1u] =
+                nOverMx - std::complex<double>(1.0, 0.0) / (D[static_cast<size_t>(n)] + nOverMx);
         }
 
         a.resize(static_cast<size_t>(nmax) + 1u);
@@ -59,20 +60,22 @@ namespace {
 namespace {
     // Table rows are independent by wavelength, so parallelize without sharing
     // scratch storage or writing the same output entries from multiple workers.
-    template <class Body>
-    void ParallelFor(int count, Body body) {
+    template <class Body> void ParallelFor(int count, Body body) {
         const auto indices = std::views::iota(0, count);
         std::for_each(std::execution::par, indices.begin(), indices.end(), body);
     }
 }
 
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections) {
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol,
+                                                 std::array<glm::dvec2, kSpectralBandCount>& crossSections) {
     const int bins = std::max(2, static_cast<int>(sky.mieTableAngleBins));
     const AerosolConfig& species = sky.aerosols[static_cast<size_t>(aerosol)];
-    const std::complex<double> m(species.refractiveIndexReal, std::max(0.0, static_cast<double>(species.refractiveIndexImag)));
+    const std::complex<double> m(species.refractiveIndexReal,
+                                 std::max(0.0, static_cast<double>(species.refractiveIndexImag)));
 
     std::vector<double> mu(static_cast<size_t>(bins));
-    for (int i : std::views::iota(0, bins)) mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
+    for (int i : std::views::iota(0, bins))
+        mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
 
     // Approximate the log-normal particle-size distribution with fixed samples
     // over +/-4 log-space standard deviations.
@@ -97,7 +100,8 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
             const double lnR = lnMin + (dLn * static_cast<double>(rs));
             const double z = (lnR - lnRg) / lnSigma;
             const double weight = std::exp(-0.5 * z * z) * dLn;
-            if (weight < 1e-12) continue;
+            if (weight < 1e-12)
+                continue;
 
             const double r = std::exp(lnR);
             const double x = k * r;
@@ -155,8 +159,8 @@ namespace {
     // Linear interpolation keeps rainbow refraction aligned with the same
     // wavelength bands used by the atmospheric renderer.
     double WaterIor(double wavelengthNm) {
-        const double position = std::clamp((wavelengthNm - kSpectralLambdaMinNm) / kSpectralLambdaStepNm,
-                                           0.0, static_cast<double>(kSpectralBandCount - 1));
+        const double position = std::clamp((wavelengthNm - kSpectralLambdaMinNm) / kSpectralLambdaStepNm, 0.0,
+                                           static_cast<double>(kSpectralBandCount - 1));
         const int lower = static_cast<int>(std::floor(position)), upper = std::min(lower + 1, kSpectralBandCount - 1);
         return std::lerp(kWaterIor[static_cast<size_t>(lower)], kWaterIor[static_cast<size_t>(upper)],
                          position - lower);
@@ -215,7 +219,8 @@ namespace {
             }
             return table;
         }();
-        if (x >= hi) return 0.0;
+        if (x >= hi)
+            return 0.0;
         const double f = (std::max(x, lo) - lo) / h;
         const auto i = std::min(static_cast<size_t>(f), values.size() - 2);
         return std::lerp(values[i], values[i + 1], f - static_cast<double>(i));
@@ -247,14 +252,14 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
     constexpr int radiusSamples = 64;
     constexpr int raySamples = 16384 / subWavelengths;
     const double sigmaLn = std::sqrt(std::log1p(static_cast<double>(rainbow.effectiveVariance)));
-    const double geometricRadiusUm = static_cast<double>(rainbow.effectiveRadiusMicrometers) / std::exp(2.5 * sigmaLn * sigmaLn);
+    const double geometricRadiusUm =
+        static_cast<double>(rainbow.effectiveRadiusMicrometers) / std::exp(2.5 * sigmaLn * sigmaLn);
     double radiusWeightSum = 0.0;
     std::array<double, radiusSamples> radiiUm{};
     std::array<double, radiusSamples> radiusWeights{};
     for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
-        const double z = sigmaLn > 1.0e-8
-                             ? -3.5 + (7.0 * (static_cast<double>(radiusIndex) + 0.5) / radiusSamples)
-                             : 0.0;
+        const double z =
+            sigmaLn > 1.0e-8 ? -3.5 + (7.0 * (static_cast<double>(radiusIndex) + 0.5) / radiusSamples) : 0.0;
         const double radiusUm = geometricRadiusUm * std::exp(sigmaLn * z);
         const double numberWeight = sigmaLn > 1.0e-8 ? std::exp(-0.5 * z * z) : 1.0;
         const double weight = numberWeight * radiusUm * radiusUm;
@@ -272,13 +277,16 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
         const double kernelSum = std::max(solarSigma / binWidth, 0.65) * std::sqrt(2.0 * std::numbers::pi);
         std::vector<glm::dvec4> a(static_cast<size_t>(bins));
         for (int sub = 0; sub < subWavelengths; ++sub) {
-            const double wavelengthNm = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * (band + ((sub + 0.5) / subWavelengths) - 0.5));
+            const double wavelengthNm =
+                kSpectralLambdaMinNm + (kSpectralLambdaStepNm * (band + ((sub + 0.5) / subWavelengths) - 0.5));
             const double n = WaterIor(wavelengthNm);
             const std::array<glm::dvec3, 2> bow = {RainbowRay(1, n), RainbowRay(2, n)};
             std::array<glm::dvec2, radiusSamples> zScale{};
             for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
-                const double ka = 2.0 * std::numbers::pi * radiiUm[static_cast<size_t>(radiusIndex)] * 1.0e-6 / (wavelengthNm * 1.0e-9);
-                for (int k = 0; k < bows; ++k) zScale[static_cast<size_t>(radiusIndex)][k] = std::pow(ka, 2.0 / 3.0) * std::cbrt(2.0 / bow[k].z);
+                const double ka = 2.0 * std::numbers::pi * radiiUm[static_cast<size_t>(radiusIndex)] * 1.0e-6 /
+                                  (wavelengthNm * 1.0e-9);
+                for (int k = 0; k < bows; ++k)
+                    zScale[static_cast<size_t>(radiusIndex)][k] = std::pow(ka, 2.0 / 3.0) * std::cbrt(2.0 / bow[k].z);
             }
 
             for (int sample = 0; sample < raySamples; ++sample) {
@@ -297,7 +305,8 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
                     for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex)
                         fade += radiusWeights[static_cast<size_t>(radiusIndex)] / radiusWeightSum *
                                 (1.0 - AiryBlend(zScale[static_cast<size_t>(radiusIndex)][k] * (deviation - bow[k].y)));
-                    if (fade > 0.0) Deposit(f, deviation, weightS * fade, weightP * fade, solarSigma, bins);
+                    if (fade > 0.0)
+                        Deposit(f, deviation, weightS * fade, weightP * fade, solarSigma, bins);
                 }
             }
 
@@ -309,16 +318,20 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
                     const glm::dvec4 fr = AirToWaterFresnel(i0, std::asin(b0 / n), n);
                     const double weightS = radiusWeight * fr.z * fr.z * std::pow(fr.x, k + 1);
                     const double weightP = radiusWeight * fr.w * fr.w * std::pow(fr.y, k + 1);
-                    const double amplitude = raySamples * 8.0 * std::numbers::pi * b0 * std::sqrt(zScale[static_cast<size_t>(radiusIndex)][k]) / std::sqrt(2.0 * bow[k].z) * binWidth * kernelSum;
+                    const double amplitude = raySamples * 8.0 * std::numbers::pi * b0 *
+                                             std::sqrt(zScale[static_cast<size_t>(radiusIndex)][k]) /
+                                             std::sqrt(2.0 * bow[k].z) * binWidth * kernelSum;
                     for (int bin = 0; bin < bins; ++bin) {
                         const double theta = bin * binWidth;
-                        const double z = zScale[static_cast<size_t>(radiusIndex)][k] * ((k == 0 ? theta : (2.0 * std::numbers::pi) - theta) - bow[k].y);
-                        if (z < -6.0 || z > 20.0) continue;
+                        const double z = zScale[static_cast<size_t>(radiusIndex)][k] *
+                                         ((k == 0 ? theta : (2.0 * std::numbers::pi) - theta) - bow[k].y);
+                        if (z < -6.0 || z > 20.0)
+                            continue;
                         const double ai = Airy(-z);
                         const double profile = amplitude * ai * ai * AiryBlend(z);
-                        a[static_cast<size_t>(bin)] += glm::dvec4{0.5 * (weightS + weightP) * profile,
-                                                                  0.5 * (weightP - weightS) * profile,
-                                                                  std::sqrt(weightS * weightP) * profile, 0.0};
+                        a[static_cast<size_t>(bin)] +=
+                            glm::dvec4{0.5 * (weightS + weightP) * profile, 0.5 * (weightP - weightS) * profile,
+                                       std::sqrt(weightS * weightP) * profile, 0.0};
                     }
                 }
             }
@@ -327,7 +340,8 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
         const double sigmaBins = std::max(solarSigma / binWidth, 0.65);
         const int reach = static_cast<int>(std::ceil(4.0 * sigmaBins));
         for (int bin = 0; bin < bins; ++bin) {
-            if (a[static_cast<size_t>(bin)].x == 0.0 && a[static_cast<size_t>(bin)].z == 0.0) continue;
+            if (a[static_cast<size_t>(bin)].x == 0.0 && a[static_cast<size_t>(bin)].z == 0.0)
+                continue;
             for (int offset = -reach; offset <= reach; ++offset) {
                 const int target = std::clamp(bin + offset, 0, bins - 1);
                 const double x = offset / sigmaBins;
@@ -356,7 +370,8 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
 void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry) {
     const auto phase = [&](int i) {
         double sum = 0.0;
-        for (int band = 0; band < kSpectralBandCount; ++band) sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
+        for (int band = 0; band < kSpectralBandCount; ++band)
+            sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
         return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
     };
     // Trapezoidal integration includes sin(theta), the solid-angle Jacobian.
@@ -368,7 +383,8 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         cdf[i] = cdf[i - 1] + std::max(0.0, a + b);
         a = b;
     }
-    for (double value : cdf) table.emplace_back(static_cast<float>(value / cdf.back()), 0.0f, 0.0f, 0.0f);
+    for (double value : cdf)
+        table.emplace_back(static_cast<float>(value / cdf.back()), 0.0f, 0.0f, 0.0f);
 }
 
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
@@ -398,7 +414,9 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
                 ozone += OzoneProfile(altitude) * ds;
                 coarse += std::exp(-altitude / sky.aerosols[1].scaleHeight) * ds;
             }
-            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone), static_cast<float>(coarse)};
+            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {
+                static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone),
+                static_cast<float>(coarse)};
         }
     });
     return table;
@@ -407,7 +425,8 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 namespace {
 
     glm::dvec3 Cie2006Xyz(double wavelengthNm) {
-        if (wavelengthNm < 390.0 || wavelengthNm > 830.0) return {};
+        if (wavelengthNm < 390.0 || wavelengthNm > 830.0)
+            return {};
         const double position = (0.2 * wavelengthNm) - 78.0;
         const auto lower = static_cast<size_t>(position);
         const size_t upper = std::min(lower + 1, kCie2006Xyz.size() - 1);
@@ -422,7 +441,8 @@ namespace {
 
     double RayleighShape(double wavelengthNm) {
         const double sigma2 = 1.0e6 / (wavelengthNm * wavelengthNm);
-        const double n = 1.0 + (1.0e-8 * (8060.51 + (2480990.0 / (132.274 - sigma2)) + (17455.7 / (39.32957 - sigma2))));
+        const double n =
+            1.0 + (1.0e-8 * (8060.51 + (2480990.0 / (132.274 - sigma2)) + (17455.7 / (39.32957 - sigma2))));
         const double n2 = (n * n) - 1.0;
         return n2 * n2 / std::pow(wavelengthNm, 4.0);
     }
