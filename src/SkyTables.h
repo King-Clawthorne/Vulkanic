@@ -8,13 +8,18 @@
 #include <vector>
 #include <glm/glm.hpp>
 
+/// Single-precision pi used by the renderer and its camera calculations.
 inline constexpr float kPi = std::numbers::pi_v<float>;
 
+/// One aerosol population used by the atmospheric Mie-scattering model.
+/// Distances are in metres except meanRadiusMicrometers, which is in micrometres.
 struct AerosolConfig {
     float beta, scaleHeight, refractiveIndexReal, refractiveIndexImag, meanRadiusMicrometers, sigma;
     [[nodiscard]] friend bool operator==(const AerosolConfig&, const AerosolConfig&) = default;
 };
 
+/// Parameters used to build atmospheric lookup tables and shader constants.
+/// Directions are world-space vectors; radii and scale heights are metres.
 struct SkySpectralConfig {
     float betaRayleigh550 = 13.5e-6f;
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
@@ -32,6 +37,8 @@ struct SkySpectralConfig {
     [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
 
+/// Geometry, optical coefficients, and integration quality for the rain volume.
+/// The radii and distance are in metres; droplet size is in micrometres.
 struct RainbowConfig {
     uint32_t enabled = 1;
     float distance = 4000.0f, height = 0.0f;
@@ -44,25 +51,30 @@ struct RainbowConfig {
     [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
 };
 
+/// Output image dimensions and per-dispatch camera-ray sample count.
 struct RenderConfig {
     uint32_t width = 960, height = 540, samplesPerPixel = 1;
 };
 
+/// Initial camera pose and vertical field-of-view limits.
 struct CameraConfig {
     glm::vec3 initialPosition{0.0f, 2.0f, -10.0f};
     glm::vec3 initialLookAt{0.0f, 0.5f, 0.0f};
     float fovYDegrees = 40.0f, maxPitchDegrees = 89.0f;
 };
 
+/// Mouse and continuous polarizer-control rates.
 struct InputConfig {
     float mouseSensitivity = 0.0035f, polarizerRotateSpeed = 1.5f;
 };
 
+/// Display exposure and atmospheric parameters for the runtime.
 struct SkyConfig {
     float exposure = 10.0f;
     SkySpectralConfig spectral{};
 };
 
+/// Complete set of renderer settings consumed by the application.
 struct RuntimeConfig {
     RenderConfig render{};
     CameraConfig camera{};
@@ -71,30 +83,43 @@ struct RuntimeConfig {
     SkyConfig sky{};
 };
 
+/// The shader samples 17 bands spanning 380 to 780 nm at 25 nm intervals.
 inline constexpr int kSpectralBandCount = 17;
 inline constexpr double kSpectralLambdaMinNm = 380.0;
 inline constexpr double kSpectralLambdaStepNm = 25.0;
 
+/// Builds normalized Stokes phase data for one aerosol and each spectral band.
+/// Rows are laid out band-major with one vec4 per angular bin. crossSections
+/// receives the corresponding scattering and extinction cross sections.
 std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
+/// Builds band-major rainbow phase data over [0, pi], including finite-sun blur.
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
+/// Appends a normalized angular sampling CDF for the selected band-major table.
+/// firstEntry identifies the first phase entry and bins is the row length.
 void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry);
 
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;
 
+/// Integrates density columns through the atmosphere for altitude/direction LUTs.
+/// Each vec4 stores Rayleigh, fine aerosol, ozone, and coarse aerosol columns.
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
+/// Piecewise-linear ozone number-density profile used by the LUT integration.
 inline double OzoneProfile(double altitude) { return std::max(0.0, std::min((altitude / 15000.0) - (2.0 / 3.0), (8.0 / 3.0) - (altitude / 15000.0))); }
 
+/// Wavelength-dependent factors packed for one shader spectral band.
 struct SpectralBand {
     double betaRayleighScale, ozoneCrossSection, sunIrradianceScale;
     glm::dvec3 cie;
 };
 
+/// Samples source datasets around a band centre and combines their contributions.
 SpectralBand ComputeSpectralBand(int band);
 
+/// Integrates a tabulated phase function over solid angle for normalization.
 inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);

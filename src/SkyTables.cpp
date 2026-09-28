@@ -13,6 +13,8 @@
 #include <stdexcept>
 
 namespace {
+    // Computes the complex Mie expansion coefficients for a homogeneous sphere.
+    // The logarithmic derivative is evaluated by downward recurrence for stability.
     void MieCoefficients(double x, std::complex<double> m, std::vector<std::complex<double>>& a,
                          std::vector<std::complex<double>>& b, std::vector<std::complex<double>>& D) {
         const int nmax = static_cast<int>(x + (4.0 * std::cbrt(std::max(x, 1e-8))) + 4.0);
@@ -55,6 +57,8 @@ namespace {
 }
 
 namespace {
+    // Table rows are independent by wavelength, so parallelize without sharing
+    // scratch storage or writing the same output entries from multiple workers.
     template <class Body>
     void ParallelFor(int count, Body body) {
         const auto indices = std::views::iota(0, count);
@@ -70,6 +74,8 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
     std::vector<double> mu(static_cast<size_t>(bins));
     for (int i : std::views::iota(0, bins)) mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
 
+    // Approximate the log-normal particle-size distribution with fixed samples
+    // over +/-4 log-space standard deviations.
     const int radiusSamples = 48;
     const double lnSigma = std::log(std::max(1.0001, static_cast<double>(species.sigma)));
     const double lnRg = std::log(std::max(1e-4, static_cast<double>(species.meanRadiusMicrometers)));
@@ -130,6 +136,8 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
         }
 
         crossSections[static_cast<size_t>(band)] = cross;
+        // Normalize the intensity component over the sphere; keep a floor so
+        // degenerate input values cannot divide the table by zero.
         const double norm = std::max(PhaseNormalization(phase), 1e-20);
 
         for (int i : std::views::iota(0, bins)) {
@@ -144,6 +152,8 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
 
 namespace {
 
+    // Linear interpolation keeps rainbow refraction aligned with the same
+    // wavelength bands used by the atmospheric renderer.
     double WaterIor(double wavelengthNm) {
         const double position = std::clamp((wavelengthNm - kSpectralLambdaMinNm) / kSpectralLambdaStepNm,
                                            0.0, static_cast<double>(kSpectralBandCount - 1));
@@ -175,6 +185,8 @@ namespace {
         }
     }
 
+    // Airy Ai is tabulated once by integrating its differential equation from
+    // an asymptotic boundary value, then linearly interpolated at call sites.
     double Airy(double x) {
         constexpr double lo = -22.0;
         constexpr double hi = 8.0;
@@ -229,6 +241,8 @@ namespace {
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius) {
     const int bins = static_cast<int>(rainbow.angleBins);
     std::vector<glm::vec4> table(static_cast<size_t>(kSpectralBandCount * bins));
+    // Sub-band wavelength samples reduce colour aliasing; particle radii and
+    // impact parameters are also quadrature samples, not runtime random draws.
     constexpr int subWavelengths = 5;
     constexpr int radiusSamples = 64;
     constexpr int raySamples = 16384 / subWavelengths;
@@ -326,6 +340,8 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
             const double hi = std::min(std::numbers::pi, (i + 0.5) * binWidth);
             f[static_cast<size_t>(i)] /= 2.0 * std::numbers::pi * (std::cos(lo) - std::cos(hi));
         }
+        // Convert the binned angular energy to a phase density, then normalize
+        // the phase function for importance sampling in the compute shader.
         const double normalization = PhaseNormalization(f);
         for (int i = 0; i < bins; ++i) {
             const glm::dvec4 q = f[static_cast<size_t>(i)] / normalization;
@@ -343,6 +359,8 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         for (int band = 0; band < kSpectralBandCount; ++band) sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
         return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
     };
+    // Trapezoidal integration includes sin(theta), the solid-angle Jacobian.
+    // Appended entries occupy one extra row after all spectral phase rows.
     std::vector<double> cdf(bins, 0.0);
     double a = phase(0);
     for (int i = 1; i < bins; ++i) {
@@ -358,6 +376,8 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
     const double re = sky.earthRadius;
     const double ra = sky.atmosphereRadius;
     std::vector<glm::vec4> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
+    // Altitudes use a quadratic mapping to concentrate LUT resolution near the
+    // ground. Direction cosine uses a signed quadratic mapping near the horizon.
     ParallelFor(kTransmittanceAltitudeBins, [&](int a) {
         const double x = static_cast<double>(a) / (kTransmittanceAltitudeBins - 1);
         const double r = re + (x * x * (ra - re));
@@ -411,6 +431,8 @@ namespace {
 SpectralBand ComputeSpectralBand(int band) {
     const double centre = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
     SpectralBand result{.betaRayleighScale = 0.0, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
+    // Average the smooth wavelength-dependent datasets around the 25 nm band
+    // centre. The CIE function is sampled more densely to retain its shape.
     for (int offset = -10; offset <= 10; offset += 5) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;

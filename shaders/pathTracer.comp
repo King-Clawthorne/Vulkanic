@@ -1,9 +1,15 @@
 #version 460
 
+// One 8x8 workgroup tile shades independent output pixels. The pipeline's
+// specialization constants and descriptor ordering are paired with C++ setup.
+
 #extension GL_KHR_shader_subgroup_vote : require
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// Descriptor binding contract with VulkanPathTracer::CreateDescriptorSetLayout:
+// 0 output image, 1 scene constants, 2 Mie table, 3 rainbow table,
+// 4 atmospheric depth LUT, and 5 persistent XYZ accumulation.
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
     vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
@@ -21,21 +27,28 @@ layout(push_constant) uniform PushConstants {
     uvec2 imageSize;
 } pc;
 
+// Quality controls supplied as specialization constants when the pipeline is
+// created. These are compile-time shader values for the selected pipeline.
 layout(constant_id = 0) const uint SpecializedOrders = 1;
 layout(constant_id = 1) const uint SpecializedViewSteps = 0;
 layout(constant_id = 2) const uint SpecializedSamples = 0;
 layout(constant_id = 3) const uint SpecializedSecondarySamples = 0;
 layout(constant_id = 4) const bool SpecializedRainbow = true;
 
+// CPU-generated LUT dimensions and shader table indexing depend on these values.
 const float PI = 3.14159265358979323846;
 const int SPECTRAL_BANDS = 17;
 const float GOLDEN_ANGLE = 2.39996322972865332;
 const int MAX_SCATTER_ORDER = 4;
 const int LUT_ALT = 64, LUT_MU = 256;
 
+// Transform a world-space point/vector into the unit-space ellipsoid used for
+// rain volume intersection and density evaluation.
 vec3 rain_frame(vec3 v) { return vec3(dot(v, sceneData.rainbowAxisX.xyz), v.y, dot(v, sceneData.rainbowAxisZ.xyz)) / sceneData.rainbowRadiiEdge.xyz; }
 uint Hash(uint x);
 
+// Analytic limb-darkening approximation evaluated per wavelength band. mu is
+// the cosine of the angular distance from the apparent solar-disk centre.
 float solar_limb_intensity(float mu, float wavelengthNm) {
     float wavelengthUm = wavelengthNm * 0.001;
     float inv = 1.0 / wavelengthUm, inv5 = inv * inv * inv * inv * inv;
@@ -73,6 +86,8 @@ float solar_limb_polarization(float mu, float wavelengthNm, float intensityRatio
     return pAtMuPoint * limbFactor / referenceFactor;
 }
 
+// Deterministic hash-based star field. It is evaluated only for night rays that
+// miss the planet, so it needs no geometry or per-frame random state.
 vec4 procedural_star(vec3 direction) {
     const vec2 grid = vec2(720.0, 360.0);
     vec2 uv = vec2(atan(direction.z, direction.x) / (2.0 * PI) + 0.5,
@@ -117,6 +132,8 @@ uint Hash(uint x) {
     return (x >> 22u) ^ x;
 }
 
+// Low-discrepancy sample dimensions used for pixel jitter and path decisions.
+// Dimensions beyond this small table use the hash fallback in SampleFloat.
 const uint SAMPLE_DIMENSIONS = 8u;
 const float R2_ALPHA[SAMPLE_DIMENSIONS] = float[SAMPLE_DIMENSIONS](
     0.754877666247, 0.569840290998, 0.430159709002, 0.324717957245,
@@ -135,11 +152,15 @@ float NextFloat(inout uint index, inout uint dimension, uint scramble) {
     return value;
 }
 
+// Density-weighted path columns are ordered Rayleigh, fine aerosol, ozone,
+// coarse aerosol, matching the CPU transmittance table and scene coefficients.
 vec4 air_density(vec3 pos) {
     float h = max(length(pos) - sceneData.skyRadiiScaleHeights.x, 0.0);
     return vec4(exp(-h / sceneData.skyRadiiScaleHeights.zw), max(0.0, min(h / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - h / 15000.0)), exp(-h / sceneData.skyVrtParams.w));
 }
 
+// Returns near/far ray parameters; a negative near hit denotes an origin inside
+// the sphere. Callers use this convention for both planet and atmosphere tests.
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
     float b = dot(origin, dir);
     float d = b * b - dot(origin, origin) + radius * radius;
@@ -155,6 +176,7 @@ bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
     return atmosphere.y >= 0.0;
 }
 
+// Bilinearly samples integrated density columns from the CPU-built atmosphere LUT.
 vec4 sun_air_depth(vec3 origin, vec3 dir) {
     float r = length(origin), mu = dot(origin, dir) / r;
     float x = sqrt(clamp((r - sceneData.skyRadiiScaleHeights.x) / (sceneData.skyRadiiScaleHeights.y - sceneData.skyRadiiScaleHeights.x), 0.0, 1.0)) * float(LUT_ALT - 1);
@@ -166,10 +188,14 @@ vec4 sun_air_depth(vec3 origin, vec3 dir) {
                mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
 }
 
+// Applies Beer-Lambert attenuation for one wavelength using all four stored
+// density columns and that band's Rayleigh, aerosol, and ozone coefficients.
 float band_transmittance(vec4 depth, int band) {
     return exp(-(sceneData.spectralBands[band].x * depth.x + sceneData.mieBands[band].x * depth.y + sceneData.spectralBands[band].w * depth.z + sceneData.mieBands[band].z * depth.w));
 }
 
+// Stokes vectors use (I, Q, U, V); these helpers rotate reference frames and
+// apply scattering Mueller matrices while preserving physical polarization.
 mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) {
     return mat4(m11, m12, 0.0, 0.0, m12, m22, 0.0, 0.0, 0.0, 0.0, m33, -m34, 0.0, 0.0, m34, m44);
 }
@@ -233,6 +259,8 @@ vec4 scatter_rainbow(vec4 sIn, vec3 din, vec3 dout, int band) {
     return apply_mueller(rainbow_mueller(dot(din, dout), band), sIn, rot, flip);
 }
 
+// Cached angular geometry for one scattering event. The bin/fraction pair
+// interpolates adjacent rows in the CPU-generated phase lookup tables.
 struct ScatterGeom { mat4 rayleigh; vec4 rot, flip; int bin; float frac; };
 
 ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
@@ -258,6 +286,8 @@ vec4 scatter_band(ScatterGeom g, vec4 s, vec3 w, int band) {
     return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
+// Explicit traversal state for nested scattering orders. A fixed array avoids
+// recursive shader calls, which GLSL compute shaders do not support.
 struct Level {
     vec3 org, dir, pos;
     vec4 air, camDepth, depth0;
@@ -308,6 +338,9 @@ vec3 mie_sample(int aerosol, vec3 axis) {
     return cdf_sample(aerosol, axis, u, phi);
 }
 
+// Draws an integration point from a truncated exponential distance proposal.
+// stepWeight is the reciprocal PDF divided by the number of steps, preserving
+// an unbiased estimate while concentrating samples in optically dense paths.
 void begin_step(int d, int steps) {
     float u = (float(S[d].stepIndex) + NextFloat(gRngIndex, gRngDimension, gRngScramble)) / float(steps), k = S[d].rate, len = S[d].span, t, pdf;
     if (k * len < 1.0e-3) {
@@ -332,6 +365,9 @@ vec4 level_value(bool leaf, ScatterGeom g, int d, int b) {
     return stokes_make_physical(S[d].result[b]);
 }
 
+// Integrates one atmospheric scattering order. Nested levels represent the
+// incoming radiance at each collision; phase proposals mix sun/view directions
+// and Mie lobes, with PDF compensation in sampleWeight.
 void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int samples, int secondarySteps, inout vec4 sky[SPECTRAL_BANDS]) {
     int last = clamp(order, 1, STACK) - 1, d = 0;
     S[0].org = origin;
@@ -404,6 +440,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
     }
 }
 
+// Combines atmospheric scattering with the finite solar disk and its limb
+// profile. Rays that hit the ground stop at first order to avoid sky sampling
+// through the planet.
 vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     vec3 origin = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
     vec4 sky[SPECTRAL_BANDS];
@@ -459,6 +498,8 @@ float rainbow_density(vec3 localPosition) {
     return 1.0 - smoothstep(1.0 - softness, 1.0, q);
 }
 
+// Integrates the soft ellipsoid density analytically along a ray interval. The
+// hard-edge case reduces to coefficient times path length.
 float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
     if (end <= start) return 0.0;
     float softness = sceneData.rainbowRadiiEdge.w;
@@ -517,6 +558,9 @@ vec3 rain_sample_direction(vec3 axis, inout uint index, inout uint dimension, ui
     return spherical_around(axis, acos(1.0 - 2.0 * u), phi);
 }
 
+// Estimates rain-volume radiance with free-flight distance sampling and a
+// mixture proposal for successive scattering directions. Throughput includes
+// proposal-PDF compensation and attenuation through the rain and atmosphere.
 vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint scramble) {
     vec4 result[SPECTRAL_BANDS];
     for (int b = 0; b < SPECTRAL_BANDS; ++b) result[b] = vec4(0.0);
@@ -568,6 +612,9 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
     return result;
 }
 
+// For each pixel: generate jittered camera rays, evaluate sky/rain/stars in
+// spectral Stokes form, project through the optional analyzer, accumulate XYZ,
+// then convert to display RGB with exposure and the AgX/sRGB output transform.
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;

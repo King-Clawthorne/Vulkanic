@@ -3,6 +3,8 @@
 #include <array>
 #include <glm/vec3.hpp>
 
+// Tabulated source data used by the spectral models below. Water IOR is sampled
+// at the renderer's 17 band centres (380-780 nm, 25 nm spacing).
 inline constexpr std::array<double, 17> kWaterIor = {
     1.3414, 1.3384, 1.3350, 1.3332,
     1.3318, 1.3310, 1.3306, 1.3302,
@@ -11,6 +13,8 @@ inline constexpr std::array<double, 17> kWaterIor = {
     1.3266,
 };
 
+// Ozone absorption cross section in square metres per molecule. Entries are
+// spaced at 10 nm from 360 through 830 nm and linearly interpolated by wavelength.
 inline constexpr std::array<double, 48> kOzoneCrossSection = {
     1.18e-27, 2.182e-28, 2.818e-28, 6.636e-28,
     1.527e-27, 2.763e-27, 5.52e-27, 8.451e-27,
@@ -26,6 +30,7 @@ inline constexpr std::array<double, 48> kOzoneCrossSection = {
     1.465e-26, 2.078e-26, 1.383e-26, 7.105e-27,
 };
 
+// Relative spectral solar irradiance samples used to scale each band to 550 nm.
 inline constexpr std::array<double, 94> kSolarIrradiance = {
     1.2519, 1.245, 1.6885, 1.715,
     1.537, 1.7688, 1.599, 1.755,
@@ -53,6 +58,8 @@ inline constexpr std::array<double, 94> kSolarIrradiance = {
     1.0700, 1.0550,
 };
 
+// CIE 2006 2-degree colour-matching functions, XYZ, sampled every 5 nm from
+// 390 through 830 nm. Values are interpolated and integrated into each band.
 inline constexpr std::array<glm::dvec3, 89> kCie2006Xyz = {{
     {0.00376964384825, 0.000414615133636, 0.0184726048689},
     {0.00938291310114, 0.00105963697033, 0.0460975733932},

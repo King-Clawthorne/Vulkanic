@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+// Owns interactive view and analyzer state. Keeping a snapshot of the visible
+// controls lets the render loop detect changes that invalidate accumulated rays.
 struct CameraController {
     struct View {
         float yaw, pitch;
@@ -76,11 +78,14 @@ struct CameraController {
     [[nodiscard]] View GetView() const { return {.yaw = yaw, .pitch = pitch, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f}; }
 };
 
+// Two reusable command buffers let CPU submission overlap GPU execution.
 constexpr uint32_t kFramesInFlight = 2;
 constexpr uint32_t kPathTracerSpirv[] = {
 #include "pathTracer.comp.spv.inc"
 };
 
+// Must match the std140 SceneData declaration in pathTracer.comp. Keep the
+// offsets asserted below when adding fields to avoid silently corrupting shaders.
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
@@ -98,6 +103,8 @@ constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage, vk::Des
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer};
 
+// Per-dispatch camera, accumulation, polarizer, and image-size values. The field
+// order and size must match the shader push-constant block exactly.
 struct PushConstants {
     glm::vec4 forward, right, up, frame, polarizer;
     glm::uvec2 imageSize;
@@ -151,6 +158,8 @@ private:
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
         };
 
+        // Convert CPU model parameters into the compact units and band layout
+        // expected by the shader. The CIE Y sum provides a stable luminance scale.
         float ySum = 0.0f;
         const double sun550 = ComputeSpectralBand(6).sunIrradianceScale;
         for (int band = 0; band < kSpectralBandCount; ++band) {
@@ -171,6 +180,8 @@ private:
                              std::cos(s.sunRadius - s.sunAa), 0.0f};
         const float sunNorm = std::hypot(s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
         const float trueAltitude = std::asin(s.sunDirection[1] / sunNorm) * 180.0f * std::numbers::inv_pi_v<float>;
+        // Bennett's near-horizon approximation supplies an apparent sun vector;
+        // its local derivative accounts for vertical angular compression.
         const auto refraction = [](float altitude) {
             const float h = std::max(altitude, -1.0f);
             return 1.02f / 60.0f / std::tan((h + (10.3f / (h + 5.11f))) * kPi / 180.0f);
@@ -211,6 +222,8 @@ private:
     void CreateSceneBuffers() {
         const SkySpectralConfig& s = m_config.sky.spectral;
         m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
+        // The shader's table index helpers expect consecutive band-major phase
+        // rows followed by one angular CDF row for each aerosol/table.
         std::vector<glm::vec4> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
         std::ranges::copy(ComputeMieScatteringTable(s, 1, m_mieCrossSections[1]), std::back_inserter(mie));
         const int bins = std::max(2, static_cast<int>(s.mieTableAngleBins));
@@ -270,6 +283,8 @@ private:
         }
         m_surface = vk::raii::SurfaceKHR(m_instance, surface);
 
+        // The compute path writes swapchain storage images directly and relies
+        // on synchronization2 and push descriptors from the Vulkan 1.3/1.4 APIs.
         VkPhysicalDeviceFeatures requiredFeatures{};
         requiredFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
         VkPhysicalDeviceVulkan13Features requiredFeatures13{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -307,6 +322,8 @@ private:
     }
 
     void CreateSwapchain() {
+        // Storage usage is required because the compute shader writes the
+        // acquired swapchain image without an intermediate graphics pass.
         auto swapchainResult = vkb::SwapchainBuilder{m_selectedDevice}
                                    .set_desired_format({.format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
                                    .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
@@ -330,6 +347,8 @@ private:
         m_selectedSwapchain.swapchain = VK_NULL_HANDLE;
     }
     void CreateDescriptorSetLayout() {
+        // Binding order is shared with the shader: output, scene constants,
+        // Mie phase/CDF, rainbow phase/CDF, transmittance LUT, accumulation.
         std::array<vk::DescriptorSetLayoutBinding, kDescriptorTypes.size()> layoutBindings{};
         for (const auto [binding, type] : std::views::enumerate(kDescriptorTypes))
             layoutBindings[binding] = {static_cast<uint32_t>(binding), type, 1, vk::ShaderStageFlagBits::eCompute};
@@ -342,6 +361,8 @@ private:
     void CreatePipeline() {
         const vk::raii::ShaderModule computeModule{m_device, vk::ShaderModuleCreateInfo{{}, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv)}};
 
+        // Specialization constants let the driver fold quality settings and the
+        // optional rainbow path into the compute pipeline at creation time.
         const std::array<uint32_t, 5> settings = {std::max(1u, m_config.sky.spectral.scatteringOrders),
                                                   m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples,
                                                   m_config.sky.spectral.secondarySamples, (m_config.rainbow.enabled != 0u) ? 1u : 0u};
