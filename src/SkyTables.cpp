@@ -189,21 +189,22 @@ namespace {
         }
     }
 
-    // Airy Ai is tabulated once by integrating its differential equation from
-    // an asymptotic boundary value, then linearly interpolated at call sites.
+    // Airy Ai and its derivative are tabulated together by integrating their
+    // differential equation. Cubic Hermite interpolation retains the curved,
+    // oscillatory profile between samples without estimating slopes later.
     double Airy(double x) {
         constexpr double lo = -22.0;
         constexpr double hi = 8.0;
         constexpr double h = 1.0e-3;
-        static const std::vector<double> values = [] {
+        static const std::vector<glm::dvec2> values = [] {
             const auto count = static_cast<size_t>(std::lround((hi - lo) / h)) + 1;
-            std::vector<double> table(count);
+            std::vector<glm::dvec2> table(count);
             const double zeta = 2.0 / 3.0 * std::pow(hi, 1.5);
             const double scale = 0.5 * std::exp(-zeta) * std::sqrt(std::numbers::inv_pi);
             double y = scale / std::pow(hi, 0.25) * (1.0 - (5.0 / (72.0 * zeta)) + (385.0 / (10368.0 * zeta * zeta)));
             double v = -scale * std::pow(hi, 0.25) * (1.0 + (7.0 / (72.0 * zeta)) - (455.0 / (10368.0 * zeta * zeta)));
             for (size_t i = count; i-- > 0;) {
-                table[i] = y;
+                table[i] = {y, v};
                 const double x0 = lo + (static_cast<double>(i) * h);
                 const double s = -h;
                 const double k1y = v;
@@ -223,7 +224,10 @@ namespace {
             return 0.0;
         const double f = (std::max(x, lo) - lo) / h;
         const auto i = std::min(static_cast<size_t>(f), values.size() - 2);
-        return std::lerp(values[i], values[i + 1], f - static_cast<double>(i));
+        const double t = f - static_cast<double>(i);
+        const double t2 = t * t, t3 = t2 * t;
+        return (2.0 * t3 - 3.0 * t2 + 1.0) * values[i].x + (t3 - 2.0 * t2 + t) * h * values[i].y +
+               (-2.0 * t3 + 3.0 * t2) * values[i + 1].x + (t3 - t2) * h * values[i + 1].y;
     }
 
     double AiryBlend(double z) {

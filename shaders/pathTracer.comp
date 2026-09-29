@@ -263,7 +263,7 @@ mat4 rayleigh_mueller(float cosTheta) {
     float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
     float mu2 = cosTheta * cosTheta;
     float base = 0.75 * (1.0 + mu2), p33 = 1.5 * cosTheta;
-    return mueller(kingFactor * base + (1.0 - kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base,
+    return mueller(mix(1.0, base, kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base,
                    kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
 }
 
