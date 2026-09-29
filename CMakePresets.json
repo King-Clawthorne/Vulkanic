@@ -6,7 +6,7 @@
       "displayName": "Windows GPU",
       "description": "Ninja + clang-cl on Windows",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-windows",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
