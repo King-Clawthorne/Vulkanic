@@ -31,6 +31,8 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/g-truc/glm.git
     GIT_TAG 1.0.1
     GIT_SHALLOW TRUE
+    # GLM is used through headers; skip its legacy CMake project.
+    SOURCE_SUBDIR headers_only
 )
 FetchContent_Declare(
     vk_bootstrap
@@ -50,6 +52,9 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(VK_BOOTSTRAP_TEST OFF CACHE BOOL "" FORCE)
 set(VK_BOOTSTRAP_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(vulkan_headers vma_hpp glfw glm vk_bootstrap)
+add_library(glm_header_only INTERFACE)
+add_library(glm::glm ALIAS glm_header_only)
+target_include_directories(glm_header_only INTERFACE "${glm_SOURCE_DIR}")
 target_include_directories(vk-bootstrap BEFORE PUBLIC "${vulkan_headers_SOURCE_DIR}/include")
 
 set(SPV "${CMAKE_BINARY_DIR}/pathTracer.comp.spv.inc")

@@ -36,7 +36,7 @@ From PowerShell, run:
 ./build.ps1
 ```
 
-The script checks that it is running under WSL 2, configures a Release build with the `wsl` CMake preset, and writes the executable to `build-wsl/Vulkanic`. Native Windows CMake builds are rejected.
+The script checks that it is running under WSL 2, configures a Release build with the `wsl` CMake preset when needed, and writes the executable to `build-wsl/Vulkanic`. Native Windows CMake builds are rejected.
 
 To build manually:
 

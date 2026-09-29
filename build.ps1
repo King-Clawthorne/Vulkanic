@@ -24,7 +24,9 @@ for tool in cmake ninja gcc g++ glslc git pkg-config; do
 done
 
 cd "$(wslpath -u "$1")"
-cmake --preset wsl
+if [ ! -f build-wsl/build.ninja ] || [ CMakePresets.json -nt build-wsl/CMakeCache.txt ]; then
+    cmake --preset wsl
+fi
 cmake --build --preset wsl --parallel
 '@
 
