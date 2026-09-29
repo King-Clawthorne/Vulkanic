@@ -20,13 +20,11 @@ The result is an interactive sky-rendering demo that exposes how spectral scatte
 
 ## Requirements
 
-- WSL 2 with a Linux distribution
-- CMake 3.30 or newer, Ninja, GCC 15 or newer, Git, and pkg-config installed in WSL 2
-- Linux Vulkan development files, `glslc`, and oneTBB development files installed in WSL 2
+- Windows, CMake 3.30 or newer, Ninja, Clang 20 or newer with `clang-cl`, and a Vulkan SDK with `glslc`
 - A Vulkan 1.4 capable GPU and driver
 
 CMake downloads GLFW, GLM, Vulkan Memory Allocator-Hpp, and vk-bootstrap through FetchContent.
-On Ubuntu, install build tools and headers with `sudo apt install cmake ninja-build g++ git pkg-config glslc libvulkan-dev libtbb-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev`.
+The app prints its selected Vulkan device at startup.
 
 ## Build
 
@@ -36,22 +34,22 @@ From PowerShell, run:
 ./build.ps1
 ```
 
-The script checks that it is running under WSL 2, configures a Release build with the `wsl` CMake preset when needed, and writes the executable to `build-wsl/Vulkanic`. Native Windows CMake builds are rejected.
+The script builds the Windows GPU executable at `build-windows/Vulkanic.exe`.
 
 To build manually:
 
-```sh
-cmake --preset wsl
-cmake --build --preset wsl --parallel
+```powershell
+cmake --preset windows
+cmake --build --preset windows --parallel
 ```
 
 ## Run
 
-```sh
-./build-wsl/Vulkanic
+```powershell
+./build-windows/Vulkanic.exe
 ```
 
-The window title reports the current frame rate and frame time. Controls:
+The top-left of the rendered image shows FPS, and the window title reports FPS and frame time. Controls:
 
 - **W/A/S/D**: move forward, left, backward, and right
 - **Space / Left Ctrl**: move up and down

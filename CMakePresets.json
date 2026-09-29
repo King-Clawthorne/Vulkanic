@@ -2,20 +2,20 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "wsl",
-      "displayName": "WSL 2",
-      "description": "Ninja + GCC 15 on WSL 2",
+      "name": "windows",
+      "displayName": "Windows GPU",
+      "description": "Ninja + clang-cl on Windows",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-wsl",
+      "binaryDir": "${sourceDir}/build-windows",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_CXX_COMPILER": "g++"
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
       }
     }
   ],
   "buildPresets": [
-    { "name": "wsl", "configurePreset": "wsl" }
+    { "name": "windows", "configurePreset": "windows" }
   ]
 }

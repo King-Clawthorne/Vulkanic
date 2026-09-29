@@ -331,6 +331,10 @@ private:
                                        .select()
                                        .value();
         m_physicalDevice = vk::raii::PhysicalDevice(m_instance, m_selectedPhysicalDevice.physical_device);
+        const vk::PhysicalDeviceProperties deviceProperties = m_physicalDevice.getProperties();
+        std::println(stderr, "Vulkan device: {}", deviceProperties.deviceName.data());
+        if (deviceProperties.deviceType == vk::PhysicalDeviceType::eCpu)
+            std::println(stderr, "Vulkan is using a CPU renderer; interactive FPS will be much lower than on a GPU.");
 
         m_selectedDevice = vkb::DeviceBuilder{m_selectedPhysicalDevice}.build().value();
         const auto graphicsQueueFamily = m_selectedDevice.get_queue_index(vkb::QueueType::graphics);
@@ -449,7 +453,7 @@ private:
             .forward = {fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel)},
             .right = {rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f},
             .up = {fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f},
-            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0f},
+            .frame = {static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, m_displayFps},
             .polarizer = {view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f},
             .imageSize = {m_swapchainExtent.width, m_swapchainExtent.height},
         };
@@ -560,13 +564,14 @@ private:
             RenderFrame();
 
             ++frames;
-            const double elapsed = std::chrono::duration<double>(now - titleUpdate).count();
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - titleUpdate).count();
             if (elapsed >= 1.0) {
+                m_displayFps = static_cast<float>(frames / elapsed);
                 const std::string title =
-                    std::format("Vulkanic - {:.1f} FPS ({:.2f} ms)", frames / elapsed, 1000.0 * elapsed / frames);
+                    std::format("Vulkanic - {:.1f} FPS ({:.2f} ms)", m_displayFps, 1000.0 * elapsed / frames);
                 glfwSetWindowTitle(m_window, title.c_str());
                 frames = 0;
-                titleUpdate = now;
+                titleUpdate = std::chrono::steady_clock::now();
             }
         }
     }
@@ -611,6 +616,7 @@ private:
     std::vector<FrameResources> m_frames;
     uint32_t m_currentFrame = 0;
     uint64_t m_frameIndex = 0;
+    float m_displayFps = 0.0f;
     RuntimeConfig m_config{};
     CameraController m_camera;
     std::optional<CameraController::View> m_lastView;
