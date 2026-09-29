@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.30)
+if(WIN32)
+    message(FATAL_ERROR "Native Windows builds are disabled. Run ./build.ps1 to build in WSL 2.")
+endif()
 project(vulkan_path_tracer)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -6,9 +9,10 @@ set(CMAKE_CXX_STANDARD 26)
 # Require glslc from the Vulkan SDK; the compute shader is compiled as part of
 # the normal build rather than relying on a checked-in binary shader.
 find_package(Vulkan REQUIRED COMPONENTS glslc)
+find_package(TBB REQUIRED)
 
-# Fetch the pinned third-party dependencies so a configured checkout has a
-# consistent dependency set without requiring separate package installation.
+# Fetch pinned library sources and headers; platform packages provide Vulkan,
+# oneTBB, and GLFW's Linux window-system dependencies.
 include(FetchContent)
 FetchContent_Declare(
     vma_hpp
@@ -34,10 +38,19 @@ FetchContent_Declare(
     GIT_TAG v1.4.357
     GIT_SHALLOW TRUE
 )
+FetchContent_Declare(
+    vulkan_headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+    GIT_TAG v1.4.357
+    GIT_SHALLOW TRUE
+    # Use the headers directly without adding another Vulkan::Headers target.
+    SOURCE_SUBDIR headers_only
+)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(VK_BOOTSTRAP_TEST OFF CACHE BOOL "" FORCE)
 set(VK_BOOTSTRAP_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(vma_hpp glfw glm vk_bootstrap)
+FetchContent_MakeAvailable(vulkan_headers vma_hpp glfw glm vk_bootstrap)
+target_include_directories(vk-bootstrap BEFORE PUBLIC "${vulkan_headers_SOURCE_DIR}/include")
 
 set(SPV "${CMAKE_BINARY_DIR}/pathTracer.comp.spv.inc")
 # Emit numeric SPIR-V words as a C++ include, allowing the executable to create
@@ -52,6 +65,7 @@ add_custom_command(
 add_executable(Vulkanic src/SkyTables.cpp src/VulkanPathTracer.cpp "${SPV}")
 # The generated include lives in the build tree and is included by the renderer.
 target_include_directories(Vulkanic PRIVATE "${CMAKE_BINARY_DIR}")
+target_include_directories(Vulkanic BEFORE PRIVATE "${vulkan_headers_SOURCE_DIR}/include")
 target_link_libraries(
     Vulkanic
     PRIVATE Vulkan::Vulkan
@@ -60,5 +74,6 @@ target_link_libraries(
             glfw
             glm::glm
             vk-bootstrap::vk-bootstrap
+            TBB::tbb
 )
 target_compile_options(Vulkanic PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-nullability-completeness>)

@@ -2,20 +2,20 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "default",
-      "displayName": "Default",
-      "description": "Ninja + clang-cl (LLVM 20+)",
+      "name": "wsl",
+      "displayName": "WSL 2",
+      "description": "Ninja + GCC 15 on WSL 2",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
+      "binaryDir": "${sourceDir}/build-wsl",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_C_COMPILER": "clang-cl",
-        "CMAKE_CXX_COMPILER": "clang-cl"
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
       }
     }
   ],
   "buildPresets": [
-    { "name": "default", "configurePreset": "default" }
+    { "name": "wsl", "configurePreset": "wsl" }
   ]
 }

@@ -5,7 +5,6 @@
 #include <cmath>
 #include <complex>
 #include <execution>
-#include <mdspan>
 #include <numbers>
 #include <numeric>
 #include <ranges>
@@ -86,7 +85,6 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
     const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
 
     std::vector<glm::vec4> table(static_cast<size_t>(bins) * kSpectralBandCount);
-    auto tableView = std::mdspan(table.data(), static_cast<size_t>(kSpectralBandCount), static_cast<size_t>(bins));
 
     ParallelFor(kSpectralBandCount, [&](int band) {
         const double lambdaUm = (kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band)) * 1e-3;
@@ -146,8 +144,8 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
 
         for (int i : std::views::iota(0, bins)) {
             const glm::dvec4 q = phase[static_cast<size_t>(i)] / norm;
-            tableView[band, static_cast<size_t>(i)] = glm::vec4{static_cast<float>(q.x), static_cast<float>(q.y),
-                                                                static_cast<float>(q.z), static_cast<float>(q.w)};
+            table[static_cast<size_t>(band) * static_cast<size_t>(bins) + static_cast<size_t>(i)] =
+                glm::vec4{static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z), static_cast<float>(q.w)};
         }
     });
 

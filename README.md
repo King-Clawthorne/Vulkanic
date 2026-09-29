@@ -20,13 +20,13 @@ The result is an interactive sky-rendering demo that exposes how spectral scatte
 
 ## Requirements
 
-- CMake 3.30 or newer
-- Ninja
-- Clang 20 or newer with `clang-cl` (the included preset targets Windows)
-- Vulkan SDK with Vulkan 1.4 support and `glslc`
+- WSL 2 with a Linux distribution
+- CMake 3.30 or newer, Ninja, GCC 15 or newer, Git, and pkg-config installed in WSL 2
+- Linux Vulkan development files, `glslc`, and oneTBB development files installed in WSL 2
 - A Vulkan 1.4 capable GPU and driver
 
 CMake downloads GLFW, GLM, Vulkan Memory Allocator-Hpp, and vk-bootstrap through FetchContent.
+On Ubuntu, install build tools and headers with `sudo apt install cmake ninja-build g++ git pkg-config glslc libvulkan-dev libtbb-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev`.
 
 ## Build
 
@@ -36,19 +36,19 @@ From PowerShell, run:
 ./build.ps1
 ```
 
-The script configures and builds the Release target with the `default` CMake preset. The executable is written to `build/Vulkanic.exe`.
+The script checks that it is running under WSL 2, configures a Release build with the `wsl` CMake preset, and writes the executable to `build-wsl/Vulkanic`. Native Windows CMake builds are rejected.
 
 To build manually:
 
-```powershell
-cmake --preset default
-cmake --build --preset default --parallel
+```sh
+cmake --preset wsl
+cmake --build --preset wsl --parallel
 ```
 
 ## Run
 
-```powershell
-./build/Vulkanic.exe
+```sh
+./build-wsl/Vulkanic
 ```
 
 The window title reports the current frame rate and frame time. Controls:
