@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
-    if (-not (Test-Path -LiteralPath 'build-windows/build.ninja')) {
+    if (-not (Test-Path -LiteralPath 'build/build.ninja')) {
         cmake --preset windows
     }
     cmake --build --preset windows --parallel

@@ -49,7 +49,7 @@ cmake --build --preset windows --parallel
 ./build-windows/Vulkanic.exe
 ```
 
-The top-left of the rendered image shows FPS, and the window title reports FPS and frame time. Controls:
+The window title reports FPS and frame time. Controls:
 
 - **W/A/S/D**: move forward, left, backward, and right
 - **Space / Left Ctrl**: move up and down

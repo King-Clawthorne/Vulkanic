@@ -56,49 +56,6 @@ const float GOLDEN_ANGLE = 2.39996322972865332;
 const int MAX_SCATTER_ORDER = 4;
 const int LUT_ALT = 64, LUT_MU = 256;
 
-// Compact 3x5 glyphs for the FPS readout, drawn after exposure and tone mapping.
-uint fps_glyph(int symbol) {
-    switch (symbol) {
-    case 0: return 0x7b6fu;
-    case 1: return 0x749au;
-    case 2: return 0x73e7u;
-    case 3: return 0x79e7u;
-    case 4: return 0x49edu;
-    case 5: return 0x79cfu;
-    case 6: return 0x7bcfu;
-    case 7: return 0x4927u;
-    case 8: return 0x7befu;
-    case 9: return 0x79efu;
-    case 10: return 0x12cfu; // F
-    case 11: return 0x12ebu; // P
-    case 12: return 0x79cfu; // S
-    default: return 0x0410u; // :
-    }
-}
-
-vec3 fps_overlay(uvec2 pixel, vec3 color) {
-    if (pixel.x < 8u || pixel.x >= 108u || pixel.y < 8u || pixel.y >= 39u)
-        return color;
-
-    color = vec3(0.015, 0.025, 0.035);
-    ivec2 textPixel = ivec2(pixel) - ivec2(14, 16);
-    if (textPixel.x < 0 || textPixel.x >= 84 || textPixel.y < 0 || textPixel.y >= 15)
-        return color;
-
-    ivec2 cell = textPixel / 3;
-    int glyphIndex = cell.x / 4;
-    int column = cell.x % 4;
-    if (column == 3)
-        return color;
-
-    int fps = clamp(int(pc.frame.w + 0.5), 0, 999);
-    int symbol = glyphIndex == 0 ? 10 : glyphIndex == 1 ? 11 : glyphIndex == 2 ? 12 :
-                 glyphIndex == 3 ? 13 : glyphIndex == 4 ? fps / 100 :
-                 glyphIndex == 5 ? (fps / 10) % 10 : fps % 10;
-    uint glyph = fps_glyph(symbol);
-    return ((glyph >> uint(cell.y * 3 + column)) & 1u) != 0u ? vec3(0.9, 1.0, 0.9) : color;
-}
-
 // Transform a world-space point/vector into the unit-space ellipsoid used for
 // rain volume intersection and density evaluation.
 vec3 rain_frame(vec3 v) {
@@ -827,7 +784,6 @@ void main() {
     vec3 x2 = x * x, x4 = x2 * x2;
     x = 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
     vec3 c = min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
-    vec3 displayColor = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c,
-                            lessThanEqual(c, vec3(0.0031308)));
-    imageStore(outputImage, ivec2(pixel), vec4(fps_overlay(pixel, displayColor), 1.0));
+    imageStore(outputImage, ivec2(pixel),
+               vec4(mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308))), 1.0));
 }
