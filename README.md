@@ -14,6 +14,8 @@ Vulkanic brings these effects together in an interactive renderer. It models 17 
 
 The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering, the solar disk, optional rainbow scattering, and procedural stars. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
+Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, rain, polarization, and camera-dependent rays each frame.
+
 ## Result
 
 The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.
@@ -34,7 +36,7 @@ From PowerShell, run:
 ./build.ps1
 ```
 
-The script builds the Windows GPU executable at `build-windows/Vulkanic.exe`.
+The script builds the Windows GPU executable at `build/Vulkanic.exe`.
 
 To build manually:
 
@@ -46,7 +48,7 @@ cmake --build --preset windows --parallel
 ## Run
 
 ```powershell
-./build-windows/Vulkanic.exe
+./build/Vulkanic.exe
 ```
 
 The window title reports FPS and frame time. Controls:
