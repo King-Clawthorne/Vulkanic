@@ -383,12 +383,6 @@ vec3 cdf_sample(int table, vec3 axis, float u, float phi) {
     return spherical_around(axis, (float(lo) + (u - c0) / max(c1 - c0, 1e-20)) * PI / float(info.y - 1), phi);
 }
 
-vec3 mie_sample(int aerosol, vec3 axis) {
-    float u = NextFloat(gRngIndex, gRngDimension, gRngScramble),
-          phi = 2.0 * PI * NextFloat(gRngIndex, gRngDimension, gRngScramble);
-    return cdf_sample(aerosol, axis, u, phi);
-}
-
 // Draws an integration point from a truncated exponential distance proposal.
 // stepWeight is the reciprocal PDF divided by the number of steps, preserving
 // an unbiased estimate while concentrating samples in optically dense paths.
@@ -453,7 +447,8 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             begin_step(d, steps);
         }
         if (d < last && S[d].sampleIndex < samples) {
-            float z = 1.0 - 2.0 * (float(S[d].sampleIndex) + S[d].dirJitter.x) / float(samples);
+            float u = (float(S[d].sampleIndex) + S[d].dirJitter.x) / float(samples);
+            float z = 1.0 - 2.0 * u;
             float phi = GOLDEN_ANGLE * float(S[d].sampleIndex + S[d].stepIndex * samples) + 2.0 * PI * S[d].dirJitter.y;
             S[d + 1].org = S[d].pos;
             vec3 next = -vec3(sqrt(1.0 - z * z) * vec2(cos(phi), sin(phi)), z).xzy;
@@ -461,13 +456,13 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             float coarse = sceneData.mieBands[6].w > 0.0 ? 0.2 : 0.0, fine = 0.4 - coarse,
                   choice = NextFloat(gRngIndex, gRngDimension, gRngScramble);
             if (choice < fine)
-                next = mie_sample(0, L);
+                next = cdf_sample(0, L, u, phi);
             else if (choice < 0.4)
-                next = mie_sample(1, L);
+                next = cdf_sample(1, L, u, phi);
             else if (choice < 0.4 + fine)
-                next = mie_sample(0, current);
+                next = cdf_sample(0, current, u, phi);
             else if (choice < 0.8)
-                next = mie_sample(1, current);
+                next = cdf_sample(1, current, u, phi);
             float cosSun = dot(next, L), cosCurrent = dot(next, current);
             float pdf = 0.2 / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
             pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
@@ -519,9 +514,17 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
         sky[b] = vec4(0.0);
     float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
     int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
-    for (int order = 1; order <= orders; ++order)
+    uint orderScramble = gRngScramble;
+    for (int order = 1; order <= orders; ++order) {
+        // Each order is a separate integral. Restart its dimensions with an
+        // independent pixel scramble so later orders retain Halton coverage.
+        // Direction proposals all reuse the same two uniform variates above,
+        // keeping subsequent dimensions independent of the selected branch.
+        gRngDimension = 2u;
+        gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
         scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples),
                       int(SpecializedSecondarySamples), sky);
+    }
     vec3 apparent = sceneData.apparentSun.xyz;
     vec3 vertical = normalize(vec3(0.0, 1.0, 0.0) - apparent * apparent.y);
     vec2 offset = vec2(dot(viewDir, cross(vertical, apparent)), dot(viewDir, vertical) / sceneData.apparentSun.w);
