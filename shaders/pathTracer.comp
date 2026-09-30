@@ -579,7 +579,7 @@ float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
     if (softness <= 0.0)
         return sceneData.rainbowOptical.y * (end - start);
 
-    vec3 o = rain_frame(origin + direction * start - sceneData.rainbowCenterEnabled.xyz);
+    vec3 o = rain_frame(origin - sceneData.rainbowCenterEnabled.xyz);
     vec3 d = rain_frame(direction);
     float a = dot(d, d), b = dot(o, d), c = dot(o, o);
     float closest = clamp(-b / a, start, end);
@@ -593,8 +593,8 @@ float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
         integral += max(hi - lo, 0.0);
     }
 
-    float smoothLo = max(start, (-b - sqrt(max(a * a - a * c + b * b, 0.0))) / a);
-    float smoothHi = min(end, (-b + sqrt(max(a * a - a * c + b * b, 0.0))) / a);
+    float smoothLo = max(start, (-b - sqrt(max(a - a * c + b * b, 0.0))) / a);
+    float smoothHi = min(end, (-b + sqrt(max(a - a * c + b * b, 0.0))) / a);
     if (smoothHi > smoothLo) {
         float t0 = smoothLo, t1 = smoothHi;
         float r0 = sqrt(max(a * t0 * t0 + 2.0 * b * t0 + c, 0.0));
@@ -608,7 +608,7 @@ float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
             rootPrimitive0 += discriminant / a * asinh((a * t0 + b) / sqrt(discriminant));
             rootPrimitive1 += discriminant / a * asinh((a * t1 + b) / sqrt(discriminant));
         }
-        float rootIntegral = 0.5 * (rootPrimitive1 - rootPrimitive0);
+        float rootIntegral = 0.5 * (rootPrimitive1 - rootPrimitive0) / sqrt(a);
         float smoothIntegral = (t1 - t0) * (1.0 - 0.5 * inner) -
                                (0.75 * (x1 * x1 - x0 * x0) - 0.25 * (x1 * x1 * x1 - x0 * x0 * x0)) * softness;
         integral += smoothIntegral - rootIntegral / softness;
