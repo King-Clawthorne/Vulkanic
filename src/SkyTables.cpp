@@ -403,7 +403,11 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
             const double v = (2.0 * m / (kTransmittanceMuBins - 1)) - 1.0;
             const double mu = v * std::abs(v);
             const double b = r * mu;
-            const double ds = (std::sqrt(std::max((b * b) - (r * r) + (ra * ra), 0.0)) - b) / steps;
+            const double atmosphereExit = std::sqrt(std::max((b * b) - (r * r) + (ra * ra), 0.0)) - b;
+            const double groundEntry = mu < 0.0 ? -std::sqrt(std::max((b * b) - (r * r) + (re * re), 0.0)) - b
+                                                : atmosphereExit;
+            const double pathLength = std::max(0.0, std::min(atmosphereExit, groundEntry));
+            const double ds = pathLength / steps;
             double rayleigh = 0.0;
             double mie = 0.0;
             double ozone = 0.0;
