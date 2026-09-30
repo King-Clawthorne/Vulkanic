@@ -152,15 +152,17 @@ uint Hash(uint x) {
     return (x >> 22u) ^ x;
 }
 
-// Independent digital shifts preserve Sobol stratification across frames and
-// branches. Keep all 32 index bits, then convert only 24 bits so rounding
+// Independent nested scrambles preserve Sobol stratification across frames and
+// branches while breaking up correlations left by digital shifts alone.
+// Keep all 32 index bits, then convert only 24 bits so rounding
 // cannot produce 1.0 and escape an inverse-CDF sampler's domain.
 #include "sobol.glsl"
 
 float SampleFloat(uint index, uint dimension, uint scramble) {
-    uint value = Hash(scramble ^ (dimension * 0x9e3779b9u));
+    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
     if (dimension >= SAMPLE_DIMENSIONS)
-        return float(Hash(index ^ value) >> 8u) * (1.0 / 16777216.0);
+        return float(Hash(index ^ seed) >> 8u) * (1.0 / 16777216.0);
+    uint value = 0u;
     uint bit = 0u;
     while (index != 0u) {
         if ((index & 1u) != 0u)
@@ -168,7 +170,14 @@ float SampleFloat(uint index, uint dimension, uint scramble) {
         index >>= 1u;
         ++bit;
     }
-    return float(value >> 8u) * (1.0 / 16777216.0);
+    
+    value = bitfieldReverse(value);
+    value ^= value * 0x3d20adeau;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
+    return float(bitfieldReverse(value) >> 8u) * (1.0 / 16777216.0);
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
@@ -762,7 +771,9 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
         return result;
     float extinction = sceneData.rainbowOptical.y;
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
-        uint sobolIndex = index + uint(sampleIndex), dimension = 2u;
+        // Consecutive camera samples own disjoint blocks of rain paths.
+        // Keep the scramble fixed across the block to retain stratification.
+        uint sobolIndex = index * uint(samples) + uint(sampleIndex), dimension = 2u;
         vec3 origin = vec3(0.0), direction = viewDir, pathDirections[MAX_SCATTER_ORDER];
         float throughput = 1.0;
         vec4 airPath = vec4(0.0);
@@ -774,7 +785,7 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
             float tau = extinction * lengthInRain;
             float mass = tau < 0.001 ? tau * (1.0 - 0.5 * tau + tau * tau / 6.0) : 1.0 - exp(-tau);
             float u =
-                SampleFloat(sobolIndex, dimension++, scramble ^ uint(sampleIndex) * 1973u ^ uint(vertex) * 0x68bc21ebu);
+                SampleFloat(sobolIndex, dimension++, scramble ^ uint(vertex) * 0x68bc21ebu);
             float distance = tau < 0.001 ? u * lengthInRain : -log(1.0 - u * mass) / extinction;
             float pdf = tau < 0.001 ? 1.0 / lengthInRain : extinction * exp(-extinction * distance) / mass;
             vec3 p = origin + direction * (hit.x + distance);

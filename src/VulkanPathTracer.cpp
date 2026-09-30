@@ -436,6 +436,9 @@ private:
         const CameraController::View view = m_camera.GetView();
         const bool reset = m_lastView != view;
         m_lastView = view;
+        // Every new accumulation starts at a complete Sobol prefix.
+        if (reset)
+            m_frameIndex = 0;
 
         const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
         const float aspect = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
