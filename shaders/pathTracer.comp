@@ -151,25 +151,29 @@ uint Hash(uint x) {
     return (x >> 22u) ^ x;
 }
 
-// Low-discrepancy sample dimensions used for pixel jitter and path decisions.
-// Dimensions beyond this small table use the hash fallback in SampleFloat.
-const uint SAMPLE_DIMENSIONS = 8u;
-const float R2_ALPHA[SAMPLE_DIMENSIONS] =
-    float[SAMPLE_DIMENSIONS](0.754877666247, 0.569840290998, 0.430159709002, 0.324717957245, 0.245122333753,
-                             0.185037375249, 0.139680581996, 0.105441751757);
+// Randomly shifted Halton dimensions. Integer digit extraction avoids the
+// precision loss of multiplying a growing sample index in floating point.
+const uint SAMPLE_DIMENSIONS = 16u;
+const uint SAMPLE_BASES[SAMPLE_DIMENSIONS] =
+    uint[SAMPLE_DIMENSIONS](2u, 3u, 5u, 7u, 11u, 13u, 17u, 19u, 23u, 29u, 31u, 37u, 41u, 43u, 47u, 53u);
 
 float SampleFloat(uint index, uint dimension, uint scramble) {
-    dimension = min(dimension, SAMPLE_DIMENSIONS - 1u);
-    float rotation = (float(Hash(scramble ^ (dimension * 0x9e3779b9u)) >> 8u) + 0.5) * (1.0 / 16777216.0);
-    return fract(float(index) * R2_ALPHA[dimension] + rotation);
+    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
+    if (dimension >= SAMPLE_DIMENSIONS)
+        return float(Hash(index ^ seed) >> 8u) * (1.0 / 16777216.0);
+    uint base = SAMPLE_BASES[dimension];
+    float inverseBase = 1.0 / float(base), place = inverseBase, value = 0.0;
+    while (index != 0u) {
+        value += float(index % base) * place;
+        index /= base;
+        place *= inverseBase;
+    }
+    float rotation = float(seed >> 8u) * (1.0 / 16777216.0);
+    return fract(value + rotation);
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
-    float value = SampleFloat(index, dimension, scramble);
-    dimension = (dimension + 1u) % SAMPLE_DIMENSIONS;
-    if (dimension == 0u)
-        ++index;
-    return value;
+    return SampleFloat(index, dimension++, scramble);
 }
 
 // Density-weighted path columns are ordered Rayleigh, fine aerosol, ozone,

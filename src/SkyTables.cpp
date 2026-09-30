@@ -12,6 +12,15 @@
 #include <stdexcept>
 
 namespace {
+    // Eight-point Gauss-Legendre rule on [-1, 1]. Composite panels also
+    // resolve oscillatory Mie coefficients across the log-radius distribution.
+    constexpr std::array<double, 8> kGaussNodes = {-0.9602898564975363, -0.7966664774136267, -0.5255324099163290,
+                                                   -0.1834346424956498, 0.1834346424956498,  0.5255324099163290,
+                                                   0.7966664774136267,  0.9602898564975363};
+    constexpr std::array<double, 8> kGaussWeights = {0.1012285362903763, 0.2223810344533745, 0.3137066458778873,
+                                                     0.3626837833783620, 0.3626837833783620, 0.3137066458778873,
+                                                     0.2223810344533745, 0.1012285362903763};
+
     // Computes the complex Mie expansion coefficients for a homogeneous sphere.
     // The logarithmic derivative is evaluated by downward recurrence for stability.
     void MieCoefficients(double x, std::complex<double> m, std::vector<std::complex<double>>& a,
@@ -76,13 +85,13 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
     for (int i : std::views::iota(0, bins))
         mu[i] = std::cos(std::numbers::pi * i / (bins - 1));
 
-    // Approximate the log-normal particle-size distribution with fixed samples
-    // over +/-4 log-space standard deviations.
-    const int radiusSamples = 48;
+    // Retain the existing +/-4 sigma support and unnormalized distribution
+    // convention: cross-section ratios, albedo, and normalized phase use it.
+    constexpr int radiusPanels = 32;
+    constexpr int radiusSamples = radiusPanels * 8;
     const double lnSigma = std::log(std::max(1.0001, static_cast<double>(species.sigma)));
     const double lnRg = std::log(std::max(1e-4, static_cast<double>(species.meanRadiusMicrometers)));
-    const double lnMin = lnRg - (4.0 * lnSigma), lnMax = lnRg + (4.0 * lnSigma);
-    const double dLn = (lnMax - lnMin) / static_cast<double>(radiusSamples - 1);
+    const double halfPanel = 4.0 * lnSigma / radiusPanels;
 
     std::vector<glm::vec4> table(static_cast<size_t>(bins) * kSpectralBandCount);
 
@@ -95,11 +104,11 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
         std::vector<std::complex<double>> a, b, D;
 
         for (int rs : std::views::iota(0, radiusSamples)) {
-            const double lnR = lnMin + (dLn * static_cast<double>(rs));
+            const int panel = rs / 8;
+            const size_t node = static_cast<size_t>(rs % 8);
+            const double lnR = lnRg - 4.0 * lnSigma + (2 * panel + 1 + kGaussNodes[node]) * halfPanel;
             const double z = (lnR - lnRg) / lnSigma;
-            const double weight = std::exp(-0.5 * z * z) * dLn;
-            if (weight < 1e-12)
-                continue;
+            const double weight = std::exp(-0.5 * z * z) * halfPanel * kGaussWeights[node];
 
             const double r = std::exp(lnR);
             const double x = k * r;
@@ -403,7 +412,6 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
 }
 
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
-    constexpr int steps = 256;
     const double re = sky.earthRadius;
     const double ra = sky.atmosphereRadius;
     std::vector<glm::vec4> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
@@ -416,22 +424,48 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
             const double v = (2.0 * m / (kTransmittanceMuBins - 1)) - 1.0;
             const double mu = v * std::abs(v);
             const double b = r * mu;
-            const double ds = (std::sqrt(std::max((b * b) - (r * r) + (ra * ra), 0.0)) - b) / steps;
-            double rayleigh = 0.0;
-            double mie = 0.0;
-            double ozone = 0.0;
-            double coarse = 0.0;
-            for (int i = 0; i < steps; ++i) {
-                const double t = (i + 0.5) * ds;
-                const double altitude = std::max(std::sqrt((r * r) + (t * t) + (2.0 * r * mu * t)) - re, 0.0);
-                rayleigh += std::exp(-altitude / sky.scaleHeightRayleigh) * ds;
-                mie += std::exp(-altitude / sky.aerosols[0].scaleHeight) * ds;
-                ozone += OzoneProfile(altitude) * ds;
-                coarse += std::exp(-altitude / sky.aerosols[1].scaleHeight) * ds;
+            const double end = std::sqrt(std::max(b * b + (ra - r) * (ra + r), 0.0)) - b;
+            // Split at the closest approach and all density-profile corners.
+            // Preserve the LUT's clamped below-ground columns for subtraction.
+            std::vector<double> cuts{0.0, end};
+            if (-b > 0.0 && -b < end)
+                cuts.push_back(-b);
+            for (double height : {0.0, 10000.0, 25000.0, 40000.0}) {
+                const double shell = re + height;
+                const double discriminant = b * b + (shell - r) * (shell + r);
+                if (discriminant < 0.0)
+                    continue;
+                for (double t : {-b - std::sqrt(discriminant), -b + std::sqrt(discriminant)})
+                    if (t > 0.0 && t < end)
+                        cuts.push_back(t);
             }
-            table[(static_cast<size_t>(a) * kTransmittanceMuBins) + static_cast<size_t>(m)] = {
-                static_cast<float>(rayleigh), static_cast<float>(mie), static_cast<float>(ozone),
-                static_cast<float>(coarse)};
+            std::ranges::sort(cuts);
+            glm::dvec4 column(0.0);
+            const double panelLength = 8.0 * std::min({static_cast<double>(sky.scaleHeightRayleigh),
+                                                       static_cast<double>(sky.aerosols[0].scaleHeight),
+                                                       static_cast<double>(sky.aerosols[1].scaleHeight)});
+            for (size_t segment = 1; segment < cuts.size(); ++segment) {
+                const double start = cuts[segment - 1], length = cuts[segment] - start;
+                const double middle = start + 0.5 * length;
+                if (r * r + middle * (middle + 2.0 * b) < re * re) {
+                    column += glm::dvec4(length, length, 0.0, length);
+                    continue;
+                }
+                const int panels = std::max(1, static_cast<int>(std::ceil(length / panelLength)));
+                const double half = 0.5 * length / panels;
+                for (int panel = 0; panel < panels; ++panel) {
+                    for (size_t node = 0; node < kGaussNodes.size(); ++node) {
+                        const double t = start + (2 * panel + 1 + kGaussNodes[node]) * half;
+                        const double radius = std::sqrt(r * r + t * (t + 2.0 * b));
+                        const double altitude = std::max((r * r - re * re + t * (t + 2.0 * b)) / (radius + re), 0.0);
+                        column += half * kGaussWeights[node] *
+                                  glm::dvec4{std::exp(-altitude / sky.scaleHeightRayleigh),
+                                             std::exp(-altitude / sky.aerosols[0].scaleHeight), OzoneProfile(altitude),
+                                             std::exp(-altitude / sky.aerosols[1].scaleHeight)};
+                    }
+                }
+            }
+            table[static_cast<size_t>(a) * kTransmittanceMuBins + static_cast<size_t>(m)] = glm::vec4(column);
         }
     });
     return table;
