@@ -245,13 +245,26 @@ namespace {
     }
 }
 
+// 16 point Gauss-Hermite rule for integrals weighted by exp(-x*x).
+// The nodes and weights are symmetric and stored in ascending node order.
+constexpr std::array<double, 16> kHermiteNodes = {
+    -4.6887389393058183647, -3.8694479048601226987, -3.1769991619799560268, -2.5462021578474813622,
+    -1.9517879909162539774, -1.3802585391988807964, -0.82295144914465589258, -0.27348104613815245216,
+        0.27348104613815245216, 0.82295144914465589258, 1.3802585391988807964, 1.9517879909162539774,
+        2.5462021578474813622, 3.1769991619799560268, 3.8694479048601226987, 4.6887389393058183647};
+constexpr std::array<double, 16> kHermiteWeights = {
+    1.49781472316183141e-10, 1.30947321628681821e-7, 1.23498279164413731e-5, 4.01734372436507431e-4,
+    5.91564732514920037e-3, 4.29214131104311555e-2, 1.79459469403000864e-1, 4.73008382545984897e-1,
+    4.73008382545984897e-1, 1.79459469403000864e-1, 4.29214131104311555e-2, 5.91564732514920037e-3,
+    4.01734372436507431e-4, 1.2349827916441374e-5, 1.3094732162868182e-7, 1.4978147231618314e-10};
+
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius) {
     const int bins = static_cast<int>(rainbow.angleBins);
     std::vector<glm::vec4> table(static_cast<size_t>(kSpectralBandCount * bins));
     // Sub-band wavelength samples reduce colour aliasing; particle radii and
     // impact parameters are also quadrature samples, not runtime random draws.
     constexpr int subWavelengths = 5;
-    constexpr int radiusSamples = 64;
+    constexpr int radiusSamples = static_cast<int>(kHermiteNodes.size());
     constexpr int raySamples = 16384 / subWavelengths;
     const double sigmaLn = std::sqrt(std::log1p(static_cast<double>(rainbow.effectiveVariance)));
     const double geometricRadiusUm =
@@ -260,10 +273,10 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
     std::array<double, radiusSamples> radiiUm{};
     std::array<double, radiusSamples> radiusWeights{};
     for (int radiusIndex = 0; radiusIndex < radiusSamples; ++radiusIndex) {
-        const double z =
-            sigmaLn > 1.0e-8 ? -3.5 + (7.0 * (static_cast<double>(radiusIndex) + 0.5) / radiusSamples) : 0.0;
+        const double ghNode = kHermiteNodes[static_cast<size_t>(radiusIndex)];
+        const double z = sigmaLn > 1.0e-8 ? std::sqrt(2.0) * ghNode : 0.0;
         const double radiusUm = geometricRadiusUm * std::exp(sigmaLn * z);
-        const double numberWeight = sigmaLn > 1.0e-8 ? std::exp(-0.5 * z * z) : 1.0;
+        const double numberWeight = sigmaLn > 1.0e-8 ? kHermiteWeights[static_cast<size_t>(radiusIndex)] : 1.0;
         const double weight = numberWeight * radiusUm * radiusUm;
         radiiUm[static_cast<size_t>(radiusIndex)] = radiusUm;
         radiusWeights[static_cast<size_t>(radiusIndex)] = weight;
