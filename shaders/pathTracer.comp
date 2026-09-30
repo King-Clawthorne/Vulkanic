@@ -342,11 +342,12 @@ struct Level {
     vec4 distanceRates;
     float span, start, stepWeight, sampleWeight;
     int stepIndex, sampleIndex;
+    uint scramble;
     vec4 result[SPECTRAL_BANDS], angular[SPECTRAL_BANDS];
 };
 const int STACK = int(SpecializedOrders);
 Level S[STACK];
-uint gRngIndex, gRngDimension, gRngScramble;
+uint gRngIndex, gRngScramble;
 vec3 spherical_around(vec3 axis, float theta, float phi) {
     vec3 a, b;
     beam_basis(axis, a, b);
@@ -400,8 +401,6 @@ float sample_distance(float u, vec4 rates, out float pdf) {
     vec4 k = abs(rates);
     vec4 mass = 1.0 - exp(-k);
     float lo = 0.0, hi = 1.0, t = u;
-    // Safeguarded Newton iteration: the bracket also covers steep descending
-    // profiles and mixtures with modes at both ends of the segment.
     for (int iteration = 0; iteration < 32; ++iteration) {
         float cdf = 0.0;
         pdf = 0.0;
@@ -430,11 +429,13 @@ float sample_distance(float u, vec4 rates, out float pdf) {
 
 // Retain full mixture-PDF compensation and the uniform safety component.
 void begin_step(int d, int steps) {
-    float u = (float(S[d].stepIndex) + NextFloat(gRngIndex, gRngDimension, gRngScramble)) / float(steps);
+    uint dimension = 2u + 4u * uint(d);
+    uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
+    float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
     float pdf;
     float t = sample_distance(u, S[d].distanceRates, pdf);
     S[d].dirJitter =
-        vec2(NextFloat(gRngIndex, gRngDimension, gRngScramble), NextFloat(gRngIndex, gRngDimension, gRngScramble));
+        vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
     S[d].stepWeight = S[d].span / (float(steps) * pdf);
     S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
     S[d].air = air_density(S[d].pos);
@@ -458,6 +459,7 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
     int last = clamp(order, 1, STACK) - 1, d = 0;
     S[0].org = origin;
     S[0].dir = viewDir;
+    S[0].scramble = gRngScramble;
     bool entering = true;
     while (true) {
         int steps = d == 0 ? viewSteps : secondarySteps;
@@ -495,7 +497,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             vec3 next = -vec3(sqrt(1.0 - z * z) * vec2(cos(phi), sin(phi)), z).xzy;
             vec3 current = S[d].dir;
             float coarse = sceneData.mieBands[6].w > 0.0 ? 0.2 : 0.0, fine = 0.4 - coarse,
-                  choice = NextFloat(gRngIndex, gRngDimension, gRngScramble);
+                  choice = SampleFloat(gRngIndex, 5u + 4u * uint(d),
+                                       Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^
+                                            uint(S[d].sampleIndex) * 0x68bc21ebu));
             if (choice < fine)
                 next = cdf_sample(0, L, u, phi);
             else if (choice < 0.4)
@@ -508,6 +512,8 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             float pdf = 0.2 / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
             pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
             S[d].sampleWeight = 1.0 / (pdf * float(samples));
+            S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^
+                                    uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
             S[++d].dir = next;
             entering = true;
             continue;
@@ -557,7 +563,6 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
     uint orderScramble = gRngScramble;
     for (int order = 1; order <= orders; ++order) {
-        gRngDimension = 2u;
         gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
         scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples),
                       int(SpecializedSecondarySamples), sky);
@@ -817,7 +822,7 @@ void main() {
     if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y)
         return;
     uint pixelSeed = Hash(pixel.x + pixel.y * 9781u), frameSampleBase = uint(pc.frame.x) * uint(max(1.0, pc.forward.w));
-    uint rngDimension = 2u, rngScramble = pixelSeed ^ 0x5bd1e995u;
+    uint rngScramble = pixelSeed ^ 0x5bd1e995u;
 
     uint samplesPerPixel = uint(pc.forward.w);
     bool polarized = pc.polarizer.x > 0.5;
@@ -846,7 +851,6 @@ void main() {
             rainbow = integrate_rainbow(viewDir, sun, sampleNumber, pixelSeed);
         }
         gRngIndex = sampleNumber;
-        gRngDimension = rngDimension;
         gRngScramble = rngScramble;
         vec4 sky[SPECTRAL_BANDS] = render_sky(viewDir, sun);
         float night = 1.0 - smoothstep(-0.18, -0.02, sun.y);

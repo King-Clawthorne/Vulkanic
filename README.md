@@ -16,7 +16,7 @@ The C++ application computes spectral lookup tables, creates the Vulkan resource
 
 Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, rain, polarization, and camera-dependent rays each frame.
 
-Atmospheric scattering orders use separate shifted Halton sequences. Direction proposals share a fixed pair of sampling dimensions, keeping the default three-order path within the low-discrepancy dimension budget even when its scattering branches change.
+Atmospheric scattering orders use separate shifted Halton sequences. Each scattering depth reserves four dimensions, while sibling distance steps and direction samples use independently hashed shifts. This keeps three-order atmospheric paths within the low-discrepancy dimension budget even when view steps or angular sample counts increase. Traversal through one branch cannot change the sampling dimensions of its siblings.
 
 Atmospheric distance sampling mixes proposals fitted to the Rayleigh and aerosol density profiles with a uniform component. Full mixture PDF compensation preserves the estimated integral while concentrating samples in dense air. Rays with an interior altitude minimum retain the extinction-based proposal. The distance sampler inverts the complete mixture CDF with safeguarded Newton iterations. This keeps sample positions ordered along each ray, preserving distance stratification instead of introducing jumps between proposal components. The solver uses a bounded iteration count and retains the full mixture PDF.
 
