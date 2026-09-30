@@ -18,6 +18,8 @@ Startup preprocessing integrates atmospheric density columns and computes wavele
 
 Atmospheric scattering orders use separate shifted Halton sequences. Direction proposals share a fixed pair of sampling dimensions, keeping the default three-order path within the low-discrepancy dimension budget even when its scattering branches change.
 
+Atmospheric distance sampling mixes proposals fitted to the Rayleigh and aerosol density profiles with a uniform component. Full mixture PDF compensation preserves the estimated integral while concentrating samples in dense air. Rays with an interior altitude minimum retain the extinction-based proposal.
+
 ## Result
 
 The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.

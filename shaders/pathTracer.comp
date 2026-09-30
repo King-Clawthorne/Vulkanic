@@ -339,7 +339,8 @@ struct Level {
     vec3 org, dir, pos;
     vec4 air, camDepth, depth0;
     vec2 dirJitter;
-    float span, rate, start, stepWeight, sampleWeight;
+    vec4 distanceRates;
+    float span, start, stepWeight, sampleWeight;
     int stepIndex, sampleIndex;
     vec4 result[SPECTRAL_BANDS], angular[SPECTRAL_BANDS];
 };
@@ -383,24 +384,37 @@ vec3 cdf_sample(int table, vec3 axis, float u, float phi) {
     return spherical_around(axis, (float(lo) + (u - c0) / max(c1 - c0, 1e-20)) * PI / float(info.y - 1), phi);
 }
 
-// Draws an integration point from a truncated exponential distance proposal.
-// stepWeight is the reciprocal PDF divided by the number of steps, preserving
-// an unbiased estimate while concentrating samples in optically dense paths.
+// Exponential PDFs on the unit segment. Reverse negative rates so both
+// sampling and PDF evaluation avoid overflowing exponentials on descending rays.
+float distance_pdf(float t, float rate) {
+    float k = abs(rate);
+    if (k < 1.0e-3)
+        return 1.0;
+    return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / (1.0 - exp(-k));
+}
+
+// Mix a uniform safety proposal with the three atmospheric density profiles.
+// Remapping the component choice reuses one uniform dimension. Evaluate the
+// complete mixture PDF, including overlap, to preserve the scattering integral.
 void begin_step(int d, int steps) {
-    float u = (float(S[d].stepIndex) + NextFloat(gRngIndex, gRngDimension, gRngScramble)) / float(steps), k = S[d].rate,
-          len = S[d].span, t, pdf;
-    if (k * len < 1.0e-3) {
-        t = u * len;
-        pdf = 1.0 / len;
-    } else {
-        float mass = 1.0 - exp(-k * len);
-        t = -log(1.0 - u * mass) / k;
-        pdf = k * exp(-k * t) / mass;
+    float u = (float(S[d].stepIndex) + NextFloat(gRngIndex, gRngDimension, gRngScramble)) / float(steps);
+    const vec4 weights = vec4(0.1, 0.5, 0.2, 0.2);
+    int component = 0;
+    for (int i = 0; i < 3 && u >= weights[component]; ++i) {
+        u -= weights[component];
+        ++component;
     }
+    u = clamp(u / weights[component], 0.0, 0.99999994);
+    float rate = S[d].distanceRates[component], k = abs(rate);
+    float t = k < 1.0e-3 ? u : -log(max(1.0 - u * (1.0 - exp(-k)), 1.0e-7)) / k;
+    t = rate < 0.0 ? 1.0 - t : t;
+    float pdf = 0.0;
+    for (int i = 0; i < 4; ++i)
+        pdf += weights[i] * distance_pdf(t, S[d].distanceRates[i]);
     S[d].dirJitter =
         vec2(NextFloat(gRngIndex, gRngDimension, gRngScramble), NextFloat(gRngIndex, gRngDimension, gRngScramble));
-    S[d].stepWeight = 1.0 / (float(steps) * pdf);
-    S[d].pos = S[d].org + S[d].dir * (S[d].start + t);
+    S[d].stepWeight = S[d].span / (float(steps) * pdf);
+    S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
     S[d].air = air_density(S[d].pos);
     S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), vec4(0.0));
     for (int b = 0; b < SPECTRAL_BANDS; ++b)
@@ -440,7 +454,12 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             vec4 total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), vec4(0.0));
             float tau = sceneData.spectralBands[6].x * total.x + sceneData.mieBands[6].x * total.y +
                         sceneData.mieBands[6].z * total.w;
-            S[d].rate = clamp(tau / S[d].span, 1.0e-12, 8.0 / S[d].span);
+            float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
+            vec3 scaleHeights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
+            S[d].distanceRates = vec4(0.0, clamp(vec3(clamp(tau, 0.0, 8.0)) + altitudeChange / scaleHeights,
+                                                vec3(-32.0), vec3(32.0)));
+            if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0)
+                S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
             for (int b = 0; b < SPECTRAL_BANDS; ++b)
                 S[d].result[b] = vec4(0.0);
             S[d].stepIndex = 0;
@@ -516,10 +535,6 @@ vec4[SPECTRAL_BANDS] render_sky(vec3 viewDir, vec3 L) {
     int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
     uint orderScramble = gRngScramble;
     for (int order = 1; order <= orders; ++order) {
-        // Each order is a separate integral. Restart its dimensions with an
-        // independent pixel scramble so later orders retain Halton coverage.
-        // Direction proposals all reuse the same two uniform variates above,
-        // keeping subsequent dimensions independent of the selected branch.
         gRngDimension = 2u;
         gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
         scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples),
