@@ -20,7 +20,8 @@ inline constexpr std::array<double, 48> kOzoneCrossSection = {
     2.451e-26, 2.801e-26, 2.534e-26, 1.624e-26, 1.465e-26, 2.078e-26, 1.383e-26, 7.105e-27,
 };
 
-// Relative spectral solar irradiance samples used to scale each band to 550 nm.
+// Relative spectral solar irradiance samples, spaced at 5 nm from 360 through
+// 825 nm and linearly interpolated by wavelength.
 inline constexpr std::array<double, 94> kSolarIrradiance = {
     1.2519, 1.245,  1.6885, 1.715,  1.537,  1.7688, 1.599,  1.755,  1.212,  1.709,  1.83,   1.965,  2.069,  2.001,
     1.9973, 1.984,  1.939,  2.08,   2.068,  1.979,  2.032,  2.051,  1.916,  1.9472, 1.91,   1.875,  1.86,   1.928,

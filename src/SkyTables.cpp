@@ -459,8 +459,11 @@ SpectralBand ComputeSpectralBand(int band) {
         const double wavelength = centre + offset;
         result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
         result.ozoneCrossSection += OzoneCrossSection(wavelength) * 0.2;
-        const auto solarIndex = static_cast<size_t>(std::lround((0.2 * wavelength) - 78.0));
-        result.sunIrradianceScale += kSolarIrradiance[solarIndex] * 0.2;
+        const double solarPosition = (wavelength - 360.0) / 5.0;
+        const auto solarLower = static_cast<size_t>(solarPosition);
+        const double solarFraction = solarPosition - static_cast<double>(solarLower);
+        result.sunIrradianceScale +=
+            std::lerp(kSolarIrradiance[solarLower], kSolarIrradiance[solarLower + 1], solarFraction) * 0.2;
     }
     for (int sample = 0; sample < 25; ++sample)
         result.cie += Cie2006Xyz(centre - 11.5 + sample) / 25.0;
