@@ -48,7 +48,7 @@ set(SPV "${CMAKE_BINARY_DIR}/pathTracer.comp.spv.inc")
 # its shader module from the embedded array at runtime.
 add_custom_command(
     OUTPUT "${SPV}"
-    DEPENDS shaders/pathTracer.comp
+    DEPENDS shaders/pathTracer.comp shaders/sobol.glsl
     COMMAND Vulkan::glslc --target-env=vulkan1.4 -O -mfmt=num -o "${SPV}"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pathTracer.comp"
 )

@@ -4,6 +4,7 @@
 // specialization constants and descriptor ordering are paired with C++ setup.
 
 #extension GL_KHR_shader_subgroup_vote : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -151,25 +152,23 @@ uint Hash(uint x) {
     return (x >> 22u) ^ x;
 }
 
-// Randomly shifted Halton dimensions. Integer digit extraction avoids the
-// precision loss of multiplying a growing sample index in floating point.
-const uint SAMPLE_DIMENSIONS = 16u;
-const uint SAMPLE_BASES[SAMPLE_DIMENSIONS] =
-    uint[SAMPLE_DIMENSIONS](2u, 3u, 5u, 7u, 11u, 13u, 17u, 19u, 23u, 29u, 31u, 37u, 41u, 43u, 47u, 53u);
+// Independent digital shifts preserve Sobol stratification across frames and
+// branches. Keep all 32 index bits, then convert only 24 bits so rounding
+// cannot produce 1.0 and escape an inverse-CDF sampler's domain.
+#include "sobol.glsl"
 
 float SampleFloat(uint index, uint dimension, uint scramble) {
-    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
+    uint value = Hash(scramble ^ (dimension * 0x9e3779b9u));
     if (dimension >= SAMPLE_DIMENSIONS)
-        return float(Hash(index ^ seed) >> 8u) * (1.0 / 16777216.0);
-    uint base = SAMPLE_BASES[dimension];
-    float inverseBase = 1.0 / float(base), place = inverseBase, value = 0.0;
+        return float(Hash(index ^ value) >> 8u) * (1.0 / 16777216.0);
+    uint bit = 0u;
     while (index != 0u) {
-        value += float(index % base) * place;
-        index /= base;
-        place *= inverseBase;
+        if ((index & 1u) != 0u)
+            value ^= SOBOL_DIRECTIONS[dimension * 32u + bit];
+        index >>= 1u;
+        ++bit;
     }
-    float rotation = float(seed >> 8u) * (1.0 / 16777216.0);
-    return fract(value + rotation);
+    return float(value >> 8u) * (1.0 / 16777216.0);
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
