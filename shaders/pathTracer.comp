@@ -570,58 +570,121 @@ float rainbow_density(vec3 localPosition) {
     return 1.0 - smoothstep(1.0 - softness, 1.0, q);
 }
 
-// Integrates the soft ellipsoid density analytically along a ray interval. The
-// hard-edge case reduces to coefficient times path length.
+// q(t) = normalized ellipsoid radius along the transformed ray.
+float rain_q(float t, float a, float b, float c) {
+    return sqrt(max(a * t * t + 2.0 * b * t + c, 0.0));
+}
+
+// J1(t) = integral of q(t) dt.
+float rain_J1(float t, float a, float b, float c) {
+    float q = rain_q(t, a, b, c);
+    float delta = max(a * c - b * b, 0.0);
+    float result = 0.5 * (t + b / a) * q;
+    if (delta > 0.0)
+        result += 0.5 * delta / (a * sqrt(a)) * asinh((a * t + b) / sqrt(delta));
+    return result;
+}
+
+// J2(t) = integral of q(t)^2 dt.
+float rain_J2(float t, float a, float b, float c) {
+    return (a / 3.0) * t * t * t + b * t * t + c * t;
+}
+
+// J3(t) = integral of q(t)^3 dt.
+float rain_J3(float t, float a, float b, float c) {
+    float q = rain_q(t, a, b, c);
+    float delta = max(a * c - b * b, 0.0);
+    return (a * t + b) * q * q * q / (4.0 * a) + 3.0 * delta * rain_J1(t, a, b, c) / (4.0 * a);
+}
+
+float rain_soft_interval(float lo, float hi, float a, float b, float c, float inner, float softness) {
+    if (hi <= lo)
+        return 0.0;
+
+    float dt = hi - lo;
+    float dJ1 = rain_J1(hi, a, b, c) - rain_J1(lo, a, b, c);
+    float dJ2 = rain_J2(hi, a, b, c) - rain_J2(lo, a, b, c);
+    float dJ3 = rain_J3(hi, a, b, c) - rain_J3(lo, a, b, c);
+
+    float inner2 = inner * inner;
+    float inner3 = inner2 * inner;
+    float shifted2 = dJ2 - 2.0 * inner * dJ1 + inner2 * dt;
+    float shifted3 = dJ3 - 3.0 * inner * dJ2 + 3.0 * inner2 * dJ1 - inner3 * dt;
+    float s2 = softness * softness;
+    float s3 = s2 * softness;
+
+    return clamp(dt - 3.0 * shifted2 / s2 + 2.0 * shifted3 / s3, 0.0, dt);
+}
+
+
+// Integrates the soft ellipsoid density analytically along a ray interval.
 float rain_segment_tau(vec3 origin, vec3 direction, float start, float end) {
     if (end <= start)
         return 0.0;
+
+    float extinction = sceneData.rainbowOptical.y;
     float softness = sceneData.rainbowRadiiEdge.w;
     if (softness <= 0.0)
-        return sceneData.rainbowOptical.y * (end - start);
+        return extinction * (end - start);
 
     vec3 o = rain_frame(origin - sceneData.rainbowCenterEnabled.xyz);
     vec3 d = rain_frame(direction);
-    float a = dot(d, d), b = dot(o, d), c = dot(o, o);
-    float closest = clamp(-b / a, start, end);
-    float qMin = sqrt(max(a * closest * closest + 2.0 * b * closest + c, 0.0));
+    float a = dot(d, d);
+    float b = dot(o, d);
+    float c = dot(o, o);
+    if (a <= 0.0)
+        return 0.0;
+
+    float outerDisc = b * b - a * c + a;
+    if (outerDisc <= 0.0)
+        return 0.0;
+
+    float outerRoot = sqrt(max(outerDisc, 0.0));
+    float outerNear = (-b - outerRoot) / a;
+    float outerFar  = (-b + outerRoot) / a;
+    float outerLo = max(start, outerNear);
+    float outerHi = min(end, outerFar);
+    if (outerHi <= outerLo)
+        return 0.0;
+
     float inner = 1.0 - softness;
-    float integral = 0.0;
-    if (qMin < inner) {
-        float innerRoot = sqrt(max(a * inner * inner - a * c + b * b, 0.0));
-        float lo = clamp((-b - innerRoot) / a, start, end);
-        float hi = clamp((-b + innerRoot) / a, start, end);
-        integral += max(hi - lo, 0.0);
+    if (inner <= 0.0) {
+        float integral = rain_soft_interval(outerLo, outerHi, a, b, c, inner, softness);
+        return extinction * max(integral, 0.0);
     }
 
-    float smoothLo = max(start, (-b - sqrt(max(a - a * c + b * b, 0.0))) / a);
-    float smoothHi = min(end, (-b + sqrt(max(a - a * c + b * b, 0.0))) / a);
-    if (smoothHi > smoothLo) {
-        float t0 = smoothLo, t1 = smoothHi;
-        float r0 = sqrt(max(a * t0 * t0 + 2.0 * b * t0 + c, 0.0));
-        float r1 = sqrt(max(a * t1 * t1 + 2.0 * b * t1 + c, 0.0));
-        float x0 = clamp((r0 - inner) / softness, 0.0, 1.0);
-        float x1 = clamp((r1 - inner) / softness, 0.0, 1.0);
-        float discriminant = a * c - b * b;
-        float rootPrimitive0 = (t0 + b / a) * r0;
-        float rootPrimitive1 = (t1 + b / a) * r1;
-        if (discriminant > 1e-12) {
-            rootPrimitive0 += discriminant / (a * sqrt(a)) * asinh((a * t0 + b) / sqrt(discriminant));
-            rootPrimitive1 += discriminant / (a * sqrt(a)) * asinh((a * t1 + b) / sqrt(discriminant));
-        }
-        float rootIntegral = 0.5 * (rootPrimitive1 - rootPrimitive0);
-        float smoothIntegral = (t1 - t0) * (1.0 - 0.5 * inner) -
-                               (0.75 * (x1 * x1 - x0 * x0) - 0.25 * (x1 * x1 * x1 - x0 * x0 * x0)) * softness;
-        integral += smoothIntegral - rootIntegral / softness;
-    }
-    return sceneData.rainbowOptical.y * max(integral, 0.0);
+    float innerDisc = b * b - a * c + a * inner * inner;
+    if (innerDisc <= 0.0)
+        return extinction * max(rain_soft_interval(outerLo, outerHi, a, b, c, inner, softness), 0.0);
+
+    float innerRoot = sqrt(max(innerDisc, 0.0));
+    float innerNear = (-b - innerRoot) / a;
+    float innerFar  = (-b + innerRoot) / a;
+
+    float integral = 0.0;
+    float leftLo = outerLo;
+    float leftHi = min(outerHi, innerNear);
+    if (leftHi > leftLo)
+        integral += rain_soft_interval(leftLo, leftHi, a, b, c, inner, softness);
+
+    float coreLo = max(outerLo, innerNear);
+    float coreHi = min(outerHi, innerFar);
+    if (coreHi > coreLo)
+        integral += coreHi - coreLo;
+
+    float rightLo = max(outerLo, innerFar);
+    float rightHi = outerHi;
+    if (rightHi > rightLo)
+        integral += rain_soft_interval(rightLo, rightHi, a, b, c, inner, softness);
+
+    return extinction * max(integral, 0.0);
 }
 
 vec2 rain_segment(vec3 origin, vec3 direction) {
     vec2 hit = ray_ellipsoid(origin, direction);
     hit.x = max(hit.x, 0.0);
-    float ground = ray_sphere(origin + vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0), direction,
-                              sceneData.skyRadiiScaleHeights.x)
-                       .x;
+    float ground = ray_sphere(origin + vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0),
+                              direction, sceneData.skyRadiiScaleHeights.x).x;
     hit.y = ground > 0.0 ? min(hit.y, ground) : hit.y;
     return hit;
 }
