@@ -16,7 +16,7 @@ layout(set = 0, binding = 1) uniform SceneData {
     vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     uvec4 rainbowMultiple;
     vec4 spectralBands[17], cieXyz[17], sunDisk;
-    vec4 mieBands[17], rainbowAxisX, rainbowAxisZ, apparentSun;
+    vec4 mieBands[17], rainbowAxisX, rainbowAxisZ, apparentSun, starConfig;
 }
 sceneData;
 layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer {
@@ -120,7 +120,7 @@ vec4 procedural_star(vec3 direction) {
             cell.x = (cell.x % int(grid.x) + int(grid.x)) % int(grid.x);
             uint seed = Hash(uint(cell.x) * 1973u ^ uint(cell.y) * 9277u ^ 0x68bc21ebu);
             float selection = float(Hash(seed ^ 0xa511e9b3u) >> 8u) * (1.0 / 16777216.0);
-            if (selection > 0.11)
+            if (selection > sceneData.starConfig.x)
                 continue;
             vec2 starPosition =
                 vec2(float(Hash(seed ^ 0x63d83595u) >> 8u), float(Hash(seed ^ 0xb5297a4du) >> 8u)) * (1.0 / 16777216.0);

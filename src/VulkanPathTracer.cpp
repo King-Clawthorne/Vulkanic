@@ -102,13 +102,13 @@ struct alignas(16) SceneData {
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
     std::array<uint32_t, 4> rainbowMultiple;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
-    glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun;
+    glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun, starConfig;
 };
 
 static_assert(offsetof(SceneData, skyVrtParams) == 48);
 static_assert(offsetof(SceneData, rainbowMultiple) == 112);
 static_assert(offsetof(SceneData, spectralBands) == 128);
-static_assert(sizeof(SceneData) == 1008);
+static_assert(sizeof(SceneData) == 1024);
 
 constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
@@ -178,6 +178,7 @@ private:
             .rainbowOptical = {r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins),
                                static_cast<float>(r.viewSteps)},
             .rainbowMultiple = {r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0},
+            .starConfig = {m_config.stars.cellProbability, 0.0f, 0.0f, 0.0f},
         };
 
         // Convert CPU model parameters into the compact units and band layout

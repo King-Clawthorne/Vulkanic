@@ -77,6 +77,12 @@ struct InputConfig {
     float mouseSensitivity = 0.0035f, polarizerRotateSpeed = 1.5f;
 };
 
+/// Star-field appearance controls. Probability is the fraction of grid cells
+/// containing a star and must be in [0, 1].
+struct StarsConfig {
+    float cellProbability = 0.11f;
+};
+
 /// Display exposure and atmospheric parameters for the runtime.
 struct SkyConfig {
     float exposure = 10.0f;
@@ -90,6 +96,7 @@ struct RuntimeConfig {
     InputConfig input{};
     RainbowConfig rainbow{};
     SkyConfig sky{};
+    StarsConfig stars{};
 };
 
 /// The shader samples 17 bands spanning 380 to 780 nm at 25 nm intervals.
