@@ -18,7 +18,7 @@ Startup preprocessing integrates atmospheric density columns and computes wavele
 
 Atmospheric scattering orders use separate shifted Halton sequences. Direction proposals share a fixed pair of sampling dimensions, keeping the default three-order path within the low-discrepancy dimension budget even when its scattering branches change.
 
-Atmospheric distance sampling mixes proposals fitted to the Rayleigh and aerosol density profiles with a uniform component. Full mixture PDF compensation preserves the estimated integral while concentrating samples in dense air. Rays with an interior altitude minimum retain the extinction-based proposal.
+Atmospheric distance sampling mixes proposals fitted to the Rayleigh and aerosol density profiles with a uniform component. Full mixture PDF compensation preserves the estimated integral while concentrating samples in dense air. Rays with an interior altitude minimum retain the extinction-based proposal. The distance sampler inverts the complete mixture CDF with safeguarded Newton iterations. This keeps sample positions ordered along each ray, preserving distance stratification instead of introducing jumps between proposal components. The solver uses a bounded iteration count and retains the full mixture PDF.
 
 ## Result
 

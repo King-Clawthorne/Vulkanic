@@ -393,24 +393,46 @@ float distance_pdf(float t, float rate) {
     return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / (1.0 - exp(-k));
 }
 
-// Mix a uniform safety proposal with the three atmospheric density profiles.
-// Remapping the component choice reuses one uniform dimension. Evaluate the
-// complete mixture PDF, including overlap, to preserve the scattering integral.
+// Invert the complete mixture, so stratified/low-discrepancy inputs remain
+// ordered along the ray instead of jumping at proposal-component boundaries.
+float sample_distance(float u, vec4 rates, out float pdf) {
+    const vec4 weights = vec4(0.1, 0.5, 0.2, 0.2);
+    vec4 k = abs(rates);
+    vec4 mass = 1.0 - exp(-k);
+    float lo = 0.0, hi = 1.0, t = u;
+    // Safeguarded Newton iteration: the bracket also covers steep descending
+    // profiles and mixtures with modes at both ends of the segment.
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        float cdf = 0.0;
+        pdf = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            float x = rates[i] < 0.0 ? 1.0 - t : t;
+            float e = exp(-k[i] * x);
+            float f = k[i] < 1.0e-3 ? x : (1.0 - e) / mass[i];
+            cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - f : f);
+            pdf += weights[i] * (k[i] < 1.0e-3 ? 1.0 : k[i] * e / mass[i]);
+        }
+        float error = cdf - u;
+        if (abs(error) <= 1.0e-7)
+            return t;
+        if (error < 0.0)
+            lo = t;
+        else
+            hi = t;
+        float next = t - error / pdf;
+        t = next > lo && next < hi ? next : 0.5 * (lo + hi);
+    }
+    pdf = 0.0;
+    for (int i = 0; i < 4; ++i)
+        pdf += weights[i] * distance_pdf(t, rates[i]);
+    return t;
+}
+
+// Retain full mixture-PDF compensation and the uniform safety component.
 void begin_step(int d, int steps) {
     float u = (float(S[d].stepIndex) + NextFloat(gRngIndex, gRngDimension, gRngScramble)) / float(steps);
-    const vec4 weights = vec4(0.1, 0.5, 0.2, 0.2);
-    int component = 0;
-    for (int i = 0; i < 3 && u >= weights[component]; ++i) {
-        u -= weights[component];
-        ++component;
-    }
-    u = clamp(u / weights[component], 0.0, 0.99999994);
-    float rate = S[d].distanceRates[component], k = abs(rate);
-    float t = k < 1.0e-3 ? u : -log(max(1.0 - u * (1.0 - exp(-k)), 1.0e-7)) / k;
-    t = rate < 0.0 ? 1.0 - t : t;
-    float pdf = 0.0;
-    for (int i = 0; i < 4; ++i)
-        pdf += weights[i] * distance_pdf(t, S[d].distanceRates[i]);
+    float pdf;
+    float t = sample_distance(u, S[d].distanceRates, pdf);
     S[d].dirJitter =
         vec2(NextFloat(gRngIndex, gRngDimension, gRngScramble), NextFloat(gRngIndex, gRngDimension, gRngScramble));
     S[d].stepWeight = S[d].span / (float(steps) * pdf);
