@@ -20,6 +20,8 @@ Atmospheric scattering orders use separate Sobol sequences with fast Owen scramb
 
 Atmospheric distance sampling mixes proposals fitted to the Rayleigh and aerosol density profiles with a uniform component. Full mixture PDF compensation preserves the estimated integral while concentrating samples in dense air. Rays with an interior altitude minimum retain the extinction-based proposal. The distance sampler inverts the complete mixture CDF with safeguarded Newton iterations. This keeps sample positions ordered along each ray, preserving distance stratification instead of introducing jumps between proposal components. The solver uses a bounded iteration count and retains the full mixture PDF.
 
+Atmospheric direction proposals allocate 80% of their probability according to local Rayleigh, fine-aerosol, and coarse-aerosol scattering strength at the guide wavelength. Rayleigh directions use an analytic inverse CDF around the current ray; aerosol proposals split between the Sun and current ray. The remaining 20% samples the sphere uniformly. Every wavelength uses the complete mixture PDF, retaining support for spectral and polarized contributions. This avoids spending a fixed aerosol sampling budget in thin, Rayleigh-dominated air.
+
 ## Result
 
 The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.

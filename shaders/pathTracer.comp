@@ -504,20 +504,29 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             S[d + 1].org = S[d].pos;
             vec3 next = -vec3(sqrt(1.0 - z * z) * vec2(cos(phi), sin(phi)), z).xzy;
             vec3 current = S[d].dir;
-            float coarse = sceneData.mieBands[6].w > 0.0 ? 0.2 : 0.0, fine = 0.4 - coarse,
-                  choice = SampleFloat(gRngIndex, 5u + 4u * uint(d),
+            vec3 strength = max(S[d].air.xyw * vec3(sceneData.spectralBands[6].x,
+                                                   sceneData.mieBands[6].y, sceneData.mieBands[6].w), vec3(0.0));
+            vec3 weights = 0.8 * strength / max(dot(strength, vec3(1.0)), 1.0e-30);
+            float fine = 0.5 * weights.y, coarse = 0.5 * weights.z;
+            float uniformWeight = 1.0 - dot(weights, vec3(1.0));
+            float choice = SampleFloat(gRngIndex, 5u + 4u * uint(d),
                                        Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^
                                             uint(S[d].sampleIndex) * 0x68bc21ebu));
             if (choice < fine)
                 next = cdf_sample(0, L, u, phi);
-            else if (choice < 0.4)
+            else if (choice < fine + coarse)
                 next = cdf_sample(1, L, u, phi);
-            else if (choice < 0.4 + fine)
+            else if (choice < 2.0 * fine + coarse)
                 next = cdf_sample(0, current, u, phi);
-            else if (choice < 0.8)
+            else if (choice < 2.0 * (fine + coarse))
                 next = cdf_sample(1, current, u, phi);
+            else if (choice < 2.0 * (fine + coarse) + weights.x) {
+                float mu = 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0);
+                next = spherical_around(current, acos(clamp(mu, -1.0, 1.0)), phi);
+            }
             float cosSun = dot(next, L), cosCurrent = dot(next, current);
-            float pdf = 0.2 / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
+            float pdf = (uniformWeight + weights.x * 0.75 * (1.0 + cosCurrent * cosCurrent)) / (4.0 * PI) +
+                        fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
             pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
             S[d].sampleWeight = 1.0 / (pdf * float(samples));
             S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^
