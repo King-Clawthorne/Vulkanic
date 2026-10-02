@@ -1008,6 +1008,8 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
                 break;
             float u =
                 SampleFloat(sobolIndex, dimension++, scramble ^ uint(vertex) * 0x68bc21ebu);
+            if (vertex == 0)
+                u = (float(sampleIndex) + u) / float(samples);
             float pdf;
             float distance = rain_sample_distance(origin, direction, sun, vertex + 1 == orders, hit, u, pdf);
             vec3 p = origin + direction * (hit.x + distance);
