@@ -65,6 +65,10 @@ vec3 rain_frame(vec3 v) {
 }
 uint Hash(uint x);
 
+float ToUnit(uint x) {
+    return (float(x >> 9u) + 0.5) * (1.0 / 8388608.0);
+}
+
 // Analytic limb-darkening approximation evaluated per wavelength band. mu is
 // the cosine of the angular distance from the apparent solar-disk centre.
 float solar_limb_intensity(float mu, float wavelengthNm) {
@@ -120,20 +124,20 @@ vec4 procedural_star(vec3 direction) {
             ivec2 cell = baseCell + ivec2(x, y);
             cell.x = (cell.x % int(grid.x) + int(grid.x)) % int(grid.x);
             uint seed = Hash(uint(cell.x) * 1973u ^ uint(cell.y) * 9277u ^ 0x68bc21ebu);
-            float selection = float(Hash(seed ^ 0xa511e9b3u) >> 8u) * (1.0 / 16777216.0);
+            float selection = ToUnit(Hash(seed ^ 0xa511e9b3u));
             if (selection > sceneData.starConfig.x)
                 continue;
             vec2 starPosition =
-                vec2(float(Hash(seed ^ 0x63d83595u) >> 8u), float(Hash(seed ^ 0xb5297a4du) >> 8u)) * (1.0 / 16777216.0);
+                vec2(ToUnit(Hash(seed ^ 0x63d83595u)), ToUnit(Hash(seed ^ 0xb5297a4du)));
             vec2 delta = vec2(x, y) + starPosition - localPosition;
             delta.x *= cos(PI * uv.y);
-            float radius = mix(0.035, 0.09, float(Hash(seed ^ 0x1b56c4e9u) >> 8u) * (1.0 / 16777216.0));
+            float radius = mix(0.035, 0.09, ToUnit(Hash(seed ^ 0x1b56c4e9u)));
             float distanceToStar = length(delta);
             float core = 1.0 - smoothstep(radius * 0.2, radius, distanceToStar);
-            float intensity = 0.015 + 0.12 * pow(float(Hash(seed ^ 0x5be0cd19u) >> 8u) * (1.0 / 16777216.0), 8.0);
+            float intensity = 0.015 + 0.12 * pow(ToUnit(Hash(seed ^ 0x5be0cd19u)), 8.0);
             if (core > stars.x) {
                 stars.x = core * intensity;
-                stars.y = mix(3200.0, 10000.0, float(Hash(seed ^ 0xc2b2ae35u) >> 8u) * (1.0 / 16777216.0));
+                stars.y = mix(3200.0, 10000.0, ToUnit(Hash(seed ^ 0xc2b2ae35u)));
             }
         }
     }
@@ -158,26 +162,27 @@ uint Hash(uint x) {
 // cannot produce 1.0 and escape an inverse-CDF sampler's domain.
 #include "sobol.glsl"
 
-float SampleFloat(uint index, uint dimension, uint scramble) {
-    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
-    if (dimension >= SAMPLE_DIMENSIONS)
-        return float(Hash(index ^ seed) >> 8u) * (1.0 / 16777216.0);
-    uint value = 0u;
-    uint bit = 0u;
-    while (index != 0u) {
-        if ((index & 1u) != 0u)
-            value ^= SOBOL_DIRECTIONS[dimension * 32u + bit];
-        index >>= 1u;
-        ++bit;
-    }
-    
+uint NestedUniformScramble(uint value, uint seed) {
     value = bitfieldReverse(value);
     value ^= value * 0x3d20adeau;
     value += seed;
     value *= (seed >> 16u) | 1u;
     value ^= value * 0x05526c56u;
     value ^= value * 0x53a22864u;
-    return float(bitfieldReverse(value) >> 8u) * (1.0 / 16777216.0);
+    return bitfieldReverse(value);
+}
+
+// The caller shuffles once per sample; branch seeds only scramble the output.
+float SampleFloat(uint index, uint dimension, uint scramble) {
+    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
+    if (dimension >= SAMPLE_DIMENSIONS)
+        return ToUnit(Hash(index ^ seed));
+    uint value = 0u;
+    while (index != 0u) {
+        value ^= SOBOL_DIRECTIONS[dimension * 32u + uint(findLSB(index))];
+        index &= index - 1u;
+    }
+    return ToUnit(NestedUniformScramble(value, seed));
 }
 
 float NextFloat(inout uint index, inout uint dimension, uint scramble) {
@@ -782,7 +787,9 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
         // Consecutive camera samples own disjoint blocks of rain paths.
         // Keep the scramble fixed across the block to retain stratification.
-        uint sobolIndex = index * uint(samples) + uint(sampleIndex), dimension = 2u;
+        uint sobolIndex = NestedUniformScramble(index * uint(samples) + uint(sampleIndex),
+                                               Hash(scramble ^ 0xa511e9b3u));
+        uint dimension = 2u;
         vec3 origin = vec3(0.0), direction = viewDir, pathDirections[MAX_SCATTER_ORDER];
         float throughput = 1.0;
         vec4 airPath = vec4(0.0);
@@ -853,7 +860,8 @@ void main() {
     vec3 accumulatedXyz = vec3(0.0);
     for (uint localSample = 0; localSample < samplesPerPixel; ++localSample) {
         uint sampleNumber = frameSampleBase + localSample;
-        vec2 jitter = vec2(SampleFloat(sampleNumber, 0u, pixelSeed), SampleFloat(sampleNumber, 1u, pixelSeed));
+        uint shuffledIndex = NestedUniformScramble(sampleNumber, Hash(pixelSeed ^ 0xa511e9b3u));
+        vec2 jitter = vec2(SampleFloat(shuffledIndex, 0u, pixelSeed), SampleFloat(shuffledIndex, 1u, pixelSeed));
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
         vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
@@ -869,7 +877,7 @@ void main() {
         if (subgroupAny(rainHit.y > rainHit.x)) {
             rainbow = integrate_rainbow(viewDir, sun, sampleNumber, pixelSeed);
         }
-        gRngIndex = sampleNumber;
+        gRngIndex = shuffledIndex;
         gRngScramble = rngScramble;
         vec4 sky[SPECTRAL_BANDS] = render_sky(viewDir, sun);
         float night = 1.0 - smoothstep(-0.18, -0.02, sun.y);
