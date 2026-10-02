@@ -885,12 +885,14 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     return u * span;
 }
 
-vec3 rain_sample_direction(vec3 axis, inout uint index, inout uint dimension, uint scramble) {
-    float branch = NextFloat(index, dimension, scramble), u = NextFloat(index, dimension, scramble),
-          phi = 2.0 * PI * NextFloat(index, dimension, scramble);
-    if (branch < 0.9)
-        return cdf_sample(2, axis, u, phi);
-    return spherical_around(axis, acos(1.0 - 2.0 * u), phi);
+vec3 rain_sample_direction(vec3 current, vec3 sun, inout uint index, inout uint dimension, uint scramble) {
+    float u = NextFloat(index, dimension, scramble);
+    float phi = 2.0 * PI * NextFloat(index, dimension, scramble);
+    if (u < 0.45)
+        return cdf_sample(2, current, u / 0.45, phi);
+    if (u < 0.9)
+        return cdf_sample(2, sun, (u - 0.45) / 0.45, phi);
+    return spherical_around(current, acos(1.0 - 2.0 * ((u - 0.9) / 0.1)), phi);
 }
 
 vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint scramble) {
@@ -941,9 +943,7 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
                 }
             }
             if (vertex + 1 < orders) {
-                vec3 next = NextFloat(sobolIndex, dimension, scramble) < 0.5
-                                ? -rain_sample_direction(-direction, sobolIndex, dimension, scramble)
-                                : rain_sample_direction(sun, sobolIndex, dimension, scramble);
+                vec3 next = rain_sample_direction(direction, sun, sobolIndex, dimension, scramble);
                 throughput /= 0.5 * (rain_direction_pdf(dot(next, direction)) + rain_direction_pdf(dot(next, sun)));
                 origin = p;
                 direction = next;
