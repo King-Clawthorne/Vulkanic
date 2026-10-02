@@ -848,16 +848,20 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     const int bins = 16;
     float values[bins + 1];
     float opticalDepth[bins + 1];
-    float step = span / float(bins), depth = 0.0, integral = 0.0;
-    float previous = rainbow_density(origin + direction * hit.x);
+    float step = span / float(bins), integral = 0.0;
+    float spectralWeights[SPECTRAL_BANDS];
+    for (int band = 0; band < SPECTRAL_BANDS; ++band) {
+        spectralWeights[band] = directOnly
+            ? max(rainbow_mueller(dot(sun, direction), band)[0][0], 0.0) *
+              sceneData.spectralBands[band].y * length(sceneData.cieXyz[band].xyz) : 0.0;
+    }
     float minimumDepth = 1.0e30;
     vec3 earthOffset = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
     vec4 airStart = directOnly ? sun_air_depth(origin + earthOffset, direction) : vec4(0.0);
     for (int i = 0; i <= bins; ++i) {
         vec3 p = origin + direction * (hit.x + float(i) * step);
         float density = rainbow_density(p);
-        if (i > 0)
-            depth += extinction * step * 0.5 * (previous + density);
+        float depth = rain_segment_tau(origin, direction, hit.x, hit.x + float(i) * step);
         float sunDepth = directOnly ? rain_segment_tau(p, sun, 0.0, max(rain_segment(p, sun).y, 0.0)) : 0.0;
         opticalDepth[i] = depth + sunDepth;
         values[i] = density;
@@ -867,12 +871,25 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
                 values[i] = 0.0;
             } else {
                 vec4 air = max(airStart - sun_air_depth(earth, direction), vec4(0.0)) + sun_air_depth(earth, sun);
-                opticalDepth[i] += max(dot(sceneData.proposalExtinction, air), 0.0);
+                float terms[SPECTRAL_BANDS], largest = -1.0e30;
+                for (int band = 0; band < SPECTRAL_BANDS; ++band) {
+                    float tau = sceneData.spectralBands[band].x * air.x + sceneData.mieBands[band].x * air.y +
+                                sceneData.spectralBands[band].w * air.z + sceneData.mieBands[band].z * air.w;
+                    terms[band] = spectralWeights[band] > 0.0 ? log(spectralWeights[band]) - max(tau, 0.0) : -1.0e30;
+                    largest = max(largest, terms[band]);
+                }
+                if (largest > -1.0e29) {
+                    float sum = 0.0;
+                    for (int band = 0; band < SPECTRAL_BANDS; ++band)
+                        sum += exp(terms[band] - largest);
+                    opticalDepth[i] -= largest + log(sum);
+                } else {
+                    values[i] = 0.0;
+                }
             }
         }
         if (values[i] > 0.0)
             minimumDepth = min(minimumDepth, opticalDepth[i]);
-        previous = density;
     }
     for (int i = 0; i <= bins; ++i) {
         values[i] *= exp(-max(opticalDepth[i] - minimumDepth, 0.0));
