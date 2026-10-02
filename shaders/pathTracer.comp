@@ -814,10 +814,10 @@ float rain_direction_pdf(float cosTheta) {
 // below still evaluates the analytic optical depth and actual local density.
 // Invert the full piecewise-linear CDF to preserve Sobol ordering. A uniform
 // floor keeps support even where coarse nodes miss a narrow density feature.
-float rain_sample_distance(vec3 origin, vec3 direction, vec2 hit, float u, out float pdf) {
+float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnly, vec2 hit, float u, out float pdf) {
     float span = hit.y - hit.x;
     float extinction = sceneData.rainbowOptical.y;
-    if (sceneData.rainbowRadiiEdge.w <= 0.0) {
+    if (sceneData.rainbowRadiiEdge.w <= 0.0 && !directOnly) {
         float tau = extinction * span;
         float mass = tau < 0.001 ? tau * (1.0 - 0.5 * tau + tau * tau / 6.0) : 1.0 - exp(-tau);
         float distance = tau < 0.001 ? u * span : -log(1.0 - u * mass) / extinction;
@@ -826,15 +826,26 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec2 hit, float u, out f
     }
     const int bins = 16;
     float values[bins + 1];
+    float opticalDepth[bins + 1];
     float step = span / float(bins), depth = 0.0, integral = 0.0;
     float previous = rainbow_density(origin + direction * hit.x);
-    values[0] = previous;
-    for (int i = 1; i <= bins; ++i) {
-        float density = rainbow_density(origin + direction * (hit.x + float(i) * step));
-        depth += extinction * step * 0.5 * (previous + density);
-        values[i] = density * exp(-depth);
-        integral += 0.5 * (values[i - 1] + values[i]) / float(bins);
+    float minimumDepth = 1.0e30;
+    for (int i = 0; i <= bins; ++i) {
+        vec3 p = origin + direction * (hit.x + float(i) * step);
+        float density = rainbow_density(p);
+        if (i > 0)
+            depth += extinction * step * 0.5 * (previous + density);
+        float sunDepth = directOnly ? rain_segment_tau(p, sun, 0.0, max(rain_segment(p, sun).y, 0.0)) : 0.0;
+        opticalDepth[i] = depth + sunDepth;
+        values[i] = density;
+        if (density > 0.0)
+            minimumDepth = min(minimumDepth, opticalDepth[i]);
         previous = density;
+    }
+    for (int i = 0; i <= bins; ++i) {
+        values[i] *= exp(-max(opticalDepth[i] - minimumDepth, 0.0));
+        if (i > 0)
+            integral += 0.5 * (values[i - 1] + values[i]) / float(bins);
     }
     if (integral <= 1.0e-20) {
         pdf = 1.0 / span;
@@ -891,7 +902,7 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
             float u =
                 SampleFloat(sobolIndex, dimension++, scramble ^ uint(vertex) * 0x68bc21ebu);
             float pdf;
-            float distance = rain_sample_distance(origin, direction, hit, u, pdf);
+            float distance = rain_sample_distance(origin, direction, sun, vertex + 1 == orders, hit, u, pdf);
             vec3 p = origin + direction * (hit.x + distance);
             float density = rainbow_density(p);
             if (density <= 0.0)
