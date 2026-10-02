@@ -253,11 +253,21 @@ private:
         std::vector<glm::vec4> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
         std::ranges::copy(ComputeMieScatteringTable(s, 1, m_mieCrossSections[1]), std::back_inserter(mie));
         const int bins = std::max(2, static_cast<int>(s.mieTableAngleBins));
-        AppendSamplingCdf(mie, bins, 0);
-        AppendSamplingCdf(mie, bins, static_cast<size_t>(kSpectralBandCount) * static_cast<size_t>(bins));
+        std::array<double, kSpectralBandCount> visibleWeights{};
+        for (int band = 0; band < kSpectralBandCount; ++band) {
+            const SpectralBand spectral = ComputeSpectralBand(band);
+            // XYZ length balances luminance and chromatic noise, including blue.
+            visibleWeights[band] = spectral.sunIrradianceScale * glm::length(spectral.cie);
+        }
+        for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
+            auto weights = visibleWeights;
+            for (int band = 0; band < kSpectralBandCount; ++band)
+                weights[band] *= m_mieCrossSections[aerosol][band].y;
+            AppendSamplingCdf(mie, bins, aerosol * static_cast<size_t>(kSpectralBandCount * bins), weights);
+        }
         m_mieScatteringBuffer = CreateTableBuffer(mie);
         std::vector<glm::vec4> rainbow = ComputeRainbowScatteringTable(m_config.rainbow, s.sunRadius);
-        AppendSamplingCdf(rainbow, static_cast<int>(m_config.rainbow.angleBins), 0);
+        AppendSamplingCdf(rainbow, static_cast<int>(m_config.rainbow.angleBins), 0, visibleWeights);
         m_rainbowScatteringBuffer = CreateTableBuffer(rainbow);
         m_transmittanceBuffer = CreateTableBuffer(ComputeTransmittanceTable(s));
         const SceneData sceneData = BuildSceneData();

@@ -115,7 +115,9 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
 
 /// Appends a normalized angular sampling CDF for the selected band-major table.
 /// firstEntry identifies the first phase entry and bins is the row length.
-void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry);
+/// bandWeights describe each band's contribution to the displayed radiance.
+void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry,
+                       const std::array<double, kSpectralBandCount>& bandWeights);
 
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;

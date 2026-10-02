@@ -391,14 +391,16 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
     return table;
 }
 
-void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry) {
+void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry,
+                       const std::array<double, kSpectralBandCount>& bandWeights) {
     const auto phase = [&](int i) {
         double sum = 0.0;
         for (int band = 0; band < kSpectralBandCount; ++band)
-            sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
-        return std::max(0.0, sum / kSpectralBandCount);
+            sum += std::max(0.0, bandWeights[band]) *
+                   table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
+        return std::max(0.0, sum);
     };
-    // Average phase per spherical annulus. Use the exact solid-angle width,
+    // Spectrally weighted phase per spherical annulus. Use the exact solid-angle width,
     // including the polar caps where sin(theta) vanishes at an endpoint.
     // Appended entries occupy one extra row after all spectral phase rows.
     std::vector<double> cdf(bins, 0.0), phaseValues(bins);
