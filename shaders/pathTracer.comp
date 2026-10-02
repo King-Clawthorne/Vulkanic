@@ -352,7 +352,7 @@ struct Level {
     vec3 org, dir, pos;
     vec4 air, camDepth, depth0;
     vec2 dirJitter;
-    vec4 distanceRates;
+    vec4 distanceRates, distanceWeights;
     float span, start, stepWeight, sampleWeight;
     int stepIndex, sampleIndex;
     uint scramble;
@@ -409,8 +409,7 @@ float distance_pdf(float t, float rate) {
 
 // Invert the complete mixture, so stratified/low-discrepancy inputs remain
 // ordered along the ray instead of jumping at proposal-component boundaries.
-float sample_distance(float u, vec4 rates, out float pdf) {
-    const vec4 weights = vec4(0.1, 0.5, 0.2, 0.2);
+float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
     vec4 k = abs(rates);
     vec4 mass = 1.0 - exp(-k);
     float lo = 0.0, hi = 1.0, t = u;
@@ -446,7 +445,7 @@ void begin_step(int d, int steps) {
     uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
     float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
     float pdf;
-    float t = sample_distance(u, S[d].distanceRates, pdf);
+    float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
     S[d].dirJitter =
         vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
     S[d].stepWeight = S[d].span / (float(steps) * pdf);
@@ -497,6 +496,12 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
                                                 vec3(-32.0), vec3(32.0)));
             if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0)
                 S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
+            vec3 scattering = max(total.xyw * vec3(sceneData.spectralBands[6].x,
+                                                  sceneData.mieBands[6].y, sceneData.mieBands[6].w), vec3(0.0));
+            float scatteringSum = dot(scattering, vec3(1.0));
+            S[d].distanceWeights = scatteringSum > 1.0e-30
+                                       ? vec4(0.1, 0.9 * scattering / scatteringSum)
+                                       : vec4(1.0, 0.0, 0.0, 0.0);
             for (int b = 0; b < SPECTRAL_BANDS; ++b)
                 S[d].result[b] = vec4(0.0);
             S[d].stepIndex = 0;
