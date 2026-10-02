@@ -430,6 +430,41 @@ float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
         t = x - 0.5 * k * x * (1.0 - x) + k * k * x * (1.0 - x) * (1.0 - 2.0 * x) / 6.0;
     t = clamp(t, 0.0, 1.0);
     t = rate < 0.0 ? 1.0 - t : t;
+    vec4 magnitudes = abs(rates);
+    vec4 mass, scale;
+    for (int i = 0; i < 4; ++i) {
+        mass[i] = magnitudes[i] < 0.01 ? magnitudes[i] * (1.0 - magnitudes[i] * (0.5 - magnitudes[i] / 6.0)) : 1.0 - exp(-magnitudes[i]);
+        scale[i] = magnitudes[i] < 1.0e-3 ? 0.0 : weights[i] * magnitudes[i] / mass[i];
+    }
+    float lo = 0.0, hi = 1.0;
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        float cdf = 0.0;
+        pdf = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            if (magnitudes[i] < 1.0e-3) {
+                cdf += weights[i] * t;
+                pdf += weights[i];
+            } else {
+                float x = rates[i] < 0.0 ? 1.0 - t : t;
+                float e = exp(-magnitudes[i] * x);
+                float z = magnitudes[i] * x;
+                float cumulative = z < 0.01 ? z * (1.0 - z * (0.5 - z / 6.0)) : 1.0 - e;
+                float componentCdf = cumulative / mass[i];
+                cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - componentCdf : componentCdf);
+                pdf += scale[i] * e;
+            }
+        }
+        float residual = cdf - u;
+        if (abs(residual) <= 1.0e-7 || hi - lo <= 1.0e-7)
+            break;
+        if (residual < 0.0)
+            lo = t;
+        else
+            hi = t;
+        float candidate = t - residual / pdf;
+        t = iteration % 4 == 3 || candidate <= lo || candidate >= hi
+                ? 0.5 * (lo + hi) : candidate;
+    }
     pdf = 0.0;
     for (int i = 0; i < 4; ++i)
         pdf += weights[i] * distance_pdf(t, rates[i]);
