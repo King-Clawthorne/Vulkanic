@@ -408,33 +408,28 @@ float distance_pdf(float t, float rate) {
     float k = abs(rate);
     if (k < 1.0e-3)
         return 1.0;
-    return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / (1.0 - exp(-k));
+    float mass = k < 0.01 ? k * (1.0 - k * (0.5 - k / 6.0)) : 1.0 - exp(-k);
+    return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / mass;
 }
 
 float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
-    vec4 k = abs(rates);
-    vec4 mass = 1.0 - exp(-k);
-    float lo = 0.0, hi = 1.0, t = u;
-    for (int iteration = 0; iteration < 32; ++iteration) {
-        float cdf = 0.0;
-        pdf = 0.0;
-        for (int i = 0; i < 4; ++i) {
-            float x = rates[i] < 0.0 ? 1.0 - t : t;
-            float e = exp(-k[i] * x);
-            float f = k[i] < 1.0e-3 ? x : (1.0 - e) / mass[i];
-            cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - f : f);
-            pdf += weights[i] * (k[i] < 1.0e-3 ? 1.0 : k[i] * e / mass[i]);
+    float lower = 0.0;
+    int component = 3;
+    for (int i = 0; i < 3; ++i) {
+        if (u < lower + weights[i]) {
+            component = i;
+            break;
         }
-        float error = cdf - u;
-        if (abs(error) <= 1.0e-7)
-            return t;
-        if (error < 0.0)
-            lo = t;
-        else
-            hi = t;
-        float next = t - error / pdf;
-        t = next > lo && next < hi ? next : 0.5 * (lo + hi);
+        lower += weights[i];
     }
+    float local = clamp((u - lower) / max(weights[component], 1.0e-30), 0.0, 1.0);
+    float rate = rates[component], k = abs(rate);
+    float x = rate < 0.0 ? 1.0 - local : local;
+    float t = k < 1.0e-3 ? x : -log((1.0 - x) + x * exp(-k)) / k;
+    if (k >= 1.0e-3 && k < 0.01)
+        t = x - 0.5 * k * x * (1.0 - x) + k * k * x * (1.0 - x) * (1.0 - 2.0 * x) / 6.0;
+    t = clamp(t, 0.0, 1.0);
+    t = rate < 0.0 ? 1.0 - t : t;
     pdf = 0.0;
     for (int i = 0; i < 4; ++i)
         pdf += weights[i] * distance_pdf(t, rates[i]);
