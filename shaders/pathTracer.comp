@@ -941,7 +941,7 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     }
     bool haveDirect = integral > 1.0e-20;
     bool haveContinuation = !directOnly && continuationIntegral > 1.0e-20;
-    float directWeight = haveDirect ? (haveContinuation ? 0.45 : 0.9) : 0.0;
+    float directWeight = haveDirect ? (directOnly ? 0.98 : (haveContinuation ? 0.45 : 0.9)) : 0.0;
     float continuationWeight = haveContinuation ? (haveDirect ? 0.45 : 0.9) : 0.0;
     float uniformWeight = 1.0 - directWeight - continuationWeight;
     for (int i = 0; i <= bins; ++i) {
