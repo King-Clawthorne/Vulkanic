@@ -451,30 +451,43 @@ float sun_distance_node(int d, int i) {
 }
 
 void prepare_sun_distance(int d, vec3 sun) {
-    float integral = 0.0, minimumDepth = 1.0e30;
-    float opticalDepth[SUN_DISTANCE_BINS + 1];
-    float mu = clamp(dot(S[d].dir, sun), -1.0, 1.0);
-    float kingFactor = (1.0 - sceneData.skyVrtParams.y) / (1.0 + 0.5 * sceneData.skyVrtParams.y);
-    float rayleighPhase = mix(1.0, 0.75 * (1.0 + mu * mu), kingFactor) / (4.0 * PI);
-    vec3 phase = vec3(rayleighPhase, cdf_pdf(0, mu), cdf_pdf(1, mu));
-    vec3 scattering = sceneData.proposalScattering.xyz * phase;
-    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
-        vec3 p = S[d].org + S[d].dir * (S[d].start + sun_distance_node(d, i) * S[d].span);
-        vec4 cameraDepth = max(S[d].depth0 - sun_air_depth(p, S[d].dir), vec4(0.0));
-        float value = 0.0;
-        if (ray_sphere(p, sun, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
-            float tau = dot(sceneData.proposalExtinction, cameraDepth + sun_air_depth(p, sun));
-            opticalDepth[i] = max(tau, 0.0);
-            value = max(dot(air_density(p).xyw, scattering), 0.0);
-            if (value > 0.0)
-                minimumDepth = min(minimumDepth, opticalDepth[i]);
-        } else {
-            opticalDepth[i] = 0.0;
-        }
-        S[d].sunDistanceValues[i] = value;
+    float integral = 0.0, maximumLogValue = -1.0e30;
+    float logScattering[SPECTRAL_BANDS];
+    vec3 scatteringCoefficients[SPECTRAL_BANDS];
+    ScatterGeom geometry = scatter_geometry(-sun, -S[d].dir);
+    for (int band = 0; band < SPECTRAL_BANDS; ++band) {
+        float weight = sceneData.spectralBands[band].y * length(sceneData.cieXyz[band].xyz);
+        logScattering[band] = weight > 0.0 ? log(weight) : -1.0e30;
+        scatteringCoefficients[band] = vec3(sceneData.spectralBands[band].x * geometry.rayleigh[0][0],
+                                          sceneData.mieBands[band].y * mie_mueller(geometry, 0, band)[0][0],
+                                          sceneData.mieBands[band].w * mie_mueller(geometry, 1, band)[0][0]);
     }
     for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
-        float value = S[d].sunDistanceValues[i] * exp(-max(opticalDepth[i] - minimumDepth, 0.0));
+        vec3 p = S[d].org + S[d].dir * (S[d].start + sun_distance_node(d, i) * S[d].span);
+        float logValue = -1.0e30;
+        if (ray_sphere(p, sun, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
+            vec4 depth = max(S[d].depth0 - sun_air_depth(p, S[d].dir), vec4(0.0)) + sun_air_depth(p, sun);
+            vec3 density = air_density(p).xyw;
+            float terms[SPECTRAL_BANDS], largest = -1.0e30;
+            for (int band = 0; band < SPECTRAL_BANDS; ++band) {
+                float scattering = dot(scatteringCoefficients[band], density);
+                float tau = sceneData.spectralBands[band].x * depth.x + sceneData.mieBands[band].x * depth.y +
+                            sceneData.spectralBands[band].w * depth.z + sceneData.mieBands[band].z * depth.w;
+                terms[band] = scattering > 0.0 ? logScattering[band] + log(scattering) - max(tau, 0.0) : -1.0e30;
+                largest = max(largest, terms[band]);
+            }
+            if (largest > -1.0e29) {
+                float sum = 0.0;
+                for (int band = 0; band < SPECTRAL_BANDS; ++band)
+                    sum += exp(terms[band] - largest);
+                logValue = largest + log(sum);
+            }
+        }
+        S[d].sunDistanceValues[i] = logValue;
+        maximumLogValue = max(maximumLogValue, logValue);
+    }
+    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
+        float value = maximumLogValue > -1.0e29 ? exp(S[d].sunDistanceValues[i] - maximumLogValue) : 0.0;
         S[d].sunDistanceValues[i] = value;
         if (i > 0)
             integral += 0.5 * (S[d].sunDistanceValues[i - 1] + value) *
