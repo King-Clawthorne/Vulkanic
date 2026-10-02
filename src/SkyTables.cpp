@@ -405,7 +405,7 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
     // polar peaks (a linearly falling forward cap has only 1/3, not 1/2,
     // of its peak times the cap's solid angle).
     // Appended entries occupy one extra row after all spectral phase rows.
-    std::vector<double> cdf(bins, 0.0), phaseValues(bins);
+    std::vector<double> cdf(bins, 0.0), phaseValues(bins), shapes(bins, 0.5), masses(bins - 1);
     for (int i = 0; i < bins; ++i)
         phaseValues[i] = phase(i);
     double a = phaseValues[0];
@@ -422,11 +422,10 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         const double mass = (a + b) * std::sin(midpoint) * std::sin(halfWidth) +
                             (b - a) * std::cos(midpoint) * slopeTerm;
         cdf[i] = cdf[i - 1] + std::max(0.0, mass);
+        masses[i - 1] = std::max(0.0, mass);
         a = b;
     }
     for (int i = 0; i < bins; ++i) {
-        const double value = cdf.back() > 0.0 ? cdf[i] / cdf.back()
-                                            : 0.5 * (1.0 - std::cos(std::numbers::pi * i / (bins - 1)));
         // Endpoint ratio describes a linear density in cosine inside this
         // annulus. Keep it separate from rounded CDF differences so sampling
         // and PDF evaluation use exactly the same representable bin mass.
@@ -468,8 +467,23 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
             const double fitted = 0.5 * (lo + hi);
             if (secondMoment(fitted) < secondMoment(shape))
                 shape = fitted;
+            // For a fixed conditional density r_i, the second moment is
+            // sum(A_i / m_i), where A_i = integral_bin phase^2 / r_i dmu.
+            // Its minimum under sum(m_i) = 1 occurs at m_i proportional to
+            // sqrt(A_i). Integral phase alone is optimal only when the
+            // conditional proposal reproduces the phase exactly.
+            masses[i] = (left + right) *
+                        std::sqrt(width * (2.0 * halfWidth / nodes) * secondMoment(shape));
         }
-        table.emplace_back(static_cast<float>(value), static_cast<float>(shape), 0.0f, 0.0f);
+        shapes[i] = shape;
+    }
+    cdf[0] = 0.0;
+    for (int i = 1; i < bins; ++i)
+        cdf[i] = cdf[i - 1] + masses[i - 1];
+    for (int i = 0; i < bins; ++i) {
+        const double value = cdf.back() > 0.0 ? cdf[i] / cdf.back()
+                                            : 0.5 * (1.0 - std::cos(std::numbers::pi * i / (bins - 1)));
+        table.emplace_back(static_cast<float>(value), static_cast<float>(shapes[i]), 0.0f, 0.0f);
     }
 }
 

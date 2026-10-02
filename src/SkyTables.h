@@ -116,6 +116,8 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
 /// Appends a normalized angular sampling CDF for the selected band-major table.
 /// firstEntry identifies the first phase entry and bins is the row length.
 /// bandWeights describe each band's contribution to the displayed radiance.
+/// Bin probabilities and cosine-linear conditional densities minimize the
+/// quadrature estimate of the scalar phase proposal's second moment.
 void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry,
                        const std::array<double, kSpectralBandCount>& bandWeights);
 
