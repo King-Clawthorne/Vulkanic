@@ -57,6 +57,7 @@ const int SPECTRAL_BANDS = 17;
 const float GOLDEN_ANGLE = 2.39996322972865332;
 const int MAX_SCATTER_ORDER = 3;
 const int LUT_ALT = 64, LUT_MU = 256;
+const int SUN_DISTANCE_BINS = 16;
 
 // Transform a world-space point/vector into the unit-space ellipsoid used for
 // rain volume intersection and density evaluation.
@@ -354,6 +355,8 @@ struct Level {
     vec4 air, camDepth, depth0;
     vec2 dirJitter;
     vec4 distanceRates, distanceWeights;
+    float sunDistanceValues[SUN_DISTANCE_BINS + 1];
+    bool sunDistanceProposal;
     float span, start, stepWeight, sampleWeight;
     int stepIndex, sampleIndex;
     uint scramble;
@@ -480,13 +483,61 @@ float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
     return t;
 }
 
-// Retain full mixture-PDF compensation and the uniform safety component.
+// Quadratic spacing resolves the dense end of ascending/descending segments.
+float sun_distance_node(int d, int i) {
+    float x = float(i) / float(SUN_DISTANCE_BINS);
+    if (S[d].distanceRates.y > 1.0)
+        return x * x;
+    if (S[d].distanceRates.y < -1.0)
+        return 1.0 - (1.0 - x) * (1.0 - x);
+    return x;
+}
+
+// A scalar proposal only: spectral Stokes radiance is still evaluated at the
+// actual collision. Include both optical paths and the planet's solar shadow.
+void prepare_sun_distance(int d, vec3 sun) {
+    float integral = 0.0;
+    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
+        vec3 p = S[d].org + S[d].dir * (S[d].start + sun_distance_node(d, i) * S[d].span);
+        vec4 cameraDepth = max(S[d].depth0 - sun_air_depth(p, S[d].dir), vec4(0.0));
+        float value = 0.0;
+        if (ray_sphere(p, sun, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
+            float tau = dot(sceneData.proposalExtinction, cameraDepth + sun_air_depth(p, sun));
+            value = dot(air_density(p).xyw, sceneData.proposalScattering.xyz) * exp(-max(tau, 0.0));
+        }
+        S[d].sunDistanceValues[i] = value;
+        if (i > 0)
+            integral += 0.5 * (S[d].sunDistanceValues[i - 1] + value) *
+                        (sun_distance_node(d, i) - sun_distance_node(d, i - 1));
+    }
+    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i)
+        S[d].sunDistanceValues[i] = integral > 1.0e-30 ? 0.1 + 0.9 * S[d].sunDistanceValues[i] / integral : 1.0;
+}
+
+float sample_sun_distance(int d, float u, out float pdf) {
+    for (int i = 0; i < SUN_DISTANCE_BINS; ++i) {
+        float left = sun_distance_node(d, i), right = sun_distance_node(d, i + 1);
+        float a = S[d].sunDistanceValues[i], b = S[d].sunDistanceValues[i + 1];
+        float mass = 0.5 * (a + b) * (right - left);
+        if (u < mass || i == SUN_DISTANCE_BINS - 1) {
+            float target = clamp(u / (right - left), 0.0, 0.5 * (a + b));
+            float fraction = clamp(2.0 * target / (a + sqrt(max(a * a + 2.0 * (b - a) * target, 0.0))), 0.0, 1.0);
+            pdf = mix(a, b, fraction);
+            return mix(left, right, fraction);
+        }
+        u -= mass;
+    }
+    pdf = 1.0;
+    return 1.0;
+}
+
 void begin_step(int d, int steps) {
     uint dimension = 2u + 4u * uint(d);
     uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
     float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
     float pdf;
-    float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
+    float t = S[d].sunDistanceProposal ? sample_sun_distance(d, u, pdf)
+                                     : sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
     S[d].dirJitter =
         vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
     S[d].stepWeight = S[d].span / (float(steps) * pdf);
@@ -541,6 +592,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             S[d].distanceWeights = scatteringSum > 1.0e-30
                                        ? vec4(0.1, 0.9 * scattering / scatteringSum)
                                        : vec4(1.0, 0.0, 0.0, 0.0);
+            S[d].sunDistanceProposal = d == last && dot(normalize(first), L) < 0.15;
+            if (S[d].sunDistanceProposal)
+                prepare_sun_distance(d, L);
             for (int b = 0; b < SPECTRAL_BANDS; ++b)
                 S[d].result[b] = vec4(0.0);
             S[d].stepIndex = 0;
