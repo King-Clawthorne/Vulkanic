@@ -324,7 +324,7 @@ struct Level {
     vec4 distanceRates, distanceWeights;
     float sunDistanceValues[SUN_DISTANCE_BINS + 1];
     bool sunDistanceProposal;
-    float span, start, stepWeight, sampleWeight;
+    float span, start, stepWeight, sampleWeight, sunDistanceCenter;
     int stepIndex, sampleIndex;
     uint scramble;
     vec4 result[SPECTRAL_BANDS], angular[SPECTRAL_BANDS];
@@ -438,6 +438,15 @@ float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
 
 float sun_distance_node(int d, int i) {
     float x = float(i) / float(SUN_DISTANCE_BINS);
+    if (S[d].sunDistanceCenter > 0.0) {
+        float center = S[d].sunDistanceCenter;
+        if (i <= SUN_DISTANCE_BINS / 2) {
+            float t = 1.0 - 2.0 * x;
+            return center * (1.0 - t * t);
+        }
+        float t = 2.0 * x - 1.0;
+        return center + (1.0 - center) * t * t;
+    }
     if (S[d].distanceRates.y > 1.0)
         return x * x;
     if (S[d].distanceRates.y < -1.0)
@@ -447,6 +456,14 @@ float sun_distance_node(int d, int i) {
 
 void prepare_sun_distance(int d, vec3 sun) {
     float integral = 0.0, maximumLogValue = -1.0e30;
+    S[d].sunDistanceCenter = -1.0;
+    float closest = -dot(S[d].org, S[d].dir) - S[d].start;
+    vec3 heights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
+    vec3 weights = S[d].distanceWeights.yzw;
+    float height = dot(weights, heights) / max(dot(weights, vec3(1.0)), 1.0e-30);
+    if (closest > 0.0 && closest < S[d].span && height > 0.0 &&
+        S[d].span * S[d].span > 100.0 * sceneData.skyRadiiScaleHeights.x * height)
+        S[d].sunDistanceCenter = closest / S[d].span;
     float logScattering[SPECTRAL_BANDS];
     vec3 scatteringCoefficients[SPECTRAL_BANDS];
     ScatterGeom geometry = scatter_geometry(-sun, -S[d].dir);
