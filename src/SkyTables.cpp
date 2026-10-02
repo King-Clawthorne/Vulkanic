@@ -396,19 +396,25 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         double sum = 0.0;
         for (int band = 0; band < kSpectralBandCount; ++band)
             sum += table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
-        return sum * std::sin(std::numbers::pi * i / (bins - 1)) / kSpectralBandCount;
+        return std::max(0.0, sum / kSpectralBandCount);
     };
-    // Trapezoidal integration includes sin(theta), the solid-angle Jacobian.
+    // Average phase per spherical annulus. Use the exact solid-angle width,
+    // including the polar caps where sin(theta) vanishes at an endpoint.
     // Appended entries occupy one extra row after all spectral phase rows.
     std::vector<double> cdf(bins, 0.0);
     double a = phase(0);
     for (int i = 1; i < bins; ++i) {
         const double b = phase(i);
-        cdf[i] = cdf[i - 1] + std::max(0.0, a + b);
+        const double halfWidth = std::numbers::pi / (2.0 * (bins - 1));
+        const double cosineWidth = 2.0 * std::sin((2.0 * i - 1.0) * halfWidth) * std::sin(halfWidth);
+        cdf[i] = cdf[i - 1] + 0.5 * (a + b) * cosineWidth;
         a = b;
     }
-    for (double value : cdf)
-        table.emplace_back(static_cast<float>(value / cdf.back()), 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < bins; ++i) {
+        const double value = cdf.back() > 0.0 ? cdf[i] / cdf.back()
+                                            : 0.5 * (1.0 - std::cos(std::numbers::pi * i / (bins - 1)));
+        table.emplace_back(static_cast<float>(value), 0.0f, 0.0f, 0.0f);
+    }
 }
 
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {

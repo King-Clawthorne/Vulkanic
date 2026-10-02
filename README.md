@@ -16,8 +16,6 @@ The C++ application computes spectral lookup tables, creates the Vulkan resource
 
 Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, rain, polarization, and camera-dependent rays each frame.
 
-Sampler based on: [PBRT's Sobol sampling method](https://pbr-book.org/4ed/Sampling_and_Reconstruction/Sobol_Samplers).
-
 ## Result
 
 The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.
