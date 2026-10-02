@@ -496,15 +496,28 @@ float sun_distance_node(int d, int i) {
 // A scalar proposal only: spectral Stokes radiance is still evaluated at the
 // actual collision. Include both optical paths and the planet's solar shadow.
 void prepare_sun_distance(int d, vec3 sun) {
-    float integral = 0.0;
+    float integral = 0.0, minimumDepth = 1.0e30;
+    float opticalDepth[SUN_DISTANCE_BINS + 1];
+    float mu = clamp(dot(S[d].dir, sun), -1.0, 1.0);
+    vec3 phase = vec3(3.0 * (1.0 + mu * mu) / (16.0 * PI), cdf_pdf(0, mu), cdf_pdf(1, mu));
+    vec3 scattering = sceneData.proposalScattering.xyz * phase;
     for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
         vec3 p = S[d].org + S[d].dir * (S[d].start + sun_distance_node(d, i) * S[d].span);
         vec4 cameraDepth = max(S[d].depth0 - sun_air_depth(p, S[d].dir), vec4(0.0));
         float value = 0.0;
         if (ray_sphere(p, sun, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
             float tau = dot(sceneData.proposalExtinction, cameraDepth + sun_air_depth(p, sun));
-            value = dot(air_density(p).xyw, sceneData.proposalScattering.xyz) * exp(-max(tau, 0.0));
+            opticalDepth[i] = max(tau, 0.0);
+            value = max(dot(air_density(p).xyw, scattering), 0.0);
+            if (value > 0.0)
+                minimumDepth = min(minimumDepth, opticalDepth[i]);
+        } else {
+            opticalDepth[i] = 0.0;
         }
+        S[d].sunDistanceValues[i] = value;
+    }
+    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
+        float value = S[d].sunDistanceValues[i] * exp(-max(opticalDepth[i] - minimumDepth, 0.0));
         S[d].sunDistanceValues[i] = value;
         if (i > 0)
             integral += 0.5 * (S[d].sunDistanceValues[i - 1] + value) *
