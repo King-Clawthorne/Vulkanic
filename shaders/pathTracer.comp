@@ -849,35 +849,31 @@ float rain_direction_pdf(float cosTheta) {
 
 float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnly, vec2 hit, float u, out float pdf) {
     float span = hit.y - hit.x;
-    float extinction = sceneData.rainbowOptical.y;
-    if (sceneData.rainbowRadiiEdge.w <= 0.0 && !directOnly) {
-        float tau = extinction * span;
-        float mass = tau < 0.001 ? tau * (1.0 - 0.5 * tau + tau * tau / 6.0) : 1.0 - exp(-tau);
-        float distance = tau < 0.001 ? u * span : -log(1.0 - u * mass) / extinction;
-        pdf = tau < 0.001 ? 1.0 / span : extinction * exp(-extinction * distance) / mass;
-        return distance;
-    }
     const int bins = 16;
     float values[bins + 1];
     float opticalDepth[bins + 1];
+    float continuation[bins + 1];
+    float continuationIntegral = 0.0;
     float step = span / float(bins), integral = 0.0;
     float spectralWeights[SPECTRAL_BANDS];
     for (int band = 0; band < SPECTRAL_BANDS; ++band) {
-        spectralWeights[band] = directOnly
-            ? max(rainbow_mueller(dot(sun, direction), band)[0][0], 0.0) *
-              sceneData.spectralBands[band].y * length(sceneData.cieXyz[band].xyz) : 0.0;
+        spectralWeights[band] = max(rainbow_mueller(dot(sun, direction), band)[0][0], 0.0) *
+              sceneData.spectralBands[band].y * length(sceneData.cieXyz[band].xyz);
     }
     float minimumDepth = 1.0e30;
     vec3 earthOffset = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
-    vec4 airStart = directOnly ? sun_air_depth(origin + earthOffset, direction) : vec4(0.0);
+    vec4 airStart = sun_air_depth(origin + earthOffset, direction);
     for (int i = 0; i <= bins; ++i) {
         vec3 p = origin + direction * (hit.x + float(i) * step);
         float density = rainbow_density(p);
         float depth = rain_segment_tau(origin, direction, hit.x, hit.x + float(i) * step);
-        float sunDepth = directOnly ? rain_segment_tau(p, sun, 0.0, max(rain_segment(p, sun).y, 0.0)) : 0.0;
+        float sunDepth = rain_segment_tau(p, sun, 0.0, max(rain_segment(p, sun).y, 0.0));
+        continuation[i] = density * exp(-depth);
+        if (i > 0)
+            continuationIntegral += 0.5 * (continuation[i - 1] + continuation[i]) / float(bins);
         opticalDepth[i] = depth + sunDepth;
         values[i] = density;
-        if (directOnly) {
+        {
             vec3 earth = p + earthOffset;
             if (ray_sphere(earth, sun, sceneData.skyRadiiScaleHeights.x).x > 0.0) {
                 values[i] = 0.0;
@@ -908,12 +904,15 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
         if (i > 0)
             integral += 0.5 * (values[i - 1] + values[i]) / float(bins);
     }
-    if (integral <= 1.0e-20) {
-        pdf = 1.0 / span;
-        return u * span;
+    bool haveDirect = integral > 1.0e-20;
+    bool haveContinuation = !directOnly && continuationIntegral > 1.0e-20;
+    float directWeight = haveDirect ? (haveContinuation ? 0.45 : 0.9) : 0.0;
+    float continuationWeight = haveContinuation ? (haveDirect ? 0.45 : 0.9) : 0.0;
+    float uniformWeight = 1.0 - directWeight - continuationWeight;
+    for (int i = 0; i <= bins; ++i) {
+        values[i] = uniformWeight + directWeight * values[i] / max(integral, 1.0e-20) +
+                    continuationWeight * continuation[i] / max(continuationIntegral, 1.0e-20);
     }
-    for (int i = 0; i <= bins; ++i)
-        values[i] = 0.1 + 0.9 * values[i] / integral;
     float target = u * float(bins);
     for (int i = 0; i < bins; ++i) {
         float a = values[i], b = values[i + 1], mass = 0.5 * (a + b);
