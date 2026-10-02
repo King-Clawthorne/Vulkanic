@@ -431,7 +431,44 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
         // annulus. Keep it separate from rounded CDF differences so sampling
         // and PDF evaluation use exactly the same representable bin mass.
         const double left = phaseValues[i], right = phaseValues[std::min(i + 1, bins - 1)];
-        const double shape = left + right > 0.0 ? left / (left + right) : 0.5;
+        double shape = left + right > 0.0 ? left / (left + right) : 0.5;
+        if (i + 1 < bins && left + right > 0.0) {
+            // Minimize the local second moment integral p(theta)^2 / q(cos(theta)).
+            // Endpoint ratios alone assume angle and cosine are interchangeable,
+            // which fails at the poles. This preprocessing leaves the GPU's
+            // analytic linear-density inverse and matching PDF unchanged.
+            constexpr int nodes = 64;
+            std::array<double, nodes> fractions{}, contributions{};
+            const double theta0 = 2.0 * i * halfWidth;
+            const double width = 2.0 * std::sin((2.0 * i + 1.0) * halfWidth) * std::sin(halfWidth);
+            for (int j = 0; j < nodes; ++j) {
+                const double t = (j + 0.5) / nodes;
+                const double theta = theta0 + 2.0 * halfWidth * t;
+                fractions[j] = 2.0 * std::sin(theta0 + halfWidth * t) * std::sin(halfWidth * t) / width;
+                const double p = std::lerp(left, right, t) / (left + right);
+                contributions[j] = p * p * std::sin(theta);
+            }
+            const auto secondMoment = [&](double candidate) {
+                double sum = 0.0;
+                for (int j = 0; j < nodes; ++j)
+                    sum += contributions[j] / (2.0 * std::lerp(candidate, 1.0 - candidate, fractions[j]));
+                return sum;
+            };
+            // The objective is convex in the endpoint ratio. Include the old
+            // proposal explicitly so fitting cannot increase its quadrature cost.
+            double lo = 0.0, hi = 1.0;
+            for (int iteration = 0; iteration < 24; ++iteration) {
+                const double a = std::lerp(lo, hi, 1.0 / 3.0);
+                const double b = std::lerp(lo, hi, 2.0 / 3.0);
+                if (secondMoment(a) < secondMoment(b))
+                    hi = b;
+                else
+                    lo = a;
+            }
+            const double fitted = 0.5 * (lo + hi);
+            if (secondMoment(fitted) < secondMoment(shape))
+                shape = fitted;
+        }
         table.emplace_back(static_cast<float>(value), static_cast<float>(shape), 0.0f, 0.0f);
     }
 }
