@@ -401,7 +401,9 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
     // Average phase per spherical annulus. Use the exact solid-angle width,
     // including the polar caps where sin(theta) vanishes at an endpoint.
     // Appended entries occupy one extra row after all spectral phase rows.
-    std::vector<double> cdf(bins, 0.0);
+    std::vector<double> cdf(bins, 0.0), phaseValues(bins);
+    for (int i = 0; i < bins; ++i)
+        phaseValues[i] = phase(i);
     double a = phase(0);
     for (int i = 1; i < bins; ++i) {
         const double b = phase(i);
@@ -413,7 +415,12 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
     for (int i = 0; i < bins; ++i) {
         const double value = cdf.back() > 0.0 ? cdf[i] / cdf.back()
                                             : 0.5 * (1.0 - std::cos(std::numbers::pi * i / (bins - 1)));
-        table.emplace_back(static_cast<float>(value), 0.0f, 0.0f, 0.0f);
+        // Endpoint ratio describes a linear density in cosine inside this
+        // annulus. Keep it separate from rounded CDF differences so sampling
+        // and PDF evaluation use exactly the same representable bin mass.
+        const double left = phaseValues[i], right = phaseValues[std::min(i + 1, bins - 1)];
+        const double shape = left + right > 0.0 ? left / (left + right) : 0.5;
+        table.emplace_back(static_cast<float>(value), static_cast<float>(shape), 0.0f, 0.0f);
     }
 }
 

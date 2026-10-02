@@ -376,6 +376,10 @@ float cdf_at(int table, int i) {
     return table < 2 ? mieMatrixBuffer.entries[i].x : rainbowMatrixBuffer.entries[i].x;
 }
 
+float cdf_shape(int table, int i) {
+    return table < 2 ? mieMatrixBuffer.entries[i].y : rainbowMatrixBuffer.entries[i].y;
+}
+
 // Exact annulus width, evaluated without subtracting nearly equal cosines.
 float cdf_cosine_width(int bin, int bins) {
     float halfWidth = 0.5 * PI / float(bins - 1);
@@ -386,7 +390,20 @@ float cdf_pdf(int table, float cosTheta) {
     ivec2 info = cdf_layout(table);
     float theta = acos(clamp(cosTheta, -1.0, 1.0));
     int bin = min(int(theta / PI * float(info.y - 1)), info.y - 2);
-    return (cdf_at(table, info.x + bin + 1) - cdf_at(table, info.x + bin)) /
+    float theta0 = float(bin) * PI / float(info.y - 1);
+    float theta1 = float(bin + 1) * PI / float(info.y - 1);
+    // Half-angle coordinates avoid cancellation near either pole.
+    float fraction;
+    if (bin * 2 < info.y - 1) {
+        float a = sin(0.5 * theta0), b = sin(0.5 * theta1), x = sin(0.5 * theta);
+        fraction = (x * x - a * a) / (b * b - a * a);
+    } else {
+        float a = cos(0.5 * theta0), b = cos(0.5 * theta1), x = cos(0.5 * theta);
+        fraction = (a * a - x * x) / (a * a - b * b);
+    }
+    float shape = cdf_shape(table, info.x + bin);
+    float density = 2.0 * mix(shape, 1.0 - shape, clamp(fraction, 0.0, 1.0));
+    return density * (cdf_at(table, info.x + bin + 1) - cdf_at(table, info.x + bin)) /
            (2.0 * PI * cdf_cosine_width(bin, info.y));
 }
 
@@ -402,10 +419,14 @@ vec3 cdf_sample(int table, vec3 axis, float u, float phi) {
     }
     float c0 = cdf_at(table, info.x + lo), c1 = cdf_at(table, info.x + hi);
     float fraction = clamp((u - c0) / max(c1 - c0, 1e-20), 0.0, 1.0);
+    // Stable inverse of the linear-in-cosine conditional density, including
+    // flat bins and triangular bins with a zero endpoint.
+    float shape = cdf_shape(table, info.x + lo);
+    float root = sqrt(max(shape * shape + (1.0 - 2.0 * shape) * fraction, 0.0));
+    fraction = fraction > 0.0 ? fraction / max(shape + root, 1e-20) : 0.0;
     float theta0 = float(lo) * PI / float(info.y - 1);
     float theta1 = float(hi) * PI / float(info.y - 1);
-    // Interpolate half-angle squares from the nearer pole to preserve tiny
-    // polar offsets in float precision. Both branches invert uniform cosine.
+    // Reconstruct from the nearer pole to preserve small angular offsets.
     float theta;
     if (lo * 2 < info.y - 1) {
         float a = sin(0.5 * theta0), b = sin(0.5 * theta1);
@@ -811,8 +832,6 @@ vec4[SPECTRAL_BANDS] integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint 
         return result;
     float extinction = sceneData.rainbowOptical.y;
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
-        // Consecutive camera samples own disjoint blocks of rain paths.
-        // Keep the scramble fixed across the block to retain stratification.
         uint sobolIndex = NestedUniformScramble(index * uint(samples) + uint(sampleIndex),
                                                Hash(scramble ^ 0xa511e9b3u));
         uint dimension = 2u;
