@@ -1,6 +1,3 @@
-// First 16 Joe-Kuo Sobol dimensions, 32 direction numbers each.
-// Generated with scipy.stats.qmc.Sobol(16, scramble=False, bits=32)._sv.
-// Data source: https://web.maths.unsw.edu.au/~fkuo/sobol/
 const uint SAMPLE_DIMENSIONS = 16u;
 const uint SOBOL_DIRECTIONS[512] = uint[512](
     0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
