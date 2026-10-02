@@ -882,6 +882,14 @@ float rain_direction_pdf(float cosTheta) {
     return 0.9 * cdf_pdf(2, cosTheta) + 0.1 / (4.0 * PI);
 }
 
+// Resolve attenuation boundary layers without increasing the table size.
+// Symmetry covers both camera attenuation and illumination from the far side.
+float rain_distance_node(int i, int bins, float power) {
+    float x = float(i) / float(bins);
+    return x <= 0.5 ? 0.5 * pow(2.0 * x, power)
+                    : 1.0 - 0.5 * pow(2.0 * (1.0 - x), power);
+}
+
 float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnly, vec2 hit, float u, out float pdf) {
     float span = hit.y - hit.x;
     const int bins = 16;
@@ -889,7 +897,11 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     float opticalDepth[bins + 1];
     float continuation[bins + 1];
     float continuationIntegral = 0.0;
-    float step = span / float(bins), integral = 0.0;
+    float integral = 0.0;
+    float power = clamp(log2(max(sceneData.rainbowOptical.y * span * 0.125, 1.0)), 1.0, 4.0);
+    float nodes[bins + 1];
+    for (int i = 0; i <= bins; ++i)
+        nodes[i] = rain_distance_node(i, bins, power);
     float spectralWeights[SPECTRAL_BANDS];
     for (int band = 0; band < SPECTRAL_BANDS; ++band) {
         spectralWeights[band] = max(rainbow_mueller(dot(sun, direction), band)[0][0], 0.0) *
@@ -899,13 +911,13 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     vec3 earthOffset = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
     vec4 airStart = sun_air_depth(origin + earthOffset, direction);
     for (int i = 0; i <= bins; ++i) {
-        vec3 p = origin + direction * (hit.x + float(i) * step);
+        vec3 p = origin + direction * (hit.x + nodes[i] * span);
         float density = rainbow_density(p);
-        float depth = rain_segment_tau(origin, direction, hit.x, hit.x + float(i) * step);
+        float depth = rain_segment_tau(origin, direction, hit.x, hit.x + nodes[i] * span);
         float sunDepth = rain_segment_tau(p, sun, 0.0, max(rain_segment(p, sun).y, 0.0));
         continuation[i] = density * exp(-depth);
         if (i > 0)
-            continuationIntegral += 0.5 * (continuation[i - 1] + continuation[i]) / float(bins);
+            continuationIntegral += 0.5 * (continuation[i - 1] + continuation[i]) * (nodes[i] - nodes[i - 1]);
         opticalDepth[i] = depth + sunDepth;
         values[i] = density;
         {
@@ -937,7 +949,7 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
     for (int i = 0; i <= bins; ++i) {
         values[i] *= exp(-max(opticalDepth[i] - minimumDepth, 0.0));
         if (i > 0)
-            integral += 0.5 * (values[i - 1] + values[i]) / float(bins);
+            integral += 0.5 * (values[i - 1] + values[i]) * (nodes[i] - nodes[i - 1]);
     }
     bool haveDirect = integral > 1.0e-20;
     bool haveContinuation = !directOnly && continuationIntegral > 1.0e-20;
@@ -948,14 +960,15 @@ float rain_sample_distance(vec3 origin, vec3 direction, vec3 sun, bool directOnl
         values[i] = uniformWeight + directWeight * values[i] / max(integral, 1.0e-20) +
                     continuationWeight * continuation[i] / max(continuationIntegral, 1.0e-20);
     }
-    float target = u * float(bins);
+    float target = u;
     for (int i = 0; i < bins; ++i) {
-        float a = values[i], b = values[i + 1], mass = 0.5 * (a + b);
+        float width = nodes[i + 1] - nodes[i];
+        float a = values[i], b = values[i + 1], mass = 0.5 * (a + b) * width;
         if (target < mass || i == bins - 1) {
-            target = clamp(target, 0.0, mass);
+            target = clamp(target / width, 0.0, 0.5 * (a + b));
             float fraction = clamp(2.0 * target / (a + sqrt(max(a * a + 2.0 * (b - a) * target, 0.0))), 0.0, 1.0);
             pdf = mix(a, b, fraction) / span;
-            return (float(i) + fraction) * step;
+            return mix(nodes[i], nodes[i + 1], fraction) * span;
         }
         target -= mass;
     }
