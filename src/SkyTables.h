@@ -25,7 +25,7 @@ struct SkySpectralConfig {
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
     glm::vec3 sunDirection{0.35f, 0.01f, 0.25f};
     float sunRadius = 0.00465f, sunAa = 0.0005f;
-    uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 3;
+    uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 1;
 
     float rayleighDepolarization = 0.0279f, ozoneDobsonUnits = 300.0f;
     uint32_t mieTableAngleBins = 181;
@@ -49,7 +49,7 @@ struct SkySpectralConfig {
 /// Geometry, optical coefficients, and integration quality for the rain volume.
 /// The radii and distance are in metres; droplet size is in micrometres.
 struct RainbowConfig {
-    uint32_t enabled = 1;
+    uint32_t enabled = 0;
     float distance = 4000.0f, height = 0.0f;
     glm::vec3 radii{6000.0f, 6000.0f, 1500.0f};
     float edgeSoftness = 0.15f, scatteringCoefficient = 5.0e-4f, extinctionCoefficient = 5.0e-4f;
@@ -62,7 +62,7 @@ struct RainbowConfig {
 
 /// Output image dimensions and per-dispatch camera-ray sample count.
 struct RenderConfig {
-    uint32_t width = 960, height = 540, samplesPerPixel = 1;
+    uint32_t width = 1280, height = 720, samplesPerPixel = 1;
 };
 
 /// Initial camera pose and vertical field-of-view limits.
