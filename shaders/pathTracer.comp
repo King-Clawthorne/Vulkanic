@@ -18,6 +18,7 @@ layout(set = 0, binding = 1) uniform SceneData {
     uvec4 rainbowMultiple;
     vec4 spectralBands[17], cieXyz[17], sunDisk;
     vec4 mieBands[17], rainbowAxisX, rainbowAxisZ, apparentSun, starConfig;
+    vec4 proposalScattering, proposalExtinction;
 }
 sceneData;
 layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer {
@@ -528,16 +529,14 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             S[d].span = max(tEnd - S[d].start, 1.0e-3);
             S[d].depth0 = sun_air_depth(first, S[d].dir);
             vec4 total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), vec4(0.0));
-            float tau = sceneData.spectralBands[6].x * total.x + sceneData.mieBands[6].x * total.y +
-                        sceneData.mieBands[6].z * total.w;
+            float tau = dot(sceneData.proposalExtinction, total);
             float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
             vec3 scaleHeights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
             S[d].distanceRates = vec4(0.0, clamp(vec3(clamp(tau, 0.0, 8.0)) + altitudeChange / scaleHeights,
                                                 vec3(-32.0), vec3(32.0)));
             if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0)
                 S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
-            vec3 scattering = max(total.xyw * vec3(sceneData.spectralBands[6].x,
-                                                  sceneData.mieBands[6].y, sceneData.mieBands[6].w), vec3(0.0));
+            vec3 scattering = max(total.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
             float scatteringSum = dot(scattering, vec3(1.0));
             S[d].distanceWeights = scatteringSum > 1.0e-30
                                        ? vec4(0.1, 0.9 * scattering / scatteringSum)
@@ -553,8 +552,7 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             S[d + 1].org = S[d].pos;
             vec3 next;
             vec3 current = S[d].dir;
-            vec3 strength = max(S[d].air.xyw * vec3(sceneData.spectralBands[6].x,
-                                                   sceneData.mieBands[6].y, sceneData.mieBands[6].w), vec3(0.0));
+            vec3 strength = max(S[d].air.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
             vec3 weights = 0.8 * strength / max(dot(strength, vec3(1.0)), 1.0e-30);
             float fine = 0.5 * weights.y, coarse = 0.5 * weights.z;
             float uniformWeight = 1.0 - dot(weights, vec3(1.0));

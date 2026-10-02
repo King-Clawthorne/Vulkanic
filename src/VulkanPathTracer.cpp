@@ -100,15 +100,18 @@ constexpr uint32_t kPathTracerSpirv[] = {
 struct alignas(16) SceneData {
     glm::vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
     glm::vec4 skyVrtParams, rainbowCenterEnabled, rainbowRadiiEdge, rainbowOptical;
-    std::array<uint32_t, 4> rainbowMultiple;
+    glm::uvec4 rainbowMultiple;
     glm::vec4 spectralBands[kSpectralBandCount], cieXyz[kSpectralBandCount], sunDisk;
     glm::vec4 mieBands[kSpectralBandCount], rainbowAxisX, rainbowAxisZ, apparentSun, starConfig;
+    glm::vec4 proposalScattering, proposalExtinction;
 };
 
 static_assert(offsetof(SceneData, skyVrtParams) == 48);
 static_assert(offsetof(SceneData, rainbowMultiple) == 112);
 static_assert(offsetof(SceneData, spectralBands) == 128);
-static_assert(sizeof(SceneData) == 1024);
+static_assert(offsetof(SceneData, proposalScattering) == 1024);
+static_assert(offsetof(SceneData, proposalExtinction) == 1040);
+static_assert(sizeof(SceneData) == 1056);
 
 constexpr std::array kDescriptorTypes{vk::DescriptorType::eStorageImage,  vk::DescriptorType::eUniformBuffer,
                                       vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer,
@@ -236,6 +239,23 @@ private:
             }
         }
 
+        // Match the XYZ-weighted angular CDFs rather than choosing all proposal
+        // component masses from a single wavelength. Precompute once on the CPU.
+        double proposalWeight = 0.0;
+        glm::dvec3 scattering{0.0};
+        glm::dvec4 extinction{0.0};
+        for (int band = 0; band < kSpectralBandCount; ++band) {
+            const auto& spectral = sceneData.spectralBands[band];
+            const auto& mie = sceneData.mieBands[band];
+            const double weight = spectral.y * glm::length(glm::dvec3(sceneData.cieXyz[band]));
+            proposalWeight += weight;
+            scattering += weight * glm::dvec3(spectral.x, mie.y, mie.w);
+            extinction += weight * glm::dvec4(spectral.x, mie.x, spectral.w, mie.z);
+        }
+        if (proposalWeight > 0.0) {
+            sceneData.proposalScattering = glm::vec4(scattering / proposalWeight, 0.0);
+            sceneData.proposalExtinction = extinction / proposalWeight;
+        }
         return sceneData;
     }
 
