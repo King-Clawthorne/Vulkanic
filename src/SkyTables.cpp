@@ -400,18 +400,28 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
                    table[firstEntry + static_cast<size_t>((band * bins) + i)].x;
         return std::max(0.0, sum);
     };
-    // Spectrally weighted phase per spherical annulus. Use the exact solid-angle width,
-    // including the polar caps where sin(theta) vanishes at an endpoint.
+    // Integrate the same angle-linear phase used by the shader over each
+    // spherical annulus. Averaging the endpoints in cosine overweights sharp
+    // polar peaks (a linearly falling forward cap has only 1/3, not 1/2,
+    // of its peak times the cap's solid angle).
     // Appended entries occupy one extra row after all spectral phase rows.
     std::vector<double> cdf(bins, 0.0), phaseValues(bins);
     for (int i = 0; i < bins; ++i)
         phaseValues[i] = phase(i);
-    double a = phase(0);
+    double a = phaseValues[0];
+    const double halfWidth = std::numbers::pi / (2.0 * (bins - 1));
+    // Stable series for sin(h)/h - cos(h), avoiding cancellation for fine LUTs.
+    const double h2 = halfWidth * halfWidth;
+    const double slopeIntegral = h2 * (1.0 / 3.0 + h2 * (-1.0 / 30.0 + h2 *
+                                 (1.0 / 840.0 - h2 / 45360.0)));
     for (int i = 1; i < bins; ++i) {
-        const double b = phase(i);
-        const double halfWidth = std::numbers::pi / (2.0 * (bins - 1));
-        const double cosineWidth = 2.0 * std::sin((2.0 * i - 1.0) * halfWidth) * std::sin(halfWidth);
-        cdf[i] = cdf[i - 1] + 0.5 * (a + b) * cosineWidth;
+        const double b = phaseValues[i];
+        const double midpoint = (2.0 * i - 1.0) * halfWidth;
+        const double slopeTerm = halfWidth < 0.1 ? slopeIntegral
+                                                : std::sin(halfWidth) / halfWidth - std::cos(halfWidth);
+        const double mass = (a + b) * std::sin(midpoint) * std::sin(halfWidth) +
+                            (b - a) * std::cos(midpoint) * slopeTerm;
+        cdf[i] = cdf[i - 1] + std::max(0.0, mass);
         a = b;
     }
     for (int i = 0; i < bins; ++i) {
