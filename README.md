@@ -22,7 +22,7 @@ The result is an interactive sky-rendering demo that exposes how spectral scatte
 
 ## Requirements
 
-- Windows, CMake 3.30 or newer, Ninja, Clang 20 or newer with `clang-cl`, and a Vulkan SDK with `glslc`
+- Windows, CMake 4.4 or newer, Ninja, Clang 20 or newer with `clang-cl`, and a Vulkan SDK with `glslc`
 - A Vulkan 1.4 capable GPU and driver
 
 CMake downloads GLFW, GLM, Vulkan Memory Allocator-Hpp, and vk-bootstrap through FetchContent.
@@ -37,6 +37,10 @@ From PowerShell, run:
 ```
 
 The script builds the Windows GPU executable at `build/Vulkanic.exe`.
+
+CMake's CTest integration can create a `build/Testing` directory when tests
+are run. This project does not currently define tests, so that directory is
+only CTest's run log and is safe to remove while no CTest process is running.
 
 To build manually:
 

@@ -1,5 +1,10 @@
 {
-  "version": 6,
+  "version": 12,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 4,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "windows",
@@ -12,6 +17,10 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_C_COMPILER": "clang-cl",
         "CMAKE_CXX_COMPILER": "clang-cl"
+      },
+      "warnings": {
+        "deprecated": true,
+        "policy": true
       }
     }
   ],
