@@ -559,7 +559,7 @@ namespace {
     }
 
     double OzoneCrossSection(double wavelengthNm) {
-        const double position = std::clamp((0.1 * wavelengthNm) - 36.0, 0.0, 46.999);
+        const double position = std::clamp(wavelengthNm - 360.0, 0.0, 469.999);
         const auto i = static_cast<size_t>(position);
         return std::lerp(kOzoneCrossSection[i], kOzoneCrossSection[i + 1], position - static_cast<double>(i));
     }
@@ -576,19 +576,23 @@ namespace {
 SpectralBand ComputeSpectralBand(int band) {
     const double centre = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
     SpectralBand result{.betaRayleighScale = 0.0, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = {}};
-    // Average the smooth wavelength-dependent datasets around the 25 nm band
-    // centre. The CIE function is sampled more densely to retain its shape.
-    for (int offset = -10; offset <= 10; offset += 5) {
-        const double wavelength = centre + offset;
-        result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) / 5.0;
-        result.ozoneCrossSection += OzoneCrossSection(wavelength) * 0.2;
-        const double solarPosition = (wavelength - 360.0) / 5.0;
+    // Average the wavelength-dependent datasets at 1 nm intervals across the
+    // 25 nm band, using midpoint samples from centre - 12 through centre + 12.
+    constexpr int spectralSamples = 25;
+    for (int sample = 0; sample < spectralSamples; ++sample) {
+        const double wavelength = centre - 12.0 + sample;
+        result.betaRayleighScale += RayleighShape(wavelength) / RayleighShape(550.0) /
+                                    static_cast<double>(spectralSamples);
+        result.ozoneCrossSection += OzoneCrossSection(wavelength) / static_cast<double>(spectralSamples);
+        const double solarPosition = (wavelength - 360.0);
         const auto solarLower = static_cast<size_t>(solarPosition);
         const double solarFraction = solarPosition - static_cast<double>(solarLower);
         result.sunIrradianceScale +=
-            std::lerp(kSolarIrradiance[solarLower], kSolarIrradiance[solarLower + 1], solarFraction) * 0.2;
+            std::lerp(kSolarIrradiance[solarLower], kSolarIrradiance[solarLower + 1], solarFraction) /
+            static_cast<double>(spectralSamples);
     }
-    for (int sample = 0; sample < 25; ++sample)
-        result.cie += Cie1931Xyz(centre - 11.5 + sample) / 25.0;
+    result.cie = {};
+    for (int sample = 0; sample < spectralSamples; ++sample)
+        result.cie += Cie1931Xyz(centre - 12.0 + sample) / static_cast<double>(spectralSamples);
     return result;
 }
