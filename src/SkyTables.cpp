@@ -549,13 +549,13 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 
 namespace {
 
-    glm::dvec3 Cie2006Xyz(double wavelengthNm) {
-        if (wavelengthNm < 390.0 || wavelengthNm > 830.0)
+    glm::dvec3 Cie1931Xyz(double wavelengthNm) {
+        if (wavelengthNm < 360.0 || wavelengthNm > 830.0)
             return {};
-        const double position = (0.2 * wavelengthNm) - 78.0;
+        const double position = wavelengthNm - 360.0;
         const auto lower = static_cast<size_t>(position);
-        const size_t upper = std::min(lower + 1, kCie2006Xyz.size() - 1);
-        return glm::mix(kCie2006Xyz[lower], kCie2006Xyz[upper], position - static_cast<double>(lower));
+        const size_t upper = std::min(lower + 1, kCie1931Xyz.size() - 1);
+        return glm::mix(kCie1931Xyz[lower], kCie1931Xyz[upper], position - static_cast<double>(lower));
     }
 
     double OzoneCrossSection(double wavelengthNm) {
@@ -589,6 +589,6 @@ SpectralBand ComputeSpectralBand(int band) {
             std::lerp(kSolarIrradiance[solarLower], kSolarIrradiance[solarLower + 1], solarFraction) * 0.2;
     }
     for (int sample = 0; sample < 25; ++sample)
-        result.cie += Cie2006Xyz(centre - 11.5 + sample) / 25.0;
+        result.cie += Cie1931Xyz(centre - 11.5 + sample) / 25.0;
     return result;
 }
