@@ -14,9 +14,12 @@ try {
     $cppFiles = @(Get-ChildItem -LiteralPath 'src' -Filter '*.cpp' -File | ForEach-Object { $_.FullName })
     if ($cppFiles.Count -eq 0) { throw 'No C++ source files were found under src.' }
     clang-format --style=file -i $cppFiles
-    if (-not (Test-Path -LiteralPath 'build/build.ninja')) { & $cmakeExecutable.Source --preset windows }
-    & $cmakeExecutable.Source --build --preset windows --parallel
     $buildPath = Join-Path $PSScriptRoot 'build'
+    $buildNinjaPath = Join-Path $buildPath 'build.ninja'
+    $compileCommandsPath = Join-Path $buildPath 'compile_commands.json'
+    if (-not (Test-Path -LiteralPath $buildNinjaPath) -or -not (Test-Path -LiteralPath $compileCommandsPath)) { & $cmakeExecutable.Source --preset windows }
+    if (-not (Test-Path -LiteralPath $compileCommandsPath)) { throw 'CMake did not generate build/compile_commands.json.' }
+    & $cmakeExecutable.Source --build --preset windows --parallel
     $clangTidyExecutable = Get-Command clang-tidy -CommandType Application | Select-Object -First 1
     $maxParallelTidyProcesses = [Math]::Min($cppFiles.Count, [Environment]::ProcessorCount)
     $pendingTidyFiles = [System.Collections.Generic.Queue[string]]::new()
