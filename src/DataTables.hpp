@@ -3,7 +3,6 @@
 #include <array>
 #include <glm/vec3.hpp>
 
-// Source: 20°C, https://iapws.org/public/documents/cMTlA/rindex.pdf
 inline constexpr std::array<double, 17> kWaterIor = {
     1.345625264, 1.343094174, 1.341017536, 1.339284733,
     1.337817055, 1.336557080, 1.335462010, 1.334499349,
@@ -12,7 +11,6 @@ inline constexpr std::array<double, 17> kWaterIor = {
     1.328960647,
 };
 
-// Source: SerdyuchenkoGorshelev5digits.dat, https://igaco-o3.fmi.fi/ACSO/cross_sections.html
 inline constexpr std::array<double, 471> kOzoneCrossSection = {
     7.867290E-27, 6.494940E-27, 3.905860E-27, 3.396930E-27, 2.691570E-27,
     4.899980E-27, 4.183630E-27, 2.415060E-27, 1.529270E-27, 1.740110E-27,
@@ -111,7 +109,6 @@ inline constexpr std::array<double, 471> kOzoneCrossSection = {
     9.257180E-27,
 };
 
-// Source: CIE 018:2019, Table 6, https://doi.org/10.25039/CIE.DS.xvudnb9b
 inline constexpr std::array<glm::dvec3, 471> kCie1931Xyz = {
     glm::dvec3{0.000129900000, 0.0000039170000, 0.000606100000},
     glm::dvec3{0.000145847000, 0.0000043935810, 0.000680879200},
@@ -586,7 +583,6 @@ inline constexpr std::array<glm::dvec3, 471> kCie1931Xyz = {
     glm::dvec3{0.000001251141, 0.0000004518100, 0.000000000000},
 };
 
-// Source: https://www.nlr.gov/grid/solar-resource/spectra
 inline constexpr std::array<double, 471> kSolarIrradiance = {
     1.188E+00, 8.627E-01, 8.526E-01, 1.053E+00, 1.180E+00, 1.024E+00,
     1.356E+00, 1.236E+00, 1.119E+00, 1.215E+00, 1.376E+00, 1.137E+00,

@@ -1,19 +1,6 @@
 Checks: >
   -*,
-  bugprone-*,
   performance-*,
-  clang-analyzer-*,
-  modernize-*,
-  readability-*,
-  -bugprone-easily-swappable-parameters,
-  -modernize-avoid-c-arrays,
-  -modernize-use-trailing-return-type,
-  -modernize-use-std-numbers,
-  -readability-braces-around-statements,
-  -readability-function-cognitive-complexity,
-  -readability-identifier-length,
-  -readability-isolate-declaration,
-  -readability-magic-numbers,
-  -readability-uppercase-literal-suffix
-HeaderFilterRegex: '.*[\\/]Vulkanic[\\/]src[\\/].*'
+HeaderFilterRegex: '^C:/Users/cohen/Vulkanic/src/.*'
+SystemHeaders: false
 WarningsAsErrors: '*'

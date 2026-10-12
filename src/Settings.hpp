@@ -77,12 +77,6 @@ struct InputConfig {
     float mouseSensitivity = 0.0035f, polarizerRotateSpeed = 1.5f;
 };
 
-/// Star-field appearance controls. Probability is the fraction of grid cells
-/// containing a star and must be in [0, 1].
-struct StarsConfig {
-    float cellProbability = 0.11f;
-};
-
 /// Display exposure and atmospheric parameters for the runtime.
 struct SkyConfig {
     float exposure = 10.0f;
@@ -96,10 +90,10 @@ struct RuntimeConfig {
     InputConfig input{};
     RainbowConfig rainbow{};
     SkyConfig sky{};
-    StarsConfig stars{};
 };
 
-/// The shader samples 17 bands spanning 380 to 780 nm at 25 nm intervals.
+/// Reference wavelengths for interpolated spectral lookup tables, spanning
+/// 380 to 780 nm at 25 nm intervals. The shader samples one wavelength per path.
 inline constexpr int kSpectralBandCount = 17;
 inline constexpr double kSpectralLambdaMinNm = 380.0;
 inline constexpr double kSpectralLambdaStepNm = 25.0;
@@ -107,8 +101,7 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 /// Builds normalized Stokes phase data for one aerosol and each spectral band.
 /// Rows are laid out band-major with one vec4 per angular bin. crossSections
 /// receives the corresponding scattering and extinction cross sections.
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol,
-                                                 std::array<glm::dvec2, kSpectralBandCount>& crossSections);
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
 /// Builds band-major rainbow phase data over [0, pi], including finite-sun blur.
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
@@ -118,8 +111,7 @@ std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbo
 /// bandWeights describe each band's contribution to the displayed radiance.
 /// Bin probabilities and cosine-linear conditional densities minimize the
 /// quadrature estimate of the scalar phase proposal's second moment.
-void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry,
-                       const std::array<double, kSpectralBandCount>& bandWeights);
+void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry, const std::array<double, kSpectralBandCount>& bandWeights);
 
 inline constexpr int kTransmittanceAltitudeBins = 64;
 inline constexpr int kTransmittanceMuBins = 256;
@@ -139,8 +131,8 @@ struct SpectralBand {
     glm::dvec3 cie;
 };
 
-/// Samples source datasets around a band centre and combines their contributions.
-SpectralBand ComputeSpectralBand(int band);
+/// Samples wavelength-dependent source datasets at the requested wavelength.
+SpectralBand ComputeSpectralAtWavelength(double wavelengthNm);
 
 /// Integrates a tabulated phase function over solid angle for normalization.
 inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {

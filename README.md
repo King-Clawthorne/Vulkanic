@@ -8,11 +8,11 @@ Atmospheric light changes with wavelength. A convincing sky renderer must accoun
 
 ## Task
 
-Vulkanic brings these effects together in an interactive renderer. It models 17 wavelength bands from 380 to 780 nm, builds lookup tables for atmospheric and particle scattering, and traces sky and optional rain-volume contributions on the GPU.
+Vulkanic brings these effects together in an interactive renderer. It samples one random wavelength from 380 to 780 nm for each path sample, interpolating lookup tables built at 17 reference wavelengths. It traces sky and optional rain-volume contributions on the GPU.
 
 ## Action
 
-The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering, the solar disk, optional rainbow scattering, and procedural stars. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
+The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering, the solar disk, and optional rainbow scattering at the sampled wavelength. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
 Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, rain, polarization, and camera-dependent rays each frame.
 
@@ -48,6 +48,20 @@ To build manually:
 cmake --preset windows
 cmake --build --preset windows --parallel
 ```
+
+## Documentation
+
+Doxygen is optional. Install Doxygen, then generate the C++ and shader reference using either command:
+
+```powershell
+doxygen Doxyfile
+```
+
+```powershell
+cmake --build --preset windows --target docs
+```
+
+The HTML documentation is written to `build/docs/html/index.html`.
 
 ## Run
 
