@@ -14,6 +14,5 @@
 *.md       text
 *.txt      text
 
-# Generated shader binaries are not text.
 *.spv      binary
 *.spv.inc  text

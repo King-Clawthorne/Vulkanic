@@ -1,5 +1,3 @@
-# Doxygen configuration for the Vulkanic C++ renderer and GLSL shaders.
-
 PROJECT_NAME           = "Vulkanic"
 PROJECT_BRIEF          = "Spectral sky path tracer"
 OUTPUT_DIRECTORY       = build/docs
