@@ -19,8 +19,7 @@
         "CMAKE_CXX_COMPILER": "clang-cl"
       },
       "warnings": {
-        "deprecated": true,
-        "policy": true
+        "deprecated": true
       }
     }
   ],
