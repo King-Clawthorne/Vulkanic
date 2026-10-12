@@ -997,39 +997,34 @@ void set_wavelength(float wavelengthNm) {
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) { return; }
-    uint pixelSeed = Hash(pixel.x + pixel.y * 9781u), frameSampleBase = uint(pc.frame.x) * uint(max(1.0, pc.forward.w));
+    uint pixelSeed = Hash(pixel.x + pixel.y * 9781u), frameSampleBase = uint(pc.frame.x);
     uint rngScramble = pixelSeed ^ 0x5bd1e995u;
-    uint samplesPerPixel = uint(pc.forward.w);
     bool polarized = pc.polarizer.x > 0.5;
     float linAmp = cos(2.0 * pc.polarizer.z);
     vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
     vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
     vec3 accumulatedXyz = vec3(0.0);
 
-    for (uint localSample = 0; localSample < samplesPerPixel; ++localSample) {
-        uint sampleNumber = frameSampleBase + localSample;
-        uint sobolIndex = sampleNumber;
-        vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
-        float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
-        set_wavelength(wavelengthNm);
-        vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
-        vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-        vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
-        vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
-        beam_basis(-viewDir, na, nb);
-        vec4 rainbow = vec4(0.0);
-        vec2 rainHit = (SpecializedRainbow && sceneData.rainbowCenterEnabled.w > 0.5 && sceneData.rainbowOptical.x > 0.0) ? rain_segment(vec3(0.0), viewDir) : vec2(0.0);
-        if (subgroupAny(rainHit.y > rainHit.x)) { rainbow = integrate_rainbow(viewDir, sun, sampleNumber, pixelSeed); }
-        gRngIndex = sobolIndex;
-        gRngScramble = rngScramble;
-        vec4 sky = render_sky(viewDir, sun);
-        vec4 total = sky + rainbow;
-        float radiance = polarized ? 0.5 * dot(analyzer, vec4_reframe(total, na, nb, frameX)) : total.x;
-        vec3 sampleXyz = max(radiance, 0.0) * gCieXyz.xyz * (LAMBDA_RANGE_NM / LAMBDA_STEP_NM);
-        accumulatedXyz += sampleXyz;
-    }
+    uint sampleNumber = frameSampleBase;
+    uint sobolIndex = sampleNumber;
+    vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
+    float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
+    set_wavelength(wavelengthNm);
+    vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
+    vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
+    vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
+    beam_basis(-viewDir, na, nb);
+    vec4 rainbow = vec4(0.0);
+    vec2 rainHit = (SpecializedRainbow && sceneData.rainbowCenterEnabled.w > 0.5 && sceneData.rainbowOptical.x > 0.0) ? rain_segment(vec3(0.0), viewDir) : vec2(0.0);
+    if (subgroupAny(rainHit.y > rainHit.x)) { rainbow = integrate_rainbow(viewDir, sun, sampleNumber, pixelSeed); }
+    gRngIndex = sobolIndex;
+    gRngScramble = rngScramble;
+    vec4 sky = render_sky(viewDir, sun);
+    vec4 total = sky + rainbow;
+    float radiance = polarized ? 0.5 * dot(analyzer, vec4_reframe(total, na, nb, frameX)) : total.x;
+    vec3 xyz = max(radiance, 0.0) * gCieXyz.xyz * (LAMBDA_RANGE_NM / LAMBDA_STEP_NM);
 
-    vec3 xyz = accumulatedXyz / float(max(1u, samplesPerPixel));
     uint index = pixel.y * pc.imageSize.x + pixel.x;
     vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
     xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);

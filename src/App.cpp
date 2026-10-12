@@ -26,20 +26,21 @@
 
 struct CameraController {
 	struct View {
-		float yaw, pitch;
+		glm::vec2 angles;
 		bool polarizerEnabled;
 		float polarizerAngle, polarizerEllipticity;
 		friend bool operator==(const View&, const View&) = default;
 	};
 
-	float yaw = 0.0f, pitch = 0.0f, polarizerAngle = 0.0f, ellipticity = kPi * 0.125f;
+	glm::vec2 angles = { 0.0f, 0.0f };
+	float polarizerAngle = 0.0f, ellipticity = kPi * 0.125f;
 	double lastMouseX = 0.0, lastMouseY = 0.0;
 	bool mouseLookActive = false, polarizerEnabled = false, elliptical = false;
 
 	void Reset(const RuntimeConfig& config) {
 		const glm::vec3 delta = config.camera.initialLookAt - config.camera.initialPosition;
-		yaw = std::atan2(delta.x, delta.z);
-		pitch = std::atan2(delta.y, std::hypot(delta.x, delta.z));
+		angles.x = std::atan2(delta.x, delta.z);
+		angles.y = std::atan2(delta.y, std::hypot(delta.x, delta.z));
 	}
 
 	void OnKeyPress(int key, const RuntimeConfig& config) {
@@ -63,13 +64,14 @@ struct CameraController {
 		}
 
 		const float dt = static_cast<float>(std::min(deltaSeconds, 0.1));
+
 		double x = 0.0, y = 0.0;
 		glfwGetCursorPos(window, &x, &y);
 		const bool mouseLook = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
 		if (mouseLook && mouseLookActive) {
-			yaw += static_cast<float>(x - lastMouseX) * config.input.mouseSensitivity;
-			pitch -= static_cast<float>(y - lastMouseY) * config.input.mouseSensitivity;
+			angles.x += static_cast<float>(x - lastMouseX) * config.input.mouseSensitivity;
+			angles.y -= static_cast<float>(y - lastMouseY) * config.input.mouseSensitivity;
 		}
 
 		mouseLookActive = mouseLook;
@@ -77,7 +79,7 @@ struct CameraController {
 		lastMouseY = y;
 
 		const float maxPitch = config.camera.maxPitchDegrees * kPi / 180.0f;
-		pitch = std::clamp(pitch, -maxPitch, maxPitch);
+		angles.y = std::clamp(angles.y, -maxPitch, maxPitch);
 
 		const float axis = static_cast<float>(glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) - static_cast<float>(glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS);
 		const float rotation = axis * config.input.polarizerRotateSpeed * dt;
@@ -89,7 +91,7 @@ struct CameraController {
 		}
 	}
 
-	[[nodiscard]] View GetView() const { return { .yaw = yaw, .pitch = pitch, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f }; }
+	[[nodiscard]] View GetView() const { return { .angles = angles, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f }; }
 };
 
 constexpr uint32_t kFramesInFlight = 2;
@@ -154,7 +156,9 @@ public:
 		CreatePipeline();
 		CreateFrameResources();
 		MessageLoop();
+
 		m_device.waitIdle();
+
 		return 0;
 	}
 
@@ -300,7 +304,7 @@ private:
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-		m_window = glfwCreateWindow(static_cast<int>(m_config.render.width), static_cast<int>(m_config.render.height), "Vulkanic", nullptr, nullptr);
+		m_window = glfwCreateWindow(static_cast<int>(m_config.render.resolution.x), static_cast<int>(m_config.render.resolution.y), "Vulkanic", nullptr, nullptr);
 		if (m_window == nullptr) {
 			const char* description = nullptr;
 			const int error = glfwGetError(&description);
@@ -378,7 +382,7 @@ private:
 		                           .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
 		                           .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
 		                           .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
-		                           .set_desired_extent(m_config.render.width, m_config.render.height)
+		                           .set_desired_extent(m_config.render.resolution.x, m_config.render.resolution.y)
 		                           .set_desired_min_image_count(kFramesInFlight)
 		                           .build();
 
@@ -450,18 +454,18 @@ private:
 
 		const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
 		const float aspect = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
-		const float fx = std::sin(view.yaw) * std::cos(view.pitch);
-		const float fy = std::sin(view.pitch);
-		const float fz = std::cos(view.yaw) * std::cos(view.pitch);
-		const float rx = std::cos(view.yaw);
-		const float rz = -std::sin(view.yaw);
+		const float fx = std::sin(view.angles.x) * std::cos(view.angles.y);
+		const float fy = std::sin(view.angles.y);
+		const float fz = std::cos(view.angles.x) * std::cos(view.angles.y);
+		const float rx = std::cos(view.angles.x);
+		const float rz = -std::sin(view.angles.x);
 
 		const PushConstants constants {
-			.forward = { fx, fy, fz, static_cast<float>(m_config.render.samplesPerPixel) },
-			.right = { rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0f },
-			.up = { fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0f },
-			.frame = { static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0f },
-			.polarizer = { view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0f },
+			.forward = { fx, fy, fz, 0.0f },
+			.right = { rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0 },
+			.up = { fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0 },
+			.frame = { static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0 },
+			.polarizer = { view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0 },
 			.imageSize = { m_swapchainExtent.width, m_swapchainExtent.height },
 		};
 
