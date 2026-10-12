@@ -92,6 +92,8 @@ uint Hash(uint x) {
 }
 
 const uint SAMPLE_DIMENSIONS = 16u;
+const uint WAVELENGTH_DIMENSION = 2u;
+const uint TRANSPORT_DIMENSION = WAVELENGTH_DIMENSION + 1u;
 const uint SOBOL_DIRECTIONS[512] = uint[512](
     0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
     0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
@@ -555,7 +557,7 @@ float sample_sun_distance(int d, float u, out float pdf) {
 }
 
 void begin_step(int d, int steps) {
-    uint dimension = 2u + 4u * uint(d);
+    uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
     uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
     float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
 
@@ -937,8 +939,9 @@ vec4 integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint scramble) {
     if (!(SpecializedRainbow && sceneData.rainbowCenterEnabled.w > 0.5 && sceneData.rainbowOptical.x > 0.0)) { return result; }
 
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
-        uint sobolIndex = NestedUniformScramble(index * uint(samples) + uint(sampleIndex), Hash(scramble ^ 0xa511e9b3u));
-        uint dimension = 2u;
+        uint sobolIndex = index;
+        uint pathScramble = Hash(scramble ^ uint(sampleIndex) * 0xa511e9b3u);
+        uint dimension = TRANSPORT_DIMENSION;
         vec3 origin = vec3(0.0), direction = viewDir, pathDirections[MAX_SCATTER_ORDER];
         float throughput = 1.0;
         vec4 airPath = vec4(0.0);
@@ -947,7 +950,7 @@ vec4 integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint scramble) {
             vec2 hit = rain_segment(origin, direction);
             float lengthInRain = hit.y - hit.x;
             if (lengthInRain <= 0.0) { break; }
-            float u = SampleFloat(sobolIndex, dimension++, scramble ^ uint(vertex) * 0x68bc21ebu);
+            float u = SampleFloat(sobolIndex, dimension++, pathScramble ^ uint(vertex) * 0x68bc21ebu);
             if (vertex == 0) { u = (float(sampleIndex) + u) / float(samples); }
             
             float pdf;
@@ -969,7 +972,7 @@ vec4 integrate_rainbow(vec3 viewDir, vec3 sun, uint index, uint scramble) {
             }
 
             if (vertex + 1 < orders) {
-                vec3 next = rain_sample_direction(direction, sun, sobolIndex, dimension, scramble);
+                vec3 next = rain_sample_direction(direction, sun, sobolIndex, dimension, pathScramble);
                 throughput /= 0.5 * (rain_direction_pdf(dot(next, direction)) + rain_direction_pdf(dot(next, sun)));
                 origin = p;
                 direction = next;
@@ -1005,9 +1008,9 @@ void main() {
 
     for (uint localSample = 0; localSample < samplesPerPixel; ++localSample) {
         uint sampleNumber = frameSampleBase + localSample;
-        uint shuffledIndex = NestedUniformScramble(sampleNumber, Hash(pixelSeed ^ 0xa511e9b3u));
-        vec2 jitter = vec2(SampleFloat(shuffledIndex, 0u, pixelSeed), SampleFloat(shuffledIndex, 1u, pixelSeed));
-        float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(shuffledIndex, 2u, Hash(pixelSeed ^ 0x7f4a7c15u));
+        uint sobolIndex = sampleNumber;
+        vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
+        float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
         set_wavelength(wavelengthNm);
         vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
         vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -1017,7 +1020,7 @@ void main() {
         vec4 rainbow = vec4(0.0);
         vec2 rainHit = (SpecializedRainbow && sceneData.rainbowCenterEnabled.w > 0.5 && sceneData.rainbowOptical.x > 0.0) ? rain_segment(vec3(0.0), viewDir) : vec2(0.0);
         if (subgroupAny(rainHit.y > rainHit.x)) { rainbow = integrate_rainbow(viewDir, sun, sampleNumber, pixelSeed); }
-        gRngIndex = shuffledIndex;
+        gRngIndex = sobolIndex;
         gRngScramble = rngScramble;
         vec4 sky = render_sky(viewDir, sun);
         vec4 total = sky + rainbow;

@@ -49,14 +49,13 @@ struct SkySpectralConfig {
 /// Geometry, optical coefficients, and integration quality for the rain volume.
 /// The radii and distance are in metres; droplet size is in micrometres.
 struct RainbowConfig {
-    uint32_t enabled = 0;
+    uint32_t enabled = 1;
     float distance = 4000.0f, height = 0.0f;
     glm::vec3 radii{6000.0f, 6000.0f, 1500.0f};
     float edgeSoftness = 0.15f, scatteringCoefficient = 5.0e-4f, extinctionCoefficient = 5.0e-4f;
     float effectiveRadiusMicrometers = 500.0f, effectiveVariance = 0.08f;
     uint32_t angleBins = 4097, viewSteps = 24, includeSecondary = 1;
     uint32_t scatteringOrders = 2, multipleScatteringSamples = 1, multipleScatteringSteps = 8;
-
     [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
 };
 
@@ -138,8 +137,11 @@ SpectralBand ComputeSpectralAtWavelength(double wavelengthNm);
 inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);
+    
     double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i)
+    for (int i = 0; i + 1 < bins; ++i) {
         integral += (phase[i].x * std::sin(i * dTheta)) + (phase[i + 1].x * std::sin((i + 1) * dTheta));
+    }
+
     return 0.25 * integral * dTheta;
 }
