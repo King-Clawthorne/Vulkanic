@@ -83,7 +83,7 @@ The window title reports FPS and frame time. Controls:
 ## Project layout
 
 - `src/` - Vulkan renderer and CPU-side sky/scattering tables
-- `shaders/pathTracer.comp` - Vulkan compute shader
+- `shaders/Main.comp` - Vulkan compute shader
 - `build.ps1` - clean configure and build helper
 - `CMakeLists.txt` - dependencies, shader compilation, and executable target
 
