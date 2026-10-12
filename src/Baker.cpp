@@ -70,7 +70,7 @@ namespace {
 	/// Runs an integer-indexed loop with the standard parallel execution policy.
 	/// @tparam Body Callable invoked once for each index.
 	/// @param count Number of indices in the half-open range [0, count).
-	/// @param body Work to perform for each index; calls may run concurrently.
+	/// @param body Work to perform for each index. Calls may run concurrently.
 	template <class Body>
 	void ParallelFor(int count, Body body) {
 		const auto indices = std::views::iota(0, count);
@@ -543,7 +543,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 namespace {
 	/// Samples the CIE 1931 matching functions on their 1 nm grid.
 	/// @param wavelengthNm Wavelength in nanometres.
-	/// @return Interpolated XYZ matching values, or zero outside 360–830 nm.
+	/// @return Interpolated XYZ matching values, or zero outside 360 to 830 nm.
 	glm::dvec3 Cie1931Xyz(double wavelengthNm) {
 		if (wavelengthNm < 360.0 || wavelengthNm > 830.0) return { };
 		const double position = wavelengthNm - 360.0;
@@ -553,7 +553,7 @@ namespace {
 	}
 
 	/// Samples the tabulated ozone cross section on its 1 nm wavelength grid.
-	/// @param wavelengthNm Wavelength in nanometres; the table range is used at the ends.
+	/// @param wavelengthNm Wavelength in nanometres. The table range is used at the ends.
 	/// @return Interpolated ozone cross section.
 	double OzoneCrossSection(double wavelengthNm) {
 		const double position = std::clamp(wavelengthNm - 360.0, 0.0, 469.999);

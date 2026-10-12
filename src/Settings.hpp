@@ -18,14 +18,14 @@
 inline constexpr float kPi = std::numbers::pi_v<float>;
 
 /// One aerosol population used by the atmospheric Mie-scattering model.
-/// Scale heights are in metres; meanRadiusMicrometers is in micrometres.
+/// Scale heights are in metres. meanRadiusMicrometers is in micrometres.
 struct AerosolConfig {
     float beta, scaleHeight, refractiveIndexReal, refractiveIndexImag, meanRadiusMicrometers, sigma;
     [[nodiscard]] friend bool operator==(const AerosolConfig&, const AerosolConfig&) = default;
 };
 
 /// Parameters used to build atmospheric lookup tables and shader constants.
-/// Sun direction is in world space; radii and scale heights are in metres.
+/// Sun direction is in world space. Radii and scale heights are in metres.
 struct SkySpectralConfig {
     float betaRayleigh550 = 13.5e-6f;
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
@@ -52,7 +52,7 @@ struct SkySpectralConfig {
 };
 
 /// Geometry, optical coefficients, and integration settings for the rain volume.
-/// Radii and distance are in metres; droplet size is in micrometres.
+/// Radii and distance are in metres. Droplet size is in micrometres.
 struct RainbowConfig {
     uint32_t enabled = 0;
     float distance = 4000.0f, height = 0.0f;
@@ -70,7 +70,7 @@ struct RenderConfig {
 };
 
 /// Initial camera pose and vertical field-of-view limits.
-/// Position and look-at coordinates are in world-space metres; angles are in degrees.
+/// Position and look-at coordinates are in world-space metres. Angles are in degrees.
 struct CameraConfig {
     glm::vec3 initialPosition{0.0f, 2.0f, -10.0f};
     glm::vec3 initialLookAt{0.0f, 0.5f, 0.0f};
@@ -119,7 +119,7 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, i
 std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
 /// Appends a normalized angular sampling CDF for a band-major phase table.
-/// @param table Phase data to sample from; the CDF data is appended to this vector.
+/// @param table Phase data to sample from. The CDF data is appended to this vector.
 /// @param bins Number of angular bins in each phase row.
 /// @param firstEntry Offset of the first phase entry for the selected table.
 /// @param bandWeights Relative displayed-radiance contribution of each spectral band.
@@ -143,11 +143,11 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 /// Evaluates the piecewise-linear relative ozone density profile used by the LUT.
 /// @param altitude Altitude above the ground, in metres.
 /// @return Nonnegative profile value, peaking at 25 km and reaching zero outside
-/// the 10–40 km interval.
+/// the 10 to 40 km interval.
 inline double OzoneProfile(double altitude) { return std::max(0.0, std::min(altitude / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - altitude / 15000.0)); }
 
 /// Wavelength-dependent values used to populate one shader spectral band.
-/// betaRayleighScale is relative to 550 nm; the remaining fields hold the ozone
+/// betaRayleighScale is relative to 550 nm. The remaining fields hold the ozone
 /// cross section, solar irradiance scale, and CIE XYZ matching values.
 struct SpectralBand {
     double betaRayleighScale, ozoneCrossSection, sunIrradianceScale;

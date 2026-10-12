@@ -116,7 +116,7 @@ constexpr uint32_t kPathTracerSpirv[] = {
 
 /// Uniform-buffer payload shared with the compute shader.
 ///
-/// Members are packed into 16-byte vectors to match the shader's std140 layout;
+/// Members are packed into 16-byte vectors to match the shader's std140 layout.
 /// the static assertions below guard the offsets and total size.
 struct alignas(16) SceneData {
 	glm::vec4 skySpectralParams; ///< 550 nm Rayleigh coefficient, first aerosol beta, reserved, and sun radiance.
@@ -173,7 +173,7 @@ public:
 	}
 
 	/// Initializes the application and runs until the window closes.
-	/// @return Zero on a normal exit; nonzero if window or Vulkan setup fails.
+	/// @return Zero on a normal exit. Nonzero if window or Vulkan setup fails.
 	int Run() {
 		m_camera.Reset(m_config);
 		if (!CreateWindowAndShow()) return 1;
@@ -198,7 +198,7 @@ private:
 	/// @param window GLFW window that received the event.
 	/// @param key GLFW key code.
 	/// @param scancode Platform-specific key code, unused here.
-	/// @param action GLFW key action; only presses are handled.
+	/// @param action GLFW key action. Only presses are handled.
 	/// @param mods Active GLFW modifier flags, unused here.
 	static void KeyCallback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) {
 		auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
@@ -357,7 +357,7 @@ private:
 	}
 
 	/// Creates the Vulkan instance, surface, physical device, logical device, and queues.
-	/// @return Whether surface creation succeeded; unsupported Vulkan requirements throw.
+	/// @return Whether surface creation succeeded. Unsupported Vulkan requirements throw.
 	bool CreateVulkan() {
 		m_selectedInstance = vkb::InstanceBuilder { }
 								 .set_app_name("Vulkan Path Tracer")
@@ -409,7 +409,7 @@ private:
 	/// Allocates a VMA buffer with the requested Vulkan usage and memory flags.
 	/// @param size Buffer size in bytes.
 	/// @param usage Vulkan buffer usage flags.
-	/// @param flags VMA allocation flags; defaults to sequential host writes.
+	/// @param flags VMA allocation flags. Defaults to sequential host writes.
 	/// @return The allocated buffer.
 	[[nodiscard]] vma::raii::Buffer
 	CreateBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vma::AllocationCreateFlags flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite) const {
@@ -654,7 +654,7 @@ private:
 	std::optional<CameraController::View> m_lastView;
 };
 
-/// Application entry point; reports setup and runtime exceptions to stderr.
+/// Application entry point. Reports setup and runtime exceptions to stderr.
 int main() {
 	try {
 		App app;
