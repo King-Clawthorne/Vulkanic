@@ -20,6 +20,8 @@ Startup preprocessing integrates atmospheric density columns and computes wavele
 
 The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.
 
+![Vulkanic renderer output showing the solar disk and atmospheric scattering](assets/renderer-result.png)
+
 ## Requirements
 
 - Windows, CMake 4.4 or newer, Ninja, Clang 20 or newer with `clang-cl`, and a Vulkan SDK with `glslc`
