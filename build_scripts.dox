@@ -1,47 +1,22 @@
-/// @file build_scripts.dox
-/// @brief Build and documentation workflow reference
+/// @file CMakeLists.txt
+/// @brief Configures the Vulkanic renderer, shader compilation, and documentation targets.
 ///
-/// This file documents the repository's Windows build helper and the equivalent
-/// CMake commands. The helper is implemented in @ref build.ps1, and the build
-/// and documentation targets are declared in @ref CMakeLists.txt.
+/// Requires CMake 4.4 or newer. The Windows preset uses Ninja and Clang 20 or
+/// newer with `clang-cl`; the Vulkan SDK must provide `glslc` for the Vulkan
+/// 1.4 shader target.
 ///
-/// @section build_ps1 Windows build helper
+/// @par Source
+/// @verbinclude CMakeLists.txt
+
+/// @file build.ps1
+/// @brief Formats, configures, builds, and analyzes the Vulkanic Windows project.
 ///
-/// Run `build.ps1` from PowerShell at the repository root:
+/// Requires CMake 4.4 or newer, `clang-format`, and `clang-tidy` on `PATH`. The
+/// Windows preset also requires Ninja, `clang-cl`, and a Vulkan SDK with `glslc`.
+/// It formats the top-level `.cpp` files in `src/`, configures when either
+/// `build/build.ninja` or `build/compile_commands.json` is missing, builds in
+/// parallel, and runs `clang-tidy` on each `.cpp` file using that compilation
+/// database.
 ///
-/// @code{.powershell}
-/// ./build.ps1
-/// @endcode
-///
-/// The script formats the top-level C++ source files under `src/`, configures the
-/// `windows` CMake preset when the Ninja build files or compilation database are
-/// missing, builds the preset in parallel, and runs `clang-tidy` on those C++
-/// source files using `build/compile_commands.json`. A formatting, build, or
-/// clang-tidy failure stops the script with an error.
-///
-/// The script requires CMake 4.4 or newer. CMake, `clang-format`, and
-/// `clang-tidy` must be available on `PATH`. The Windows preset also requires
-/// Ninja, `clang-cl`, and a Vulkan SDK with `glslc`.
-///
-/// @section cmake_build Manual CMake build
-///
-/// To configure and build without the PowerShell helper, run:
-///
-/// @code{.powershell}
-/// cmake --preset windows
-/// cmake --build --preset windows --parallel
-/// @endcode
-///
-/// @section docs_build Generate documentation
-///
-/// When Doxygen is installed, generate the HTML reference with either command:
-///
-/// @code{.powershell}
-/// doxygen Doxyfile
-/// @endcode
-///
-/// @code{.powershell}
-/// cmake --build --preset windows --target docs
-/// @endcode
-///
-/// The generated reference is written to `build/docs/html/index.html`.
+/// @par Source
+/// @verbinclude build.ps1

@@ -1,3 +1,24 @@
+<#
+.SYNOPSIS
+Formats, builds, and analyzes the Vulkanic Windows project.
+
+.DESCRIPTION
+Formats the top-level C++ source files under src/ with clang-format. If
+build/build.ninja or build/compile_commands.json is missing, configures the
+windows CMake preset. Builds the preset in parallel, then runs clang-tidy on
+each C++ source file using the compilation database.
+
+Requires CMake 4.4 or newer. clang-format and clang-tidy must be available on
+PATH. The Windows preset also requires Ninja, clang-cl, and a Vulkan SDK with
+glslc.
+
+.EXAMPLE
+.\build.ps1
+#>
+
+# @file build.ps1
+# @brief Runs the Vulkanic Windows format, build, and analysis workflow.
+
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 Set-StrictMode -Version Latest
