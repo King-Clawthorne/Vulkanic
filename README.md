@@ -39,7 +39,7 @@ From PowerShell, run:
 ```
 
 The script builds the Windows GPU executable at `build/Vulkanic.exe`.
-It also regenerates the Doxygen HTML documentation at `build/docs/html/index.html`; Doxygen must be installed and available on `PATH`.
+It also regenerates the Doxygen HTML documentation at `build/docs/html/index.html`. Doxygen must be installed and available on `PATH`.
 
 CMake's CTest integration can create a `build/Testing` directory when tests
 are run. This project does not currently define tests, so that directory is
