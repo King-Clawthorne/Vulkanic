@@ -12,7 +12,8 @@
 /// @brief Formats, configures, builds, and analyzes the Vulkanic Windows project.
 ///
 /// Requires CMake 4.4 or newer, `clang-format`, and `clang-tidy` on `PATH`. The
-/// Windows preset also requires Ninja, `clang-cl`, and a Vulkan SDK with `glslc`.
+/// script automatically uses the only configured preset, `windows`, which
+/// requires Ninja, `clang-cl`, and a Vulkan SDK with `glslc`.
 /// It formats the top-level `.cpp` files in `src/`, configures when either
 /// `build/build.ninja` or `build/compile_commands.json` is missing, builds in
 /// parallel, and runs `clang-tidy` on each `.cpp` file using that compilation
