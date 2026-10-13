@@ -95,10 +95,10 @@ Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 
 ```powershell
-$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
+$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --duration=20 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
 ```
 
-This path matches Nsight Systems 2026.3.2 on the benchmark machine; adjust the version or install path if needed. Keep the camera and scene fixed during capture, then close the window to finish writing `build/vulkanic-benchmark.nsys-rep`. The reported values come from the GPU timestamps in Nsight Systems' Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
+This path matches Nsight Systems 2026.3.2 on the benchmark machine; adjust the version or install path if needed. The capture lasts 20 seconds, then Nsight Systems finalizes `build/vulkanic-benchmark.nsys-rep` and terminates the launched app. Keep the camera and scene fixed during that interval. The reported values come from the GPU timestamps in Nsight Systems Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
 
 ## Project layout
 
