@@ -1,17 +1,18 @@
 <#
 .SYNOPSIS
-Formats, builds, and analyzes the Vulkanic Windows project.
+Formats, builds, documents, and analyzes the Vulkanic Windows project.
 
 .DESCRIPTION
 Formats the top-level C++ source files under src/ with clang-format.
 Automatically uses the only configured CMake preset, windows, for configuration
 and building. Configures it when either build/build.ninja or
-build/compile_commands.json is missing, builds in parallel, then runs
-clang-tidy on each C++ source file using the compilation database.
+build/compile_commands.json is missing, builds in parallel, generates the
+Doxygen documentation, then runs clang-tidy on each C++ source file using the
+compilation database.
 
-Requires CMake 4.4 or newer. clang-format and clang-tidy must be available on
-PATH. The Windows preset also requires Ninja, clang-cl, and a Vulkan SDK with
-glslc.
+Requires CMake 4.4 or newer. Doxygen, clang-format, and clang-tidy must be
+available on PATH. The Windows preset also requires Ninja, clang-cl, and a
+Vulkan SDK with glslc.
 
 .EXAMPLE
 .\build.ps1
@@ -23,6 +24,8 @@ glslc.
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 Set-StrictMode -Version Latest
+$doxygenExecutable = Get-Command doxygen -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $doxygenExecutable) { throw 'Doxygen is required to generate the documentation. Add it to PATH before running this script.' }
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
@@ -42,6 +45,8 @@ try {
     if (-not (Test-Path -LiteralPath $buildNinjaPath) -or -not (Test-Path -LiteralPath $compileCommandsPath)) { & $cmakeExecutable.Source --preset windows }
     if (-not (Test-Path -LiteralPath $compileCommandsPath)) { throw 'CMake did not generate build/compile_commands.json.' }
     & $cmakeExecutable.Source --build --preset windows --parallel
+    Write-Host 'Generating Doxygen documentation'
+    & $doxygenExecutable.Source Doxyfile
     $clangTidyExecutable = Get-Command clang-tidy -CommandType Application | Select-Object -First 1
     $maxParallelTidyProcesses = [Math]::Min($cppFiles.Count, [Environment]::ProcessorCount)
     $pendingTidyFiles = [System.Collections.Generic.Queue[string]]::new()

@@ -39,6 +39,7 @@ From PowerShell, run:
 ```
 
 The script builds the Windows GPU executable at `build/Vulkanic.exe`.
+It also regenerates the Doxygen HTML documentation at `build/docs/html/index.html`; Doxygen must be installed and available on `PATH`.
 
 CMake's CTest integration can create a `build/Testing` directory when tests
 are run. This project does not currently define tests, so that directory is
@@ -53,7 +54,7 @@ cmake --build --preset windows --parallel
 
 ## Documentation
 
-Doxygen is optional. Install Doxygen, then generate the C++ and shader reference using either command:
+For manual builds, generate the C++ and shader reference with either command:
 
 ```powershell
 doxygen Doxyfile
@@ -79,8 +80,25 @@ The window title reports FPS and frame time. Controls:
 - **[ / ]**: rotate the polarizer
 - **P**: toggle the polarizer
 - **C**: toggle elliptical polarization display
-- **R**: reset the camera and polarization controls
 - **Escape**: close the window
+
+## GPU performance profiling
+
+Measured on October 13, 2026, using the Release build and default 1280 × 720 scene settings. The view remained stationary with the default camera. Rain rendering was disabled.
+
+| GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
+| --- | --- | ---: | ---: | ---: | ---: |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 17,838 | 0.843 ms | 0.869 ms | 1.039 ms |
+
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 17,838 measured workloads span 17.3 seconds. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+
+To capture a run, build the app and launch it through the Nsight Systems CLI:
+
+```powershell
+$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
+```
+
+This path matches Nsight Systems 2026.3.2 on the benchmark machine; adjust the version or install path if needed. Keep the camera and scene fixed during capture, then close the window to finish writing `build/vulkanic-benchmark.nsys-rep`. The reported values come from the GPU timestamps in Nsight Systems' Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
 
 ## Project layout
 

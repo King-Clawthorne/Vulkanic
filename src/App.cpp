@@ -51,19 +51,15 @@ struct CameraController {
 	bool polarizerEnabled = false; ///< Whether the polarizer is enabled.
 	bool elliptical = false; ///< Whether polarizer rotation edits ellipticity rather than angle.
 
-	/// Sets the camera orientation to look from the configured position toward its target.
-	/// @param config Runtime settings containing the initial camera position and target.
-	void Reset(const RuntimeConfig& config) {
+	explicit CameraController(const RuntimeConfig& config) {
 		const glm::vec3 delta = config.camera.initialLookAt - config.camera.initialPosition;
 		angles.x = std::atan2(delta.x, delta.z);
 		angles.y = std::atan2(delta.y, std::hypot(delta.x, delta.z));
 	}
 
-	/// Applies one-shot keyboard controls for resetting the view and polarizer modes.
+	/// Applies one-shot keyboard controls for the polarizer modes.
 	/// @param key GLFW key code that was pressed.
-	/// @param config Runtime settings used when resetting the camera.
-	void OnKeyPress(int key, const RuntimeConfig& config) {
-		if (key == GLFW_KEY_R) Reset(config);
+	void OnKeyPress(int key) {
 		if (key == GLFW_KEY_P) polarizerEnabled = !polarizerEnabled;
 		if (key == GLFW_KEY_C) elliptical = !elliptical;
 	}
@@ -161,6 +157,9 @@ struct PushConstants {
 /// Owns the window, Vulkan objects, scene buffers, and render loop.
 class App {
 public:
+	App()
+		: m_camera(m_config) { }
+
 	/// Waits for outstanding device work and releases the GLFW window.
 	~App() {
 		if (*m_device) vkDeviceWaitIdle(*m_device);
@@ -175,7 +174,6 @@ public:
 	/// Initializes the application and runs until the window closes.
 	/// @return Zero on a normal exit. Nonzero if window or Vulkan setup fails.
 	int Run() {
-		m_camera.Reset(m_config);
 		if (!CreateWindowAndShow()) return 1;
 		if (!CreateVulkan()) return 1;
 
@@ -203,7 +201,7 @@ private:
 	static void KeyCallback(GLFWwindow* window, int key, [[maybe_unused]] int scancode, int action, [[maybe_unused]] int mods) {
 		auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
 		if (app == nullptr || action != GLFW_PRESS) return;
-		app->m_camera.OnKeyPress(key, app->m_config);
+		app->m_camera.OnKeyPress(key);
 	}
 
 	/// Packs configured atmospheric, spectral, and rainbow values for the shader.
