@@ -31,7 +31,6 @@ const float LAMBDA_RANGE_NM = 400.0;
 const float LAMBDA_STEP_NM = 25.0;
 const float GOLDEN_ANGLE = 2.39996322972865332;
 const int LUT_ALT = 64, LUT_MU = 256;
-const int SUN_DISTANCE_BINS = 16;
 
 int gBandLower, gBandUpper;
 float gBandFraction, gWavelengthNm;
@@ -259,9 +258,7 @@ struct Level {
     vec4 air, camDepth, depth0;
     vec2 dirJitter;
     vec4 distanceRates, distanceWeights;
-    float sunDistanceValues[SUN_DISTANCE_BINS + 1];
-    bool sunDistanceProposal;
-    float span, start, stepWeight, sampleWeight, sunDistanceCenter;
+    float span, start, stepWeight, sampleWeight;
     int stepIndex, sampleIndex;
     uint scramble;
     vec4 result, angular;
@@ -409,83 +406,6 @@ float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
     return t;
 }
 
-float sun_distance_node(int d, int i) {
-    float x = float(i) / float(SUN_DISTANCE_BINS);
-    if (S[d].sunDistanceCenter > 0.0) {
-        float center = S[d].sunDistanceCenter;
-        if (i <= SUN_DISTANCE_BINS / 2) {
-            float t = 1.0 - 2.0 * x;
-            return center * (1.0 - t * t);
-        }
-
-        float t = 2.0 * x - 1.0;
-        return center + (1.0 - center) * t * t;
-    }
-
-    if (S[d].distanceRates.y > 1.0) return x * x;
-    if (S[d].distanceRates.y < -1.0) return 1.0 - (1.0 - x) * (1.0 - x);
-    return x;
-}
-
-void prepare_sun_distance(int d, vec3 sun) {
-    float integral = 0.0, maximumLogValue = -1.0e30;
-    S[d].sunDistanceCenter = -1.0;
-    float closest = -dot(S[d].org, S[d].dir) - S[d].start;
-    vec3 heights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
-
-    vec3 weights = S[d].distanceWeights.yzw;
-    float height = dot(weights, heights) / max(dot(weights, vec3(1.0)), 1.0e-30);
-    if (closest > 0.0 && closest < S[d].span && height > 0.0 && S[d].span * S[d].span > 100.0 * sceneData.skyRadiiScaleHeights.x * height) S[d].sunDistanceCenter = closest / S[d].span;
-
-    ScatterGeom geometry = scatter_geometry(-sun, -S[d].dir);
-    float weight = gSpectralBand.y * length(gCieXyz.xyz);
-    vec3 scatteringCoefficients = vec3(gSpectralBand.x * geometry.rayleigh[0][0], gMieBand.y * mie_mueller(geometry, 0)[0][0], gMieBand.w * mie_mueller(geometry, 1)[0][0]);
-
-    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
-        vec3 p = S[d].org + S[d].dir * (S[d].start + sun_distance_node(d, i) * S[d].span);
-        float logValue = -1.0e30;
-
-        if (ray_sphere(p, sun, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
-            vec4 depth = max(S[d].depth0 - sun_air_depth(p, S[d].dir), vec4(0.0)) + sun_air_depth(p, sun);
-            vec3 density = air_density(p).xyw;
-            float scattering = dot(scatteringCoefficients, density);
-            float tau = gSpectralBand.x * depth.x + gMieBand.x * depth.y + gMieBand.z * depth.w;
-            if (weight > 0.0 && scattering > 0.0) logValue = log(weight * scattering) - max(tau, 0.0);
-        }
-
-        S[d].sunDistanceValues[i] = logValue;
-        maximumLogValue = max(maximumLogValue, logValue);
-    }
-
-    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) {
-        float value = maximumLogValue > -1.0e29 ? exp(S[d].sunDistanceValues[i] - maximumLogValue) : 0.0;
-        S[d].sunDistanceValues[i] = value;
-        if (i > 0) integral += 0.5 * (S[d].sunDistanceValues[i - 1] + value) * (sun_distance_node(d, i) - sun_distance_node(d, i - 1));
-    }
-
-    for (int i = 0; i <= SUN_DISTANCE_BINS; ++i) S[d].sunDistanceValues[i] = integral > 1.0e-30 ? 0.1 + 0.9 * S[d].sunDistanceValues[i] / integral : 1.0;
-}
-
-float sample_sun_distance(int d, float u, out float pdf) {
-    for (int i = 0; i < SUN_DISTANCE_BINS; ++i) {
-        float left = sun_distance_node(d, i), right = sun_distance_node(d, i + 1);
-        float a = S[d].sunDistanceValues[i], b = S[d].sunDistanceValues[i + 1];
-        float mass = 0.5 * (a + b) * (right - left);
-
-        if (u < mass || i == SUN_DISTANCE_BINS - 1) {
-            float target = clamp(u / (right - left), 0.0, 0.5 * (a + b));
-            float fraction = clamp(2.0 * target / (a + sqrt(max(a * a + 2.0 * (b - a) * target, 0.0))), 0.0, 1.0);
-            pdf = mix(a, b, fraction);
-            return mix(left, right, fraction);
-        }
-
-        u -= mass;
-    }
-
-    pdf = 1.0;
-    return 1.0;
-}
-
 void begin_step(int d, int steps) {
     uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
     uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
@@ -493,7 +413,7 @@ void begin_step(int d, int steps) {
 
     float pdf;
 
-    float t = S[d].sunDistanceProposal ? sample_sun_distance(d, u, pdf) : sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
+    float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
     S[d].dirJitter = vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
     S[d].stepWeight = S[d].span / (float(steps) * pdf);
     S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
@@ -538,8 +458,6 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             vec3 scattering = max(total.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
             float scatteringSum = dot(scattering, vec3(1.0));
             S[d].distanceWeights = scatteringSum > 1.0e-30 ? vec4(0.1, 0.9 * scattering / scatteringSum) : vec4(1.0, 0.0, 0.0, 0.0);
-            S[d].sunDistanceProposal = d == last;
-            if (S[d].sunDistanceProposal) prepare_sun_distance(d, L);
             S[d].result = vec4(0.0);
             S[d].stepIndex = 0;
             begin_step(d, steps);
