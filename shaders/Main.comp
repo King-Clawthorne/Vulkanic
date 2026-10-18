@@ -1,3 +1,9 @@
+/// @file Main.comp
+/// @brief Vulkan compute shader that samples and accumulates a spectral sky path.
+/// @ingroup compute_shader_reference
+///
+/// The shader evaluates one wavelength sample per pixel dispatch, accumulates
+/// Stokes radiance in XYZ, and writes the tone-mapped result to the output image.
 #version 460
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -219,6 +225,7 @@ void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 f
 vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
 
 /// Geometry and lookup coordinates shared by Rayleigh and Mie scattering.
+/// @ingroup compute_shader_reference
 struct ScatterGeom {
     mat4 rayleigh; ///< Rayleigh Mueller matrix for the current scattering angle.
     vec4 rot; ///< Input and output Stokes-frame rotations, stored as cos(2 theta), sin(2 theta) pairs.
@@ -255,6 +262,7 @@ vec4 scatter_wavelength(ScatterGeom g, vec4 s, vec3 w) {
 }
 
 /// State for one ray segment in the recursive multiple-scattering estimator.
+/// @ingroup compute_shader_reference
 struct Level {
     vec3 org; ///< Origin of the ray segment, in world-space metres.
     vec3 dir; ///< Unit direction of the ray segment.
@@ -320,6 +328,13 @@ float cdf_pdf(int aerosol, float cosTheta) {
     return density * (cdf_at(info.x + bin + 1) - cdf_at(info.x + bin)) / (2.0 * PI * cdf_cosine_width(bin, info.y));
 }
 
+/// Samples a direction from an aerosol phase CDF around the requested axis.
+/// @param aerosol Aerosol table index, zero for fine and one for coarse.
+/// @param axis Direction around which the sampled angle is placed.
+/// @param u Uniform variate used to invert the angular CDF.
+/// @param phi Azimuth angle in radians.
+/// @return Unit direction sampled from the phase proposal.
+/// @ingroup compute_shader_reference
 vec3 cdf_sample(int aerosol, vec3 axis, float u, float phi) {
     ivec2 info = cdf_layout(aerosol);
     int lo = 0, hi = info.y - 1;
@@ -356,6 +371,13 @@ float distance_pdf(float t, float rate) {
     return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / mass;
 }
 
+/// Samples a normalized position from the four-component segment-distance proposal.
+/// @param u Uniform variate selecting a proposal component and position.
+/// @param rates Signed exponential rates for the proposal components.
+/// @param weights Mixture probabilities paired with rates.
+/// @param pdf Receives the full mixture density at the sampled position.
+/// @return Sampled position in [0, 1] along the ray segment.
+/// @ingroup compute_shader_reference
 float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
     float lower = 0.0;
     int component = 3;
@@ -418,6 +440,10 @@ float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
     return t;
 }
 
+/// Draws the next weighted distance sample for one ray segment on the estimator stack.
+/// @param d Active stack depth.
+/// @param steps Number of integration samples assigned to this segment.
+/// @ingroup compute_shader_reference
 void begin_step(int d, int steps) {
     uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
     uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
@@ -440,6 +466,15 @@ vec4 level_value(bool leaf, ScatterGeom g, int d) {
     return stokes_make_physical(S[d].result);
 }
 
+/// Estimates one requested scattering order along a view ray and accumulates it into sky.
+/// @param origin Ray origin in world space.
+/// @param viewDir Unit direction from the camera into the atmosphere.
+/// @param L Unit direction toward the Sun.
+/// @param order Maximum scattering depth for this estimate.
+/// @param viewSteps Integration samples on the primary view segment.
+/// @param secondarySteps Integration samples on each secondary segment.
+/// @param sky Stokes radiance accumulator updated by this estimate.
+/// @ingroup compute_shader_reference
 void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int secondarySteps, inout vec4 sky) {
     int last = clamp(order, 1, STACK) - 1, d = 0;
     S[0].org = origin;
@@ -548,6 +583,11 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
     }
 }
 
+/// Evaluates spectral Stokes radiance for a view direction, including the visible solar disk.
+/// @param viewDir Unit direction from the camera into the atmosphere.
+/// @param L Unit direction toward the Sun.
+/// @return Stokes radiance in the shader's current polarization frame.
+/// @ingroup compute_shader_reference
 vec4 render_sky(vec3 viewDir, vec3 L) {
     vec3 origin = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
     vec4 sky = vec4(0.0);
@@ -572,6 +612,9 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
     return stokes_make_physical(sky);
 }
 
+/// Interpolates the shader's spectral and Mie parameters at one wavelength.
+/// @param wavelengthNm Sample wavelength in nanometres.
+/// @ingroup compute_shader_reference
 void set_wavelength(float wavelengthNm) {
     gWavelengthNm = wavelengthNm;
     float bandPosition = clamp((wavelengthNm - LAMBDA_MIN_NM) / LAMBDA_STEP_NM, 0.0, float(SPECTRAL_BANDS - 1));
@@ -583,6 +626,8 @@ void set_wavelength(float wavelengthNm) {
     gMieBand = mix(sceneData.mieBands[gBandLower], sceneData.mieBands[gBandUpper], gBandFraction);
 }
 
+/// Traces one pixel sample, updates its XYZ running average, and writes display RGB.
+/// @ingroup compute_shader_reference
 void main() {
     uvec2 pixel = gl_GlobalInvocationID.xy;
     if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;

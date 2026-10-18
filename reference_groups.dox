@@ -1,0 +1,19 @@
+/**
+ * @defgroup renderer_settings Renderer settings
+ * @brief Runtime configuration types for the camera, display, input, and sky.
+ */
+
+/**
+ * @defgroup lookup_table_generation Lookup table generation
+ * @brief CPU generated spectral and atmospheric tables consumed by the renderer.
+ */
+
+/**
+ * @defgroup vulkan_runtime Vulkan runtime
+ * @brief Application, Vulkan resources, and the host side of each dispatch.
+ */
+
+/**
+ * @defgroup compute_shader_reference Compute shader reference
+ * @brief GPU shader structures and entry points for spectral sky rendering.
+ */

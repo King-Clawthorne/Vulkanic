@@ -4,6 +4,7 @@
 /// This file connects runtime settings and precomputed scattering tables to the
 /// compute shader, manages per-frame Vulkan resources, and translates camera
 /// and polarizer input into shader parameters.
+/// @ingroup vulkan_runtime
 #include "Settings.hpp"
 #include <VkBootstrap.h>
 #include <vulkan/vulkan_raii.hpp>
@@ -31,6 +32,7 @@
 #include <vk_mem_alloc_raii.hpp>
 
 /// Tracks the view and polarizer controls used by the renderer.
+/// @ingroup vulkan_runtime
 struct CameraController {
 	/// Render-affecting camera and polarizer state for one frame.
 	struct View {
@@ -107,8 +109,10 @@ struct CameraController {
 };
 
 /// Number of command buffers and synchronization slots kept in flight.
+/// @ingroup vulkan_runtime
 constexpr uint32_t kFramesInFlight = 2;
 /// Compute shader SPIR-V embedded by the build from Main.comp.
+/// @ingroup vulkan_runtime
 constexpr uint32_t kPathTracerSpirv[] = {
 #include "Main.comp.spv.inc"
 };
@@ -117,6 +121,7 @@ constexpr uint32_t kPathTracerSpirv[] = {
 ///
 /// Members are packed into 16-byte vectors to match the shader's std140 layout.
 /// The static assertions below guard the offsets and total size.
+/// @ingroup vulkan_runtime
 struct alignas(16) SceneData {
 	glm::vec4 skySpectralParams; ///< 550 nm Rayleigh coefficient, first aerosol beta, reserved, and sun radiance.
 	glm::vec4 skyRadiiScaleHeights; ///< Earth radius, atmosphere radius, Rayleigh scale height, and first aerosol scale height.
@@ -137,9 +142,11 @@ static_assert(offsetof(SceneData, proposalExtinction) == 912);
 static_assert(sizeof(SceneData) == 928);
 
 /// Descriptor types in the binding order expected by Main.comp.
+/// @ingroup vulkan_runtime
 constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
 
 /// Per-dispatch camera, frame, polarizer, and image parameters.
+/// @ingroup vulkan_runtime
 struct PushConstants {
 	glm::vec4 forward; ///< Camera forward direction.
 	glm::vec4 right; ///< Horizontal camera basis scaled by aspect ratio and field of view.
@@ -150,6 +157,7 @@ struct PushConstants {
 };
 
 /// Owns the window, Vulkan objects, scene buffers, and render loop.
+/// @ingroup vulkan_runtime
 class App {
 public:
 	/// Creates the application state and initializes the camera from default settings.
@@ -579,6 +587,7 @@ private:
 	}
 
 	/// Command and synchronization objects associated with one frame slot.
+	/// @ingroup vulkan_runtime
 	struct FrameResources {
 		vk::raii::CommandBuffer commandBuffer { nullptr }; ///< Commands recorded for this frame slot.
 		vk::raii::Semaphore imageAvailable { nullptr }; ///< Signals that a swapchain image can be rendered.
@@ -629,6 +638,7 @@ private:
 
 /// Application entry point. Reports setup and runtime exceptions to stderr.
 /// @return Zero after normal shutdown, or nonzero when initialization or runtime fails.
+/// @ingroup vulkan_runtime
 int main() {
 	try {
 		App app;

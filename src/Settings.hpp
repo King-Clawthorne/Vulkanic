@@ -5,6 +5,8 @@
 ///
 /// Declares the settings shared by the application and the CPU routines that
 /// build the lookup tables consumed by the compute shader.
+/// @ingroup renderer_settings
+/// @ingroup lookup_table_generation
 
 #include <algorithm>
 #include <array>
@@ -15,12 +17,14 @@
 #include <glm/glm.hpp>
 
 /// Single-precision pi used by the renderer and its camera calculations.
+/// @ingroup renderer_settings
 inline constexpr float kPi = std::numbers::pi_v<float>;
 
 /// One aerosol population used by the atmospheric Mie-scattering model.
 ///
 /// Aerosol density decays exponentially with altitude. The radius distribution
 /// is log-normal and the complex refractive index is relative to air.
+/// @ingroup renderer_settings
 struct AerosolConfig {
     float beta; ///< Extinction scale in inverse metres, normalized at the reference Mie band.
     float scaleHeight; ///< Exponential density scale height, in metres.
@@ -35,6 +39,7 @@ struct AerosolConfig {
 
 /// Parameters used to build atmospheric lookup tables and shader constants.
 /// Sun direction is in world space. Radii and scale heights are in metres.
+/// @ingroup renderer_settings
 struct SkyConfig {
     float betaRayleigh550 = 13.5e-6f; ///< Rayleigh scattering coefficient at 550 nm, in inverse metres.
     float earthRadius = 6360e3f; ///< Planet radius, in metres.
@@ -68,12 +73,14 @@ struct SkyConfig {
 };
 
 /// Output image width and height, in pixels, used for the window and swapchain.
+/// @ingroup renderer_settings
 struct RenderConfig {
     glm::uvec2 resolution = { 1280, 720 }; ///< Requested swapchain width and height, in pixels.
 };
 
 /// Initial camera pose and vertical field-of-view limits.
 /// Position and look-at coordinates are in world-space metres. Angles are in degrees.
+/// @ingroup renderer_settings
 struct CameraConfig {
     glm::vec3 initialPosition{0.0f, 2.0f, -10.0f}; ///< Initial camera position in world-space metres.
     glm::vec3 initialLookAt{0.35f, 2.01f, -9.75f}; ///< Initial world-space point toward which the camera looks.
@@ -83,12 +90,14 @@ struct CameraConfig {
 };
 
 /// Mouse-look sensitivity in radians per cursor pixel and polarizer rotation rate in radians per second.
+/// @ingroup renderer_settings
 struct InputConfig {
     float mouseSensitivity = 0.0035f; ///< Camera rotation in radians per cursor pixel.
     float polarizerRotateSpeed = 1.5f; ///< Polarizer rotation in radians per second.
 };
 
 /// Complete set of renderer settings consumed by the application.
+/// @ingroup renderer_settings
 struct RuntimeConfig {
     RenderConfig render{}; ///< Window and swapchain dimensions.
     CameraConfig camera{}; ///< Initial camera pose, field of view, and exposure.
@@ -97,10 +106,13 @@ struct RuntimeConfig {
 };
 
 /// Number of wavelength bands in the renderer's spectral lookup tables.
+/// @ingroup lookup_table_generation
 inline constexpr int kSpectralBandCount = 17;
 /// First reference wavelength in the spectral grid, in nanometres.
+/// @ingroup lookup_table_generation
 inline constexpr double kSpectralLambdaMinNm = 380.0;
 /// Wavelength spacing between adjacent spectral bands, in nanometres.
+/// @ingroup lookup_table_generation
 inline constexpr double kSpectralLambdaStepNm = 25.0;
 
 /// Builds normalized Stokes phase data for one aerosol at each spectral band.
@@ -109,6 +121,7 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 /// @param aerosol Index of the aerosol population in sky.aerosols (0 or 1).
 /// @param crossSections Receives per-band extinction (x) and scattering (y) cross sections.
 /// @return Band-major Stokes phase table.
+/// @ingroup lookup_table_generation
 std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
 /// Appends a normalized angular sampling CDF for a band-major phase table.
@@ -125,11 +138,14 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aeros
 /// @param[in] bandWeights Relative displayed-radiance contribution of each spectral band.
 /// @pre bins is at least 2 and table contains kSpectralBandCount * bins samples from firstEntry.
 /// @post Exactly bins CDF and shape entries are appended to table.
+/// @ingroup lookup_table_generation
 void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry, const std::array<double, kSpectralBandCount>& bandWeights);
 
 /// Number of altitude samples in the atmospheric transmittance table.
+/// @ingroup lookup_table_generation
 inline constexpr int kTransmittanceAltitudeBins = 64;
 /// Number of direction-cosine samples in each transmittance row.
+/// @ingroup lookup_table_generation
 inline constexpr int kTransmittanceMuBins = 256;
 
 /// Integrates atmospheric density columns for each altitude and direction.
@@ -137,11 +153,13 @@ inline constexpr int kTransmittanceMuBins = 256;
 /// @return Altitude-major table with kTransmittanceAltitudeBins rows and
 /// kTransmittanceMuBins direction samples per row. Each vec4 stores Rayleigh,
 /// fine-aerosol, reserved zero, and coarse-aerosol density columns, in that order.
+/// @ingroup lookup_table_generation
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkyConfig& sky);
 
 /// Wavelength-dependent values used to populate one shader spectral band.
 /// betaRayleighScale is relative to 550 nm. The remaining fields hold the
 /// solar irradiance scale and CIE XYZ matching values.
+/// @ingroup lookup_table_generation
 struct SpectralBand {
     double betaRayleighScale; ///< Rayleigh coefficient relative to its value at 550 nm.
     double sunIrradianceScale; ///< Interpolated solar irradiance sample from the reference spectrum.
@@ -152,12 +170,14 @@ struct SpectralBand {
 /// @param wavelengthNm Wavelength to sample, in nanometres.
 /// @return Rayleigh scale, solar irradiance scale, and CIE XYZ values.
 /// @pre wavelengthNm is in [360, 830), the interval supported by solar-spectrum interpolation.
+/// @ingroup lookup_table_generation
 SpectralBand ComputeSpectralAtWavelength(double wavelengthNm);
 
 /// Integrates the intensity component of a tabulated phase function for normalization.
 /// @param phase Stokes phase samples on a uniform angular grid spanning [0, pi].
 /// @return Solid-angle normalization under the renderer's phase convention.
 /// @pre phase contains at least two angular samples.
+/// @ingroup lookup_table_generation
 inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
     const int bins = static_cast<int>(phase.size());
     const double dTheta = std::numbers::pi / (bins - 1);

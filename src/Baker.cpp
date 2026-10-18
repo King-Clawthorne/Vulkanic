@@ -4,6 +4,7 @@
 /// The implementation computes polarized Mie phase functions, angular
 /// sampling distributions, atmospheric density columns, and spectral values
 /// interpolated from the tables in DataTables.hpp.
+/// @ingroup lookup_table_generation
 #include "DataTables.hpp"
 #include "Settings.hpp"
 #include <algorithm>

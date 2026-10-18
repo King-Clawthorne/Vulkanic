@@ -2,7 +2,7 @@ PROJECT_NAME           = "Vulkanic"
 PROJECT_BRIEF          = "Spectral sky path tracer"
 OUTPUT_DIRECTORY       = build/docs
 
-INPUT                  = README.md build_scripts.dox CMakeLists.txt build.ps1 src shaders
+INPUT                  = README.md build_scripts.dox reference_groups.dox CMakeLists.txt build.ps1 src shaders
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.hpp *.cpp *.comp *.glsl *.md CMakeLists.txt
 EXTENSION_MAPPING      = comp=C++ glsl=C++

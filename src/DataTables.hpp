@@ -5,11 +5,13 @@
 ///
 /// The arrays in this header are sampled on fixed wavelength grids and are
 /// interpolated by Baker.cpp when preparing renderer lookup tables.
+/// @ingroup lookup_table_generation
 
 #include <array>
 #include <glm/vec3.hpp>
 
 /// CIE 1931 XYZ color-matching functions at 1 nm intervals from 360 through 830 nm.
+/// @ingroup lookup_table_generation
 inline constexpr std::array<glm::dvec3, 471> kCie1931Xyz = {
     glm::dvec3{0.000129900000, 0.0000039170000, 0.000606100000},
     glm::dvec3{0.000145847000, 0.0000043935810, 0.000680879200},
@@ -485,6 +487,7 @@ inline constexpr std::array<glm::dvec3, 471> kCie1931Xyz = {
 };
 
 /// Solar irradiance samples at 1 nm intervals from 360 through 830 nm.
+/// @ingroup lookup_table_generation
 inline constexpr std::array<double, 471> kSolarIrradiance = {
     1.188E+00, 8.627E-01, 8.526E-01, 1.053E+00, 1.180E+00, 1.024E+00,
     1.356E+00, 1.236E+00, 1.119E+00, 1.215E+00, 1.376E+00, 1.137E+00,
