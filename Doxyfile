@@ -2,19 +2,20 @@ PROJECT_NAME           = "Vulkanic"
 PROJECT_BRIEF          = "Spectral sky path tracer"
 OUTPUT_DIRECTORY       = build/docs
 
-INPUT                  = README.md build_scripts.dox reference_groups.dox CMakeLists.txt build.ps1 src shaders
+INPUT                  = README.md CMakeLists.txt build.ps1 src shaders
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.hpp *.cpp *.comp *.glsl *.md CMakeLists.txt
 EXTENSION_MAPPING      = comp=C++ glsl=C++
 INPUT_ENCODING         = UTF-8
+JAVADOC_AUTOBRIEF      = YES
 USE_MDFILE_AS_MAINPAGE = README.md
 
 EXCLUDE_PATTERNS       = */build/* */.git/*
 EXCLUDE_SYMBOLS        = layout
 
 EXTRACT_ALL            = NO
-EXTRACT_PRIVATE        = YES
-EXTRACT_STATIC         = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
 HIDE_UNDOC_MEMBERS     = NO
 WARN_IF_UNDOCUMENTED   = YES
 WARN_IF_DOC_ERROR      = YES
