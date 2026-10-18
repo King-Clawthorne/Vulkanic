@@ -32,7 +32,7 @@ struct SkySpectralConfig {
     glm::vec3 sunDirection{0.35f, 0.01f, 0.25f};
     float sunRadius = 0.00465f, sunAa = 0.0005f;
     uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 1;
-    float rayleighDepolarization = 0.0279f, ozoneDobsonUnits = 300.0f;
+    float rayleighDepolarization = 0.0279f;
     uint32_t mieTableAngleBins = 181;
 
     std::array<AerosolConfig, 2> aerosols{{{.beta = 21e-6f,
@@ -116,27 +116,21 @@ inline constexpr int kTransmittanceMuBins = 256;
 
 /// Integrates atmospheric density columns for each altitude and direction.
 /// @param sky Atmospheric radii, scale heights, and aerosol parameters.
-/// @return Table whose vec4 entries contain Rayleigh, fine-aerosol, ozone, and
+/// @return Table whose vec4 entries contain Rayleigh, fine-aerosol, reserved zero, and
 /// coarse-aerosol density columns, in that order.
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
 
-/// Evaluates the piecewise-linear relative ozone density profile used by the LUT.
-/// @param altitude Altitude above the ground, in metres.
-/// @return Nonnegative profile value, peaking at 25 km and reaching zero outside
-/// the 10 to 40 km interval.
-inline double OzoneProfile(double altitude) { return std::max(0.0, std::min(altitude / 15000.0 - 2.0 / 3.0, 8.0 / 3.0 - altitude / 15000.0)); }
-
 /// Wavelength-dependent values used to populate one shader spectral band.
-/// betaRayleighScale is relative to 550 nm. The remaining fields hold the ozone
-/// cross section, solar irradiance scale, and CIE XYZ matching values.
+/// betaRayleighScale is relative to 550 nm. The remaining fields hold the
+/// solar irradiance scale and CIE XYZ matching values.
 struct SpectralBand {
-    double betaRayleighScale, ozoneCrossSection, sunIrradianceScale;
+    double betaRayleighScale, sunIrradianceScale;
     glm::dvec3 cie;
 };
 
 /// Samples wavelength-dependent source datasets at the requested wavelength.
 /// @param wavelengthNm Wavelength to sample, in nanometres.
-/// @return Rayleigh scale, ozone cross section, solar irradiance scale, and CIE XYZ values.
+/// @return Rayleigh scale, solar irradiance scale, and CIE XYZ values.
 SpectralBand ComputeSpectralAtWavelength(double wavelengthNm);
 
 /// Integrates the intensity component of a tabulated phase function for normalization.

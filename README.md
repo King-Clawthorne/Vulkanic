@@ -4,7 +4,7 @@ Vulkanic is a real-time Vulkan path tracer for exploring a spectrally modeled sk
 
 ## Situation
 
-Atmospheric light changes with wavelength. A convincing sky renderer must account for effects such as Rayleigh and Mie scattering, ozone absorption, and the finite size of the Sun. Polarization adds further interactions to represent.
+Atmospheric light changes with wavelength. A convincing sky renderer must account for effects such as Rayleigh and Mie scattering and the finite size of the Sun. Polarization adds further interactions to represent.
 
 ## Task
 

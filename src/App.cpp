@@ -119,20 +119,19 @@ struct alignas(16) SceneData {
 	glm::vec4 skyRadiiScaleHeights; ///< Earth radius, atmosphere radius, Rayleigh scale height, and first aerosol scale height.
 	glm::vec4 skySunDirectionRadius; ///< Sun direction in xyz and angular radius in radians.
 	glm::vec4 skyVrtParams; ///< Sun antialiasing angle, Rayleigh depolarization, Mie angle-bin count, and second aerosol scale height.
-	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and ozone term.
+	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and a reserved value.
 	glm::vec4 cieXyz[kSpectralBandCount]; ///< Normalized CIE XYZ matching values for each spectral band.
 	glm::vec4 sunDisk; ///< Sun solid angle, angular antialiasing bounds as cosines, and a reserved value.
 	glm::vec4 mieBands[kSpectralBandCount]; ///< Per-band extinction/scattering scales for the two aerosol populations.
-	glm::vec4 apparentSun; ///< Refracted sun direction in xyz and vertical refraction scale in w.
 	glm::vec4 proposalScattering; ///< Wavelength-averaged scattering coefficients for path sampling.
 	glm::vec4 proposalExtinction; ///< Wavelength-averaged extinction coefficients for path sampling.
 };
 
 static_assert(offsetof(SceneData, skyVrtParams) == 48);
 static_assert(offsetof(SceneData, spectralBands) == 64);
-static_assert(offsetof(SceneData, proposalScattering) == 912);
-static_assert(offsetof(SceneData, proposalExtinction) == 928);
-static_assert(sizeof(SceneData) == 944);
+static_assert(offsetof(SceneData, proposalScattering) == 896);
+static_assert(offsetof(SceneData, proposalExtinction) == 912);
+static_assert(sizeof(SceneData) == 928);
 
 /// Descriptor types in the binding order expected by Main.comp.
 constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
@@ -216,7 +215,7 @@ private:
 				static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale),
 				static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550),
 				static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band)),
-				static_cast<float>(spectral.ozoneCrossSection * s.ozoneDobsonUnits * 2.687e20 / 15000.0)
+				0.0f
 			};
 
 			sceneData.cieXyz[band] = glm::vec4 { spectral.cie, 0.0 };
@@ -227,17 +226,6 @@ private:
 			for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
 
 		sceneData.sunDisk = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), std::cos(s.sunRadius + s.sunAa), std::cos(s.sunRadius - s.sunAa), 0.0f };
-		const float sunNorm = std::hypot(s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
-		const float trueAltitude = std::asin(s.sunDirection[1] / sunNorm) * 180.0f * std::numbers::inv_pi_v<float>;
-		const auto refraction = [](float altitude) {
-			const float h = std::max(altitude, -1.0f);
-			return 1.02f / 60.0f / std::tan((h + (10.3f / (h + 5.11f))) * kPi / 180.0f);
-		};
-
-		const float apparentAltitude = (trueAltitude + refraction(trueAltitude)) * kPi / 180.0f;
-		const float horizontal = std::hypot(s.sunDirection[0], s.sunDirection[2]);
-		sceneData.apparentSun = { std::cos(apparentAltitude) * s.sunDirection[0] / horizontal, std::sin(apparentAltitude), std::cos(apparentAltitude) * s.sunDirection[2] / horizontal, 1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f) };
-
 		for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
 			const double beta = s.aerosols[aerosol].beta;
 			const double reference = m_mieCrossSections[aerosol][6].x;
@@ -257,7 +245,7 @@ private:
 			const double weight = spectral.y * glm::length(glm::dvec3(sceneData.cieXyz[band]));
 			proposalWeight += weight;
 			scattering += weight * glm::dvec3(spectral.x, mie.y, mie.w);
-			extinction += weight * glm::dvec4(spectral.x, mie.x, spectral.w, mie.z);
+			extinction += weight * glm::dvec4(spectral.x, mie.x, 0.0, mie.z);
 		}
 
 		if (proposalWeight > 0.0) {

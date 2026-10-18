@@ -231,7 +231,7 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
 /// Integrates atmospheric density columns for each altitude and direction sample.
 ///
 /// sky supplies the spherical bounds and density scale heights. Each vec4 result
-/// stores the Rayleigh, first-aerosol, ozone, and second-aerosol columns. Ray paths
+/// stores the Rayleigh, first-aerosol, reserved zero, and second-aerosol columns. Ray paths
 /// are split at ground and density-shell intersections before Gaussian quadrature.
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 	const double re = sky.earthRadius;
@@ -250,7 +250,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 			std::vector<double> cuts { 0.0, end };
 
 			if (-b > 0.0 && -b < end) cuts.push_back(-b);
-			for (double height : { 0.0, 10000.0, 25000.0, 40000.0 }) {
+			for (double height : { 0.0 }) {
 				const double shell = re + height;
 				const double discriminant = b * b + (shell - r) * (shell + r);
 				if (discriminant < 0.0) continue;
@@ -277,7 +277,7 @@ std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
 						const double t = start + (2 * panel + 1 + kGaussNodes[node]) * half;
 						const double radius = std::sqrt(r * r + t * (t + 2.0 * b));
 						const double altitude = std::max((r * r - re * re + t * (t + 2.0 * b)) / (radius + re), 0.0);
-						column += half * kGaussWeights[node] * glm::dvec4 { std::exp(-altitude / sky.scaleHeightRayleigh), std::exp(-altitude / sky.aerosols[0].scaleHeight), OzoneProfile(altitude), std::exp(-altitude / sky.aerosols[1].scaleHeight) };
+						column += half * kGaussWeights[node] * glm::dvec4 { std::exp(-altitude / sky.scaleHeightRayleigh), std::exp(-altitude / sky.aerosols[0].scaleHeight), 0.0, std::exp(-altitude / sky.aerosols[1].scaleHeight) };
 					}
 				}
 			}
@@ -301,15 +301,6 @@ namespace {
 		return glm::mix(kCie1931Xyz[lower], kCie1931Xyz[upper], position - static_cast<double>(lower));
 	}
 
-	/// Samples the tabulated ozone cross section on its 1 nm wavelength grid.
-	/// @param wavelengthNm Wavelength in nanometres. The table range is used at the ends.
-	/// @return Interpolated ozone cross section.
-	double OzoneCrossSection(double wavelengthNm) {
-		const double position = std::clamp(wavelengthNm - 360.0, 0.0, 469.999);
-		const auto i = static_cast<size_t>(position);
-		return std::lerp(kOzoneCrossSection[i], kOzoneCrossSection[i + 1], position - static_cast<double>(i));
-	}
-
 	/// Evaluates the wavelength-dependent Rayleigh scattering shape factor.
 	/// @param wavelengthNm Wavelength in nanometres.
 	/// @return Relative shape factor before normalization to the 550 nm reference.
@@ -324,11 +315,10 @@ namespace {
 /// Samples wavelength-dependent coefficients and matching values for one spectral band.
 ///
 /// wavelengthNm is in nanometres. The result contains a Rayleigh factor relative to
-/// 550 nm, interpolated ozone and solar data, and CIE 1931 XYZ matching values.
+/// 550 nm, interpolated solar data, and CIE 1931 XYZ matching values.
 SpectralBand ComputeSpectralAtWavelength(double wavelengthNm) {
-	SpectralBand result { .betaRayleighScale = 0.0, .ozoneCrossSection = 0.0, .sunIrradianceScale = 0.0, .cie = { } };
+	SpectralBand result { .betaRayleighScale = 0.0, .sunIrradianceScale = 0.0, .cie = { } };
 	result.betaRayleighScale = RayleighShape(wavelengthNm) / RayleighShape(550.0);
-	result.ozoneCrossSection = OzoneCrossSection(wavelengthNm);
 	const double solarPosition = wavelengthNm - 360.0;
 	const auto solarLower = static_cast<size_t>(solarPosition);
 	const double solarFraction = solarPosition - static_cast<double>(solarLower);
