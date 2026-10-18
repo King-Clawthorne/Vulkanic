@@ -68,7 +68,6 @@ target_link_libraries(
 target_compile_options(Vulkanic PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-nullability-completeness>)
 
 find_package(Doxygen QUIET)
-# The Doxyfile enables Graphviz, so locate dot even when it is outside PATH.
 find_program(
     VULKANIC_DOT_EXECUTABLE
     NAMES dot

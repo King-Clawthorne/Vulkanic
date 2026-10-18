@@ -3,12 +3,13 @@
 Formats, builds, documents, and analyzes the Vulkanic Windows project.
 
 .DESCRIPTION
-Formats the top-level C++ source files under src/ with clang-format and
-automatically uses the only configured CMake preset, windows, for configuration
-and building. Configures it when either build/build.ninja or
-build/compile_commands.json is missing, builds in parallel, generates the
-Doxygen documentation, then runs clang-tidy on each C++ source file using the
-compilation database.
+Formats the top-level C++ source files under src/ and the GLSL compute shader
+with clang-format. Since clang-format has no GLSL language mode, it applies the
+project's C++ formatting style to the shader. The windows CMake preset compiles
+the shader with glslc and configures the project when either build/build.ninja
+or build/compile_commands.json is missing. The script builds in parallel,
+generates the Doxygen documentation, then runs clang-tidy on each C++ source
+file using the compilation database. clang-tidy does not support GLSL.
 
 Requires CMake 4.4 or newer. Doxygen, clang-format, and clang-tidy must be
 available on PATH. Graphviz dot must be on PATH or installed in the default
@@ -40,6 +41,9 @@ try {
     $cppFiles = @(Get-ChildItem -LiteralPath 'src' -Filter '*.cpp' -File | ForEach-Object { $_.FullName })
     if ($cppFiles.Count -eq 0) { throw 'No C++ source files were found under src.' }
     clang-format --style=file -i $cppFiles
+    $shaderFile = Join-Path $PSScriptRoot 'shaders\Main.comp'
+    if (-not (Test-Path -LiteralPath $shaderFile -PathType Leaf)) { throw 'The compute shader shaders/Main.comp was not found.' }
+    clang-format --style=file --assume-filename=shaders/Main.cpp -i $shaderFile
     $buildPath = Join-Path $PSScriptRoot 'build'
     $buildNinjaPath = Join-Path $buildPath 'build.ninja'
     $compileCommandsPath = Join-Path $buildPath 'compile_commands.json'
