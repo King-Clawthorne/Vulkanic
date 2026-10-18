@@ -2,7 +2,7 @@
 /// @brief Configures the Vulkanic renderer, shader compilation, and documentation targets.
 ///
 /// Requires CMake 4.4 or newer. The Windows preset uses Ninja and Clang 20 or
-/// newer with `clang-cl`; the Vulkan SDK must provide `glslc` for the Vulkan
+/// newer with `clang-cl`. The Vulkan SDK must provide `glslc` for the Vulkan
 /// 1.4 shader target.
 ///
 /// @par Source

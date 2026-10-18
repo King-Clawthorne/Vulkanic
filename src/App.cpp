@@ -37,7 +37,7 @@ struct CameraController {
 		glm::vec2 angles; ///< Camera yaw and pitch, in radians.
 		bool polarizerEnabled; ///< Whether the polarizer is applied.
 		float polarizerAngle; ///< Linear polarizer angle, in radians.
-		float polarizerEllipticity; ///< Ellipticity angle, in radians; zero for linear polarization.
+		float polarizerEllipticity; ///< Ellipticity angle, in radians, zero for linear polarization.
 		/// Compares the state that determines whether accumulated samples remain valid.
 		friend bool operator==(const View&, const View&) = default;
 	};

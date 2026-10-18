@@ -1,7 +1,7 @@
 ## @file CMakeLists.txt
 ## @brief Configures the Vulkanic renderer, shader, and documentation targets.
 ## @details Requires CMake 4.4 or newer, C++26 support, and a Vulkan SDK with
-## `glslc`. The Windows preset uses Ninja and Clang 20 or newer with `clang-cl`;
+## `glslc`. The Windows preset uses Ninja and Clang 20 or newer with `clang-cl`.
 ## the compute shader targets Vulkan 1.4.
 
 cmake_minimum_required(VERSION 4.4)
