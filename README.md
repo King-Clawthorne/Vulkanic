@@ -88,9 +88,9 @@ Measured on October 19, 2026, using the Release build and a stationary view.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 65,830 | 0.260 ms | 0.273 ms | 0.396 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,193 | 1.419 ms | 1.420 ms | 1.450 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 65,830 measured workloads span 19.2 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,193 measured workloads span 8.3 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 
@@ -98,7 +98,15 @@ To capture a run, build the app and launch it through the Nsight Systems CLI:
 $nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --duration=10 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
 ```
 
-This path matches Nsight Systems 2026.3.2 on the benchmark machine. Adjust the version or install path if needed. The capture lasts 20 seconds, then Nsight Systems finalizes `build/vulkanic-benchmark.nsys-rep` and terminates the launched app. Keep the camera and scene fixed during that interval. The reported values come from the GPU timestamps in Nsight Systems Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
+This path matches Nsight Systems 2026.3.2 on the benchmark machine. Adjust the version or install path if needed. The capture lasts 10 seconds, then Nsight Systems finalizes `build/vulkanic-benchmark.nsys-rep` and terminates the launched app. Keep the camera and scene fixed during that interval. The reported values come from the GPU timestamps in Nsight Systems Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
+
+Export the capture to a SQLite database for SQL queries:
+
+```powershell
+& $nsys export --type sqlite --output=build/vulkanic-benchmark.sqlite build/vulkanic-benchmark.nsys-rep
+```
+
+The `.sqlite` file is a database, not a text SQL script. Query its `VULKAN_WORKLOAD` table and calculate each duration as `(end - start) / 1000000.0` milliseconds. Add `--force-overwrite=true` to the export command when replacing an existing database.
 
 ## Project layout
 
