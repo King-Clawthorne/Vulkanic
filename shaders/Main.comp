@@ -548,10 +548,14 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
         scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples), int(SpecializedSecondarySamples), sky);
     }
 
-    bool insideSun = dot(viewDir, L) >= cos(sceneData.skySunDirectionRadius.w);
+    vec3 vertical, horizontal;
+    beam_basis(L, horizontal, vertical);
+    vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
+    float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
+    float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
     vec4 depth = sun_air_depth(origin, viewDir);
-    bool sunVisible = insideSun && groundT <= 0.0;
-    float intensity = sunVisible ? gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
+    bool sunVisible = disk > 0.0 && groundT <= 0.0;
+    float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
     sky.x += intensity;
     return stokes_make_physical(sky);
 }
