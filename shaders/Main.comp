@@ -218,11 +218,13 @@ void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 f
 
 vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
 
+/// Geometry and lookup coordinates shared by Rayleigh and Mie scattering.
 struct ScatterGeom {
-    mat4 rayleigh;
-    vec4 rot, flip;
-    int bin;
-    float frac;
+    mat4 rayleigh; ///< Rayleigh Mueller matrix for the current scattering angle.
+    vec4 rot; ///< Input and output Stokes-frame rotations, stored as cos(2 theta), sin(2 theta) pairs.
+    vec4 flip; ///< Stokes-component sign correction for degenerate forward or backward frames.
+    int bin; ///< Lower angular sample index in the Mie phase table.
+    float frac; ///< Interpolation fraction from bin to the next angular sample.
 };
 
 ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
@@ -252,15 +254,26 @@ vec4 scatter_wavelength(ScatterGeom g, vec4 s, vec3 w) {
     return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
+/// State for one ray segment in the recursive multiple-scattering estimator.
 struct Level {
-    vec3 org, dir, pos;
-    vec4 air, camDepth, depth0;
-    vec2 dirJitter;
-    vec4 distanceRates, distanceWeights;
-    float span, start, stepWeight, sampleWeight;
-    int stepIndex, sampleIndex;
-    uint scramble;
-    vec4 result, angular;
+    vec3 org; ///< Origin of the ray segment, in world-space metres.
+    vec3 dir; ///< Unit direction of the ray segment.
+    vec3 pos; ///< Current sampled position along the segment, in world space.
+    vec4 air; ///< Local Rayleigh, fine-aerosol, reserved, and coarse-aerosol densities.
+    vec4 camDepth; ///< Density columns from the segment start to the current sample.
+    vec4 depth0; ///< Density columns from the segment start to the atmosphere boundary.
+    vec2 dirJitter; ///< Two random variates used to sample the next scattering direction.
+    vec4 distanceRates; ///< Component rates for the segment-distance proposal on normalized [0, 1].
+    vec4 distanceWeights; ///< Mixture weights paired with distanceRates.
+    float span; ///< Length of the ray segment, in metres.
+    float start; ///< Distance from org to the segment start, in metres.
+    float stepWeight; ///< Segment-integration estimator weight for the current sample.
+    float sampleWeight; ///< Reciprocal PDF weight for the sampled scattering direction.
+    int stepIndex; ///< Integration sample index within this segment.
+    int sampleIndex; ///< Child direction sample index for this segment sample.
+    uint scramble; ///< Random-sequence scramble seed for this scattering level.
+    vec4 result; ///< Stokes radiance accumulated for this level.
+    vec4 angular; ///< Stokes angular-scattering estimate accumulated for the current sample.
 };
 
 const int STACK = int(SpecializedOrders);

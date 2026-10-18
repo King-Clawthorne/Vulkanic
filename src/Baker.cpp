@@ -148,12 +148,6 @@ std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aeros
 	return table;
 }
 
-/// Builds a scalar angular sampling proposal from the weighted phase intensities.
-///
-/// Reads band-major phase rows starting at firstEntry, with bins samples per row,
-/// weights each band by bandWeights, and appends normalized CDF values and fitted
-/// within-bin shape parameters to table. The shape fit reduces the proposal's
-/// second-moment estimate during angular quadrature.
 void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry, const std::array<double, kSpectralBandCount>& bandWeights) {
 	const auto phase = [&](int i) {
 		double sum = 0.0;
@@ -228,11 +222,6 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
 	}
 }
 
-/// Integrates atmospheric density columns for each altitude and direction sample.
-///
-/// sky supplies the spherical bounds and density scale heights. Each vec4 result
-/// stores the Rayleigh, first-aerosol, reserved zero, and second-aerosol columns. Ray paths
-/// are split at ground and density-shell intersections before Gaussian quadrature.
 std::vector<glm::vec4> ComputeTransmittanceTable(const SkyConfig& sky) {
 	const double re = sky.earthRadius;
 	const double ra = sky.atmosphereRadius;
@@ -312,10 +301,6 @@ namespace {
 	}
 }
 
-/// Samples wavelength-dependent coefficients and matching values for one spectral band.
-///
-/// wavelengthNm is in nanometres. The result contains a Rayleigh factor relative to
-/// 550 nm, interpolated solar data, and CIE 1931 XYZ matching values.
 SpectralBand ComputeSpectralAtWavelength(double wavelengthNm) {
 	SpectralBand result { .betaRayleighScale = 0.0, .sunIrradianceScale = 0.0, .cie = { } };
 	result.betaRayleighScale = RayleighShape(wavelengthNm) / RayleighShape(550.0);

@@ -51,6 +51,8 @@ struct CameraController {
 	bool polarizerEnabled = false; ///< Whether the polarizer is enabled.
 	bool elliptical = false; ///< Whether polarizer rotation edits ellipticity rather than angle.
 
+	/// Initializes yaw and pitch from the configured camera position and look-at point.
+	/// @param config Runtime camera limits and input sensitivities.
 	explicit CameraController(const RuntimeConfig& config) {
 		const glm::vec3 delta = config.camera.initialLookAt - config.camera.initialPosition;
 		angles.x = std::atan2(delta.x, delta.z);
@@ -100,6 +102,7 @@ struct CameraController {
 	}
 
 	/// Returns a snapshot of the state that affects rendered pixels.
+	/// @return Current camera angles and polarizer state used to detect accumulation resets.
 	[[nodiscard]] View GetView() const { return { .angles = angles, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f }; }
 };
 
@@ -149,6 +152,7 @@ struct PushConstants {
 /// Owns the window, Vulkan objects, scene buffers, and render loop.
 class App {
 public:
+	/// Creates the application state and initializes the camera from default settings.
 	App()
 		: m_camera(m_config) { }
 
@@ -197,6 +201,7 @@ private:
 	}
 
 	/// Packs configured atmospheric and spectral values for the shader.
+	/// @return Uniform-buffer payload matching the shader's SceneData layout.
 	[[nodiscard]] SceneData BuildSceneData() const {
 		const SkyConfig& s = m_config.sky;
 		SceneData sceneData {
@@ -451,6 +456,7 @@ private:
 	}
 
 	/// Builds shader parameters from the current view and resets accumulation after view changes.
+	/// @return Push-constant payload for the next compute dispatch.
 	PushConstants BuildPushConstants() {
 		const CameraController::View view = m_camera.GetView();
 		const bool reset = m_lastView != view;
@@ -579,47 +585,50 @@ private:
 		vk::raii::Fence inFlight { nullptr }; ///< Signals completion of the submitted frame.
 	};
 
-	GLFWwindow* m_window = nullptr;
+	GLFWwindow* m_window = nullptr; ///< GLFW window used for input, presentation, and event polling.
 
-	vk::raii::Context m_context;
-	vkb::Instance m_selectedInstance { };
-	vkb::PhysicalDevice m_selectedPhysicalDevice { };
-	vkb::Device m_selectedDevice { };
-	vkb::Swapchain m_selectedSwapchain { };
-	vk::raii::Instance m_instance { nullptr };
-	vk::raii::SurfaceKHR m_surface { nullptr };
-	vk::raii::PhysicalDevice m_physicalDevice { nullptr };
-	vk::raii::Device m_device { nullptr };
-	uint32_t m_queueFamily = 0;
-	vk::raii::Queue m_graphicsQueue { nullptr };
-	vk::raii::Queue m_presentQueue { nullptr };
+	vk::raii::Context m_context; ///< Vulkan-Hpp context used to create RAII handles.
+	vkb::Instance m_selectedInstance { }; ///< VkBootstrap instance result used to initialize m_instance.
+	vkb::PhysicalDevice m_selectedPhysicalDevice { }; ///< VkBootstrap physical-device selection and queue details.
+	vkb::Device m_selectedDevice { }; ///< VkBootstrap logical-device selection used to create queues and the swapchain.
+	vkb::Swapchain m_selectedSwapchain { }; ///< VkBootstrap swapchain metadata while importing its handles.
+	vk::raii::Instance m_instance { nullptr }; ///< RAII handle for the Vulkan instance.
+	vk::raii::SurfaceKHR m_surface { nullptr }; ///< Vulkan presentation surface for m_window.
+	vk::raii::PhysicalDevice m_physicalDevice { nullptr }; ///< RAII handle for the selected physical device.
+	vk::raii::Device m_device { nullptr }; ///< RAII handle for the logical device.
+	uint32_t m_queueFamily = 0; ///< Queue family used to allocate and submit compute command buffers.
+	vk::raii::Queue m_graphicsQueue { nullptr }; ///< Queue used for compute submission and rendering work.
+	vk::raii::Queue m_presentQueue { nullptr }; ///< Queue used to present completed swapchain images.
 
-	vma::raii::Allocator m_allocator { nullptr };
-	vma::raii::Buffer m_sceneDataBuffer { nullptr }, m_mieScatteringBuffer { nullptr };
-	vma::raii::Buffer m_transmittanceBuffer { nullptr }, m_accumulationBuffer { nullptr };
-	std::array<std::array<glm::dvec2, kSpectralBandCount>, 2> m_mieCrossSections { };
+	vma::raii::Allocator m_allocator { nullptr }; ///< VMA allocator used for renderer buffers.
+	vma::raii::Buffer m_sceneDataBuffer { nullptr }; ///< Uniform data shared with the compute shader.
+	vma::raii::Buffer m_mieScatteringBuffer { nullptr }; ///< Mie phase tables and appended angular-sampling CDFs.
+	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed atmospheric density-column table.
+	vma::raii::Buffer m_accumulationBuffer { nullptr }; ///< Per-pixel XYZ accumulation and sample counts.
+	std::array<std::array<glm::dvec2, kSpectralBandCount>, 2> m_mieCrossSections { }; ///< Extinction and scattering cross sections for each aerosol and spectral band.
 
-	vk::raii::SwapchainKHR m_swapchain { nullptr };
-	vk::Extent2D m_swapchainExtent { };
-	std::vector<vk::Image> m_swapchainImages;
-	std::vector<vk::raii::ImageView> m_swapchainImageViews;
-	std::vector<vk::raii::Semaphore> m_renderFinished;
+	vk::raii::SwapchainKHR m_swapchain { nullptr }; ///< RAII handle for the presentation swapchain.
+	vk::Extent2D m_swapchainExtent { }; ///< Actual swapchain image dimensions, in pixels.
+	std::vector<vk::Image> m_swapchainImages; ///< Swapchain images used as compute outputs.
+	std::vector<vk::raii::ImageView> m_swapchainImageViews; ///< Storage-image views for the swapchain images.
+	std::vector<vk::raii::Semaphore> m_renderFinished; ///< Signals completion for each swapchain image.
 
-	vk::raii::DescriptorSetLayout m_descriptorSetLayout { nullptr };
-	vk::raii::PipelineLayout m_pipelineLayout { nullptr };
-	vk::raii::Pipeline m_computePipeline { nullptr };
-	vk::raii::CommandPool m_commandPool { nullptr };
+	vk::raii::DescriptorSetLayout m_descriptorSetLayout { nullptr }; ///< Push-descriptor bindings consumed by Main.comp.
+	vk::raii::PipelineLayout m_pipelineLayout { nullptr }; ///< Descriptor and push-constant layout for the compute pipeline.
+	vk::raii::Pipeline m_computePipeline { nullptr }; ///< Vulkan compute pipeline for the embedded path-tracing shader.
+	vk::raii::CommandPool m_commandPool { nullptr }; ///< Command pool for per-frame compute command buffers.
 
-	std::vector<FrameResources> m_frames;
-	uint32_t m_currentFrame = 0;
-	uint64_t m_frameIndex = 0;
-	float m_displayFps = 0.0f;
-	RuntimeConfig m_config { };
-	CameraController m_camera;
-	std::optional<CameraController::View> m_lastView;
+	std::vector<FrameResources> m_frames; ///< Command and synchronization resources for frames in flight.
+	uint32_t m_currentFrame = 0; ///< Index of the frame resource used by the next submission.
+	uint64_t m_frameIndex = 0; ///< Accumulation sample index sent to the shader.
+	float m_displayFps = 0.0f; ///< Most recently measured frame rate shown in the window title.
+	RuntimeConfig m_config { }; ///< Renderer configuration used to build tables and dispatch parameters.
+	CameraController m_camera; ///< Interactive camera and polarizer state.
+	std::optional<CameraController::View> m_lastView; ///< Previous render-affecting view used to reset accumulation.
 };
 
 /// Application entry point. Reports setup and runtime exceptions to stderr.
+/// @return Zero after normal shutdown, or nonzero when initialization or runtime fails.
 int main() {
 	try {
 		App app;
