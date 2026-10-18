@@ -84,18 +84,18 @@ The window title reports FPS and frame time. Controls:
 
 ## GPU performance profiling
 
-Measured on October 13, 2026, using the Release build and default 1280 × 720 scene settings. The view remained stationary with the default camera.
+Measured on October 19, 2026, using the Release build and a stationary view.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 17,838 | 0.843 ms | 0.869 ms | 1.039 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 65,830 | 0.260 ms | 0.273 ms | 0.396 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 17,838 measured workloads span 17.3 seconds. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 65,830 measured workloads span 19.2 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 
 ```powershell
-$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --duration=20 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
+$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --duration=10 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
 ```
 
 This path matches Nsight Systems 2026.3.2 on the benchmark machine. Adjust the version or install path if needed. The capture lasts 20 seconds, then Nsight Systems finalizes `build/vulkanic-benchmark.nsys-rep` and terminates the launched app. Keep the camera and scene fixed during that interval. The reported values come from the GPU timestamps in Nsight Systems Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.

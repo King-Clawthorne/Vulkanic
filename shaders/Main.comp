@@ -21,8 +21,7 @@ layout(push_constant) uniform PushConstants {
 
 layout(constant_id = 0) const uint SpecializedOrders = 1;
 layout(constant_id = 1) const uint SpecializedViewSteps = 0;
-layout(constant_id = 2) const uint SpecializedSamples = 0;
-layout(constant_id = 3) const uint SpecializedSecondarySamples = 0;
+layout(constant_id = 2) const uint SpecializedSecondarySamples = 0;
 
 const float PI = 3.14159265358979323846;
 const int SPECTRAL_BANDS = 17;
@@ -428,7 +427,7 @@ vec4 level_value(bool leaf, ScatterGeom g, int d) {
     return stokes_make_physical(S[d].result);
 }
 
-void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int samples, int secondarySteps, inout vec4 sky) {
+void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int secondarySteps, inout vec4 sky) {
     int last = clamp(order, 1, STACK) - 1, d = 0;
     S[0].org = origin;
     S[0].dir = viewDir;
@@ -463,9 +462,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             begin_step(d, steps);
         }
 
-        if (d < last && S[d].sampleIndex < samples) {
-            float u = (float(S[d].sampleIndex) + S[d].dirJitter.x) / float(samples);
-            float phi = GOLDEN_ANGLE * float(S[d].sampleIndex + S[d].stepIndex * samples) + 2.0 * PI * S[d].dirJitter.y;
+        if (d < last && S[d].sampleIndex == 0) {
+            float u = S[d].dirJitter.x;
+            float phi = GOLDEN_ANGLE * float(S[d].stepIndex) + 2.0 * PI * S[d].dirJitter.y;
             S[d + 1].org = S[d].pos;
             vec3 next;
 
@@ -500,7 +499,7 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
             float cosSun = dot(next, L), cosCurrent = dot(next, current);
             float pdf = (uniformWeight + rayleigh * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
             pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
-            S[d].sampleWeight = 1.0 / (pdf * float(samples));
+            S[d].sampleWeight = 1.0 / pdf;
             S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^ uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
             S[++d].dir = next;
             entering = true;
@@ -545,7 +544,7 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
 
     for (int order = 1; order <= orders; ++order) {
         gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
-        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples), int(SpecializedSecondarySamples), sky);
+        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), sky);
     }
 
     vec3 vertical, horizontal;

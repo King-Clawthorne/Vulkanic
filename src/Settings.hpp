@@ -26,14 +26,14 @@ struct AerosolConfig {
 
 /// Parameters used to build atmospheric lookup tables and shader constants.
 /// Sun direction is in world space. Radii and scale heights are in metres.
-struct SkySpectralConfig {
+struct SkyConfig {
     float betaRayleigh550 = 13.5e-6f;
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
     glm::vec3 sunDirection{0.35f, 0.01f, 0.25f};
     float sunRadius = 0.00465f;
-    uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 1;
+    uint32_t secondarySamples = 2, viewSteps = 2, scatteringOrders = 2;
     float rayleighDepolarization = 0.0279f;
-    uint32_t mieTableAngleBins = 181;
+    uint32_t mieTableAngleBins = 721;
 
     std::array<AerosolConfig, 2> aerosols{{{.beta = 21e-6f,
                                             .scaleHeight = 1200.0f,
@@ -48,7 +48,7 @@ struct SkySpectralConfig {
                                             .meanRadiusMicrometers = 1.0f,
                                             .sigma = 2.0f}}};
 
-    [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
+    [[nodiscard]] friend bool operator==(const SkyConfig&, const SkyConfig&) = default;
 };
 
 /// Output image width and height, in pixels, used for the window and swapchain.
@@ -60,19 +60,13 @@ struct RenderConfig {
 /// Position and look-at coordinates are in world-space metres. Angles are in degrees.
 struct CameraConfig {
     glm::vec3 initialPosition{0.0f, 2.0f, -10.0f};
-    glm::vec3 initialLookAt{0.0f, 0.5f, 0.0f};
-    float fovYDegrees = 40.0f, maxPitchDegrees = 89.0f;
+    glm::vec3 initialLookAt{0.35f, 2.01f, -9.75f};
+    float fovYDegrees = 40.0f, maxPitchDegrees = 89.0f, exposure = 10.0f;
 };
 
 /// Mouse-look sensitivity in radians per cursor pixel and polarizer rotation rate in radians per second.
 struct InputConfig {
     float mouseSensitivity = 0.0035f, polarizerRotateSpeed = 1.5f;
-};
-
-/// Display exposure and atmospheric parameters used by the application.
-struct SkyConfig {
-    float exposure = 10.0f;
-    SkySpectralConfig spectral{};
 };
 
 /// Complete set of renderer settings consumed by the application.
@@ -96,7 +90,7 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 /// @param aerosol Index of the aerosol population in sky.aerosols (0 or 1).
 /// @param crossSections Receives per-band extinction (x) and scattering (y) cross sections.
 /// @return Band-major Stokes phase table.
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
 
 /// Appends a normalized angular sampling CDF for a band-major phase table.
 /// @param table Phase data to sample from. The CDF data is appended to this vector.
@@ -118,7 +112,7 @@ inline constexpr int kTransmittanceMuBins = 256;
 /// @param sky Atmospheric radii, scale heights, and aerosol parameters.
 /// @return Table whose vec4 entries contain Rayleigh, fine-aerosol, reserved zero, and
 /// coarse-aerosol density columns, in that order.
-std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky);
+std::vector<glm::vec4> ComputeTransmittanceTable(const SkyConfig& sky);
 
 /// Wavelength-dependent values used to populate one shader spectral band.
 /// betaRayleighScale is relative to 550 nm. The remaining fields hold the

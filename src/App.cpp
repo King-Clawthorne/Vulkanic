@@ -198,7 +198,7 @@ private:
 
 	/// Packs configured atmospheric and spectral values for the shader.
 	[[nodiscard]] SceneData BuildSceneData() const {
-		const SkySpectralConfig& s = m_config.sky.spectral;
+		const SkyConfig& s = m_config.sky;
 		SceneData sceneData {
 			.skySpectralParams = { s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550 },
 			.skyRadiiScaleHeights = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight },
@@ -269,7 +269,7 @@ private:
 
 	/// Builds spectral lookup tables and uploads them with the scene uniform data.
 	void CreateSceneBuffers() {
-		const SkySpectralConfig& s = m_config.sky.spectral;
+		const SkyConfig& s = m_config.sky;
 		m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
 		std::vector<glm::vec4> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
 		std::ranges::copy(ComputeMieScatteringTable(s, 1, m_mieCrossSections[1]), std::back_inserter(mie));
@@ -391,8 +391,7 @@ private:
 	void CreateSwapchain() {
 		auto swapchainResult = vkb::SwapchainBuilder { m_selectedDevice }
 								   .set_desired_format({ .format = VK_FORMAT_B8G8R8A8_UNORM, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR })
-								   .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
-								   .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+								   .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
 								   .set_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT)
 								   .set_desired_extent(m_config.render.resolution.x, m_config.render.resolution.y)
 								   .set_desired_min_image_count(kFramesInFlight)
@@ -427,8 +426,8 @@ private:
 	/// Creates the compute pipeline and supplies specialization and push-constant layouts.
 	void CreatePipeline() {
 		const vk::raii::ShaderModule computeModule { m_device, vk::ShaderModuleCreateInfo { { }, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv) } };
-		const std::array<uint32_t, 4> settings = { std::max(1u, m_config.sky.spectral.scatteringOrders), m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples, m_config.sky.spectral.secondarySamples };
-		const std::array<vk::SpecializationMapEntry, 4> entries = { { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } } };
+		const std::array<uint32_t, 3> settings = { std::max(1u, m_config.sky.scatteringOrders), m_config.sky.viewSteps, m_config.sky.secondarySamples };
+		const std::array<vk::SpecializationMapEntry, 3> entries = { { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 } } };
 		const vk::SpecializationInfo specialization { static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data() };
 		const vk::PushConstantRange pushRange { vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants) };
 		vk::PipelineLayoutCreateInfo layoutInfo { };
@@ -470,7 +469,7 @@ private:
 			.forward = { fx, fy, fz, 0.0f },
 			.right = { rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0 },
 			.up = { fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0 },
-			.frame = { static_cast<float>(m_frameIndex), m_config.sky.exposure, reset ? 1.0f : 0.0f, 0.0 },
+			.frame = { static_cast<float>(m_frameIndex), m_config.camera.exposure, reset ? 1.0f : 0.0f, 0.0 },
 			.polarizer = { view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0 },
 			.imageSize = { m_swapchainExtent.width, m_swapchainExtent.height },
 		};

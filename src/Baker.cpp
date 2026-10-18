@@ -76,7 +76,7 @@ namespace {
 	}
 }
 
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections) {
+std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections) {
 	const int bins = std::max(2, static_cast<int>(sky.mieTableAngleBins));
 	const AerosolConfig& species = sky.aerosols[static_cast<size_t>(aerosol)];
 	const std::complex<double> m(species.refractiveIndexReal, std::max(0.0, static_cast<double>(species.refractiveIndexImag)));
@@ -233,7 +233,7 @@ void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntr
 /// sky supplies the spherical bounds and density scale heights. Each vec4 result
 /// stores the Rayleigh, first-aerosol, reserved zero, and second-aerosol columns. Ray paths
 /// are split at ground and density-shell intersections before Gaussian quadrature.
-std::vector<glm::vec4> ComputeTransmittanceTable(const SkySpectralConfig& sky) {
+std::vector<glm::vec4> ComputeTransmittanceTable(const SkyConfig& sky) {
 	const double re = sky.earthRadius;
 	const double ra = sky.atmosphereRadius;
 	std::vector<glm::vec4> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
