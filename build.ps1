@@ -3,7 +3,8 @@
 Formats, builds, documents, and analyzes the Vulkanic Windows project.
 
 .DESCRIPTION
-Formats the top-level C++ source files under src/ with clang-format.
+Formats the top-level C++ source files under src/ with clang-format and
+validates compute shaders under shaders/ with glslangValidator for Vulkan 1.4.
 Automatically uses the only configured CMake preset, windows, for configuration
 and building. Configures it when either build/build.ninja or
 build/compile_commands.json is missing, builds in parallel, generates the
@@ -12,7 +13,7 @@ compilation database.
 
 Requires CMake 4.4 or newer. Doxygen, clang-format, and clang-tidy must be
 available on PATH. The Windows preset also requires Ninja, clang-cl, and a
-Vulkan SDK with glslc.
+Vulkan SDK with glslc and glslangValidator.
 
 .EXAMPLE
 .\build.ps1
@@ -26,6 +27,12 @@ $PSNativeCommandUseErrorActionPreference = $true
 Set-StrictMode -Version Latest
 $doxygenExecutable = Get-Command doxygen -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $doxygenExecutable) { throw 'Doxygen is required to generate the documentation. Add it to PATH before running this script.' }
+$glslangExecutable = Get-Command glslangValidator -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $glslangExecutable -and $env:VULKAN_SDK) {
+    $sdkValidatorPath = Join-Path $env:VULKAN_SDK 'Bin/glslangValidator.exe'
+    if (Test-Path -LiteralPath $sdkValidatorPath) { $glslangExecutable = Get-Command $sdkValidatorPath -CommandType Application }
+}
+if (-not $glslangExecutable) { throw 'glslangValidator is required. Add it to PATH or set VULKAN_SDK to your Vulkan SDK directory.' }
 
 Push-Location -LiteralPath $PSScriptRoot
 try {
@@ -40,6 +47,17 @@ try {
     if ($cppFiles.Count -eq 0) { throw 'No C++ source files were found under src.' }
     clang-format --style=file -i $cppFiles
     $buildPath = Join-Path $PSScriptRoot 'build'
+    $shaderRoot = Join-Path $PSScriptRoot 'shaders'
+    $shaderFiles = @(Get-ChildItem -LiteralPath $shaderRoot -Filter '*.comp' -File -Recurse)
+    if ($shaderFiles.Count -eq 0) { throw 'No compute shaders were found under shaders.' }
+    foreach ($shaderFile in $shaderFiles) {
+        $relativeShaderPath = [System.IO.Path]::GetRelativePath($shaderRoot, $shaderFile.FullName)
+        $validationOutput = Join-Path $buildPath "shader-validation/$relativeShaderPath.spv"
+        [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($validationOutput))
+        Write-Host "Validating shader $relativeShaderPath"
+        & $glslangExecutable.Source -V --target-env vulkan1.4 -o $validationOutput $shaderFile.FullName
+        if ($LASTEXITCODE -ne 0) { throw "glslangValidator failed for $relativeShaderPath (exit code $LASTEXITCODE)." }
+    }
     $buildNinjaPath = Join-Path $buildPath 'build.ninja'
     $compileCommandsPath = Join-Path $buildPath 'compile_commands.json'
     if (-not (Test-Path -LiteralPath $buildNinjaPath) -or -not (Test-Path -LiteralPath $compileCommandsPath)) { & $cmakeExecutable.Source --preset windows }

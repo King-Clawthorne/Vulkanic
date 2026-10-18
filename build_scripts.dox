@@ -18,6 +18,8 @@
 /// `build/build.ninja` or `build/compile_commands.json` is missing, builds in
 /// parallel, and runs `clang-tidy` on each `.cpp` file using that compilation
 /// database.
+/// Validates compute shaders under `shaders/` with `glslangValidator` for Vulkan
+/// 1.4 before building. The validator must be on `PATH` or in `VULKAN_SDK/Bin`.
 ///
 /// @par Source
 /// @verbinclude build.ps1
