@@ -51,19 +51,6 @@ struct SkySpectralConfig {
     [[nodiscard]] friend bool operator==(const SkySpectralConfig&, const SkySpectralConfig&) = default;
 };
 
-/// Geometry, optical coefficients, and integration settings for the rain volume.
-/// Radii and distance are in metres. Droplet size is in micrometres.
-struct RainbowConfig {
-    uint32_t enabled = 0;
-    float distance = 4000.0f, height = 0.0f;
-    glm::vec3 radii{6000.0f, 6000.0f, 1500.0f};
-    float edgeSoftness = 0.15f, scatteringCoefficient = 5.0e-4f, extinctionCoefficient = 5.0e-4f;
-    float effectiveRadiusMicrometers = 500.0f, effectiveVariance = 0.08f;
-    uint32_t angleBins = 4097, viewSteps = 24, includeSecondary = 1;
-    uint32_t scatteringOrders = 2, multipleScatteringSamples = 1, multipleScatteringSteps = 8;
-    [[nodiscard]] friend bool operator==(const RainbowConfig&, const RainbowConfig&) = default;
-};
-
 /// Output image width and height, in pixels, used for the window and swapchain.
 struct RenderConfig {
     glm::uvec2 resolution = { 1280, 720 };
@@ -93,7 +80,6 @@ struct RuntimeConfig {
     RenderConfig render{};
     CameraConfig camera{};
     InputConfig input{};
-    RainbowConfig rainbow{};
     SkyConfig sky{};
 };
 
@@ -111,12 +97,6 @@ inline constexpr double kSpectralLambdaStepNm = 25.0;
 /// @param crossSections Receives per-band extinction (x) and scattering (y) cross sections.
 /// @return Band-major Stokes phase table.
 std::vector<glm::vec4> ComputeMieScatteringTable(const SkySpectralConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
-
-/// Builds band-major rainbow phase data over [0, pi], including finite-sun blur.
-/// @param rainbow Droplet geometry, optical properties, and integration settings.
-/// @param sunRadius Angular radius of the sun, in radians.
-/// @return Stokes phase table with one angular row per spectral band.
-std::vector<glm::vec4> ComputeRainbowScatteringTable(const RainbowConfig& rainbow, float sunRadius);
 
 /// Appends a normalized angular sampling CDF for a band-major phase table.
 /// @param table Phase data to sample from. The CDF data is appended to this vector.

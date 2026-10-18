@@ -4,21 +4,21 @@ Vulkanic is a real-time Vulkan path tracer for exploring a spectrally modeled sk
 
 ## Situation
 
-Atmospheric light changes with wavelength. A convincing sky renderer must account for effects such as Rayleigh and Mie scattering, ozone absorption, and the finite size of the Sun. Polarization and rainbows add further interactions to represent.
+Atmospheric light changes with wavelength. A convincing sky renderer must account for effects such as Rayleigh and Mie scattering, ozone absorption, and the finite size of the Sun. Polarization adds further interactions to represent.
 
 ## Task
 
-Vulkanic brings these effects together in an interactive renderer. It samples one random wavelength from 380 to 780 nm for each path sample, interpolating lookup tables built at 17 reference wavelengths. It traces sky and optional rain-volume contributions on the GPU.
+Vulkanic brings these effects together in an interactive renderer. It samples one random wavelength from 380 to 780 nm for each path sample, interpolating lookup tables built at 17 reference wavelengths. It traces atmospheric scattering on the GPU.
 
 ## Action
 
-The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering, the solar disk, and optional rainbow scattering at the sampled wavelength. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
+The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk at the sampled wavelength. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
-Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, rain, polarization, and camera-dependent rays each frame.
+Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
 
 ## Result
 
-The result is an interactive sky-rendering demo that exposes how spectral scattering, polarization, and rain-volume parameters shape the image. Build and run it using the steps below.
+The result is an interactive sky-rendering demo that exposes how spectral scattering and polarization shape the image. Build and run it using the steps below.
 
 ![Vulkanic renderer output showing the solar disk and atmospheric scattering](assets/renderer-result.png)
 
@@ -84,7 +84,7 @@ The window title reports FPS and frame time. Controls:
 
 ## GPU performance profiling
 
-Measured on October 13, 2026, using the Release build and default 1280 × 720 scene settings. The view remained stationary with the default camera. Rain rendering was disabled.
+Measured on October 13, 2026, using the Release build and default 1280 × 720 scene settings. The view remained stationary with the default camera.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |

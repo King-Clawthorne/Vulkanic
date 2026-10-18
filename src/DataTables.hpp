@@ -9,15 +9,6 @@
 #include <array>
 #include <glm/vec3.hpp>
 
-/// Water refractive index at the renderer's 17 wavelengths from 380 to 780 nm in 25 nm steps.
-inline constexpr std::array<double, 17> kWaterIor = {
-    1.345625264, 1.343094174, 1.341017536, 1.339284733,
-    1.337817055, 1.336557080, 1.335462010, 1.334499349,
-    1.333644016, 1.332876374, 1.332180846, 1.331544926,
-    1.330958465, 1.330413146, 1.329902083, 1.329419530,
-    1.328960647,
-};
-
 /// Ozone cross-section samples at 1 nm intervals from 360 through 830 nm.
 inline constexpr std::array<double, 471> kOzoneCrossSection = {
     7.867290E-27, 6.494940E-27, 3.905860E-27, 3.396930E-27, 2.691570E-27,

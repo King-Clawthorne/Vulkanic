@@ -113,36 +113,29 @@ constexpr uint32_t kPathTracerSpirv[] = {
 /// Uniform-buffer payload shared with the compute shader.
 ///
 /// Members are packed into 16-byte vectors to match the shader's std140 layout.
-/// the static assertions below guard the offsets and total size.
+/// The static assertions below guard the offsets and total size.
 struct alignas(16) SceneData {
 	glm::vec4 skySpectralParams; ///< 550 nm Rayleigh coefficient, first aerosol beta, reserved, and sun radiance.
 	glm::vec4 skyRadiiScaleHeights; ///< Earth radius, atmosphere radius, Rayleigh scale height, and first aerosol scale height.
 	glm::vec4 skySunDirectionRadius; ///< Sun direction in xyz and angular radius in radians.
 	glm::vec4 skyVrtParams; ///< Sun antialiasing angle, Rayleigh depolarization, Mie angle-bin count, and second aerosol scale height.
-	glm::vec4 rainbowCenterEnabled; ///< Rainbow center in xyz and enabled flag in w.
-	glm::vec4 rainbowRadiiEdge; ///< Configured rainbow radii and edge softness.
-	glm::vec4 rainbowOptical; ///< Rainbow scattering/extinction coefficients, angle-bin count, and view-step count.
-	glm::uvec4 rainbowMultiple; ///< Rainbow scattering order, multiple-scattering sample and step counts, and a reserved value.
 	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and ozone term.
 	glm::vec4 cieXyz[kSpectralBandCount]; ///< Normalized CIE XYZ matching values for each spectral band.
 	glm::vec4 sunDisk; ///< Sun solid angle, angular antialiasing bounds as cosines, and a reserved value.
 	glm::vec4 mieBands[kSpectralBandCount]; ///< Per-band extinction/scattering scales for the two aerosol populations.
-	glm::vec4 rainbowAxisX; ///< World-space local X axis for rainbow coordinates.
-	glm::vec4 rainbowAxisZ; ///< World-space local Z axis for rainbow coordinates.
 	glm::vec4 apparentSun; ///< Refracted sun direction in xyz and vertical refraction scale in w.
 	glm::vec4 proposalScattering; ///< Wavelength-averaged scattering coefficients for path sampling.
 	glm::vec4 proposalExtinction; ///< Wavelength-averaged extinction coefficients for path sampling.
 };
 
 static_assert(offsetof(SceneData, skyVrtParams) == 48);
-static_assert(offsetof(SceneData, rainbowMultiple) == 112);
-static_assert(offsetof(SceneData, spectralBands) == 128);
-static_assert(offsetof(SceneData, proposalScattering) == 1008);
-static_assert(offsetof(SceneData, proposalExtinction) == 1024);
-static_assert(sizeof(SceneData) == 1040);
+static_assert(offsetof(SceneData, spectralBands) == 64);
+static_assert(offsetof(SceneData, proposalScattering) == 912);
+static_assert(offsetof(SceneData, proposalExtinction) == 928);
+static_assert(sizeof(SceneData) == 944);
 
 /// Descriptor types in the binding order expected by Main.comp.
-constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
+constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
 
 /// Per-dispatch camera, frame, polarizer, and image parameters.
 struct PushConstants {
@@ -204,18 +197,14 @@ private:
 		app->m_camera.OnKeyPress(key);
 	}
 
-	/// Packs configured atmospheric, spectral, and rainbow values for the shader.
+	/// Packs configured atmospheric and spectral values for the shader.
 	[[nodiscard]] SceneData BuildSceneData() const {
 		const SkySpectralConfig& s = m_config.sky.spectral;
-		const RainbowConfig& r = m_config.rainbow;
 		SceneData sceneData {
 			.skySpectralParams = { s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550 },
 			.skyRadiiScaleHeights = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight },
 			.skySunDirectionRadius = { s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius },
 			.skyVrtParams = { s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight },
-			.rainbowRadiiEdge = { r.radii.x, r.radii.y, r.radii.z, r.edgeSoftness },
-			.rainbowOptical = { r.scatteringCoefficient, r.extinctionCoefficient, static_cast<float>(r.angleBins), static_cast<float>(r.viewSteps) },
-			.rainbowMultiple = { r.scatteringOrders, r.multipleScatteringSamples, r.multipleScatteringSteps, 0 },
 		};
 
 		float ySum = 0.0f;
@@ -248,12 +237,6 @@ private:
 		const float apparentAltitude = (trueAltitude + refraction(trueAltitude)) * kPi / 180.0f;
 		const float horizontal = std::hypot(s.sunDirection[0], s.sunDirection[2]);
 		sceneData.apparentSun = { std::cos(apparentAltitude) * s.sunDirection[0] / horizontal, std::sin(apparentAltitude), std::cos(apparentAltitude) * s.sunDirection[2] / horizontal, 1.0f + ((refraction(trueAltitude + 0.1f) - refraction(trueAltitude - 0.1f)) / 0.2f) };
-		const float sunLength = std::hypot(s.sunDirection[0], s.sunDirection[2]);
-		const float ax = -s.sunDirection[0] / sunLength;
-		const float az = -s.sunDirection[2] / sunLength;
-		sceneData.rainbowCenterEnabled = { ax * r.distance, r.height, az * r.distance, static_cast<float>(r.enabled) };
-		sceneData.rainbowAxisX = { az, 0.0f, -ax, 0.0f };
-		sceneData.rainbowAxisZ = { ax, 0.0f, az, 0.0f };
 
 		for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
 			const double beta = s.aerosols[aerosol].beta;
@@ -317,9 +300,6 @@ private:
 		}
 
 		m_mieScatteringBuffer = CreateTableBuffer(mie);
-		std::vector<glm::vec4> rainbow = ComputeRainbowScatteringTable(m_config.rainbow, s.sunRadius);
-		AppendSamplingCdf(rainbow, static_cast<int>(m_config.rainbow.angleBins), 0, visibleWeights);
-		m_rainbowScatteringBuffer = CreateTableBuffer(rainbow);
 		m_transmittanceBuffer = CreateTableBuffer(ComputeTransmittanceTable(s));
 		const SceneData sceneData = BuildSceneData();
 		UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span { &sceneData, 1 }));
@@ -459,8 +439,8 @@ private:
 	/// Creates the compute pipeline and supplies specialization and push-constant layouts.
 	void CreatePipeline() {
 		const vk::raii::ShaderModule computeModule { m_device, vk::ShaderModuleCreateInfo { { }, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv) } };
-		const std::array<uint32_t, 5> settings = { std::max(1u, m_config.sky.spectral.scatteringOrders), m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples, m_config.sky.spectral.secondarySamples, (m_config.rainbow.enabled != 0u) ? 1u : 0u };
-		const std::array<vk::SpecializationMapEntry, 5> entries = { { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 }, { 4, 16, 4 } } };
+		const std::array<uint32_t, 4> settings = { std::max(1u, m_config.sky.spectral.scatteringOrders), m_config.sky.spectral.viewSteps, m_config.sky.spectral.samples, m_config.sky.spectral.secondarySamples };
+		const std::array<vk::SpecializationMapEntry, 4> entries = { { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } } };
 		const vk::SpecializationInfo specialization { static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data() };
 		const vk::PushConstantRange pushRange { vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants) };
 		vk::PipelineLayoutCreateInfo layoutInfo { };
@@ -531,7 +511,7 @@ private:
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
 		const vk::DescriptorImageInfo imageInfo { { }, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral };
 		const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo { *b, 0, vk::WholeSize }; };
-		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer), bufferInfo(m_rainbowScatteringBuffer), bufferInfo(m_transmittanceBuffer), bufferInfo(m_accumulationBuffer) };
+		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer), bufferInfo(m_transmittanceBuffer), bufferInfo(m_accumulationBuffer) };
 
 		std::array<vk::WriteDescriptorSet, kDescriptorTypes.size()> writes { };
 		writes[0] = vk::WriteDescriptorSet { { }, 0, 0, kDescriptorTypes[0], imageInfo };
@@ -628,7 +608,7 @@ private:
 	vk::raii::Queue m_presentQueue { nullptr };
 
 	vma::raii::Allocator m_allocator { nullptr };
-	vma::raii::Buffer m_sceneDataBuffer { nullptr }, m_mieScatteringBuffer { nullptr }, m_rainbowScatteringBuffer { nullptr };
+	vma::raii::Buffer m_sceneDataBuffer { nullptr }, m_mieScatteringBuffer { nullptr };
 	vma::raii::Buffer m_transmittanceBuffer { nullptr }, m_accumulationBuffer { nullptr };
 	std::array<std::array<glm::dvec2, kSpectralBandCount>, 2> m_mieCrossSections { };
 
