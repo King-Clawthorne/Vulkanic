@@ -7,6 +7,7 @@
 #version 460
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+/// Storage image written by this workgroup's pixel invocation.
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
     vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
@@ -14,44 +15,59 @@ layout(set = 0, binding = 1) uniform SceneData {
     vec4 spectralBands[17], cieXyz[17], sunDisk;
     vec4 mieBands[17];
     vec4 proposalScattering, proposalExtinction;
-} sceneData;
+} sceneData; ///< Scene uniforms shared by the host and compute shader.
 
-layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer;
-layout(std430, set = 0, binding = 3) readonly buffer TransmittanceBuffer { vec4 depth[]; } transmittanceLut;
-layout(std430, set = 0, binding = 4) buffer AccumulationBuffer { vec4 pixels[]; } accumulation;
+layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer; ///< Mie phase rows followed by the angular sampling CDFs.
+layout(std430, set = 0, binding = 3) readonly buffer TransmittanceBuffer { vec4 depth[]; } transmittanceLut; ///< Preintegrated atmospheric density columns.
+layout(std430, set = 0, binding = 4) buffer AccumulationBuffer { vec4 pixels[]; } accumulation; ///< Per-pixel XYZ running averages and sample counts.
 
 layout(push_constant) uniform PushConstants {
     vec4 forward, right, up, frame, polarizer;
     uvec2 imageSize;
-} pc;
+} pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
-layout(constant_id = 0) const uint SpecializedOrders = 1;
-layout(constant_id = 1) const uint SpecializedViewSteps = 0;
-layout(constant_id = 2) const uint SpecializedSecondarySamples = 0;
+layout(constant_id = 0) const uint SpecializedOrders = 1; ///< Maximum scattering order compiled into the pipeline.
+layout(constant_id = 1) const uint SpecializedViewSteps = 0; ///< Primary segment steps, zero selects the shader default.
+layout(constant_id = 2) const uint SpecializedSecondarySamples = 0; ///< Secondary segment samples, zero selects the shader default.
 
-const float PI = 3.14159265358979323846;
-const int SPECTRAL_BANDS = 17;
-const float LAMBDA_MIN_NM = 380.0;
-const float LAMBDA_RANGE_NM = 400.0;
-const float LAMBDA_STEP_NM = 25.0;
-const float GOLDEN_ANGLE = 2.39996322972865332;
-const int LUT_ALT = 64, LUT_MU = 256;
+const float PI = 3.14159265358979323846; ///< Pi in radians.
+const int SPECTRAL_BANDS = 17; ///< Number of reference wavelengths in sceneData.
+const float LAMBDA_MIN_NM = 380.0; ///< First reference wavelength, in nanometres.
+const float LAMBDA_RANGE_NM = 400.0; ///< Width of the sampled wavelength interval, in nanometres.
+const float LAMBDA_STEP_NM = 25.0; ///< Spacing between adjacent reference wavelengths, in nanometres.
+const float GOLDEN_ANGLE = 2.39996322972865332; ///< Azimuthal rotation used to decorrelate scattering samples, in radians.
+const int LUT_ALT = 64; ///< Number of altitude samples in the transmittance table.
+const int LUT_MU = 256; ///< Number of direction cosine samples in each transmittance row.
 
-int gBandLower, gBandUpper;
-float gBandFraction, gWavelengthNm;
-vec4 gSpectralBand, gCieXyz, gMieBand;
+int gBandLower; ///< Lower wavelength table row used by the current sample.
+int gBandUpper; ///< Upper wavelength table row used by the current sample.
+float gBandFraction; ///< Interpolation fraction between wavelength table rows.
+float gWavelengthNm; ///< Current sampled wavelength, in nanometres.
+vec4 gSpectralBand; ///< Interpolated Rayleigh and solar spectral parameters.
+vec4 gCieXyz; ///< Interpolated CIE XYZ matching values.
+vec4 gMieBand; ///< Interpolated fine and coarse aerosol parameters.
 
+/// Converts the high 23 bits of an integer to a floating point variate in (0, 1).
+/// @param x Integer random value.
+/// @return Floating point variate in (0, 1).
+/// @ingroup compute_shader_reference
 float ToUnit(uint x) { return (float(x >> 9u) + 0.5) * (1.0 / 8388608.0); }
 
+/// Mixes the bits of an integer to produce a deterministic pseudorandom value.
+/// @param x Input integer.
+/// @return Hashed integer.
+/// @ingroup compute_shader_reference
 uint Hash(uint x) {
     x = x * 747796405u + 2891336453u;
     x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
     return (x >> 22u) ^ x;
 }
 
-const uint SAMPLE_DIMENSIONS = 16u;
-const uint WAVELENGTH_DIMENSION = 2u;
-const uint TRANSPORT_DIMENSION = WAVELENGTH_DIMENSION + 1u;
+const uint SAMPLE_DIMENSIONS = 16u; ///< Number of dimensions with Sobol direction numbers.
+const uint WAVELENGTH_DIMENSION = 2u; ///< Sobol dimension used to choose a wavelength.
+const uint TRANSPORT_DIMENSION = WAVELENGTH_DIMENSION + 1u; ///< First dimension used by the transport estimator.
+/// Sobol direction numbers, arranged as 32 values for each supported dimension.
+/// @ingroup compute_shader_reference
 const uint SOBOL_DIRECTIONS[512] = uint[512](
     0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
     0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
@@ -119,6 +135,11 @@ const uint SOBOL_DIRECTIONS[512] = uint[512](
     0xb629b880u, 0x8d727cc0u, 0xbb836220u, 0xf7c4d7d0u, 0x6e29b858u, 0x49727c04u, 0xfd836266u, 0x72c4d755u
 );
 
+/// Applies a nested uniform scramble to a Sobol integer sample.
+/// @param value Unscrambled integer sample.
+/// @param seed Scramble seed for the sample dimension.
+/// @return Scrambled integer sample.
+/// @ingroup compute_shader_reference
 uint NestedUniformScramble(uint value, uint seed) {
     value = bitfieldReverse(value);
     value ^= value * 0x3d20adeau;
@@ -129,6 +150,12 @@ uint NestedUniformScramble(uint value, uint seed) {
     return bitfieldReverse(value);
 }
 
+/// Generates a deterministic low-discrepancy variate for one sample dimension.
+/// @param index Sample index.
+/// @param dimension Sobol dimension, or a hashed fallback dimension.
+/// @param scramble Pixel or path specific scramble seed.
+/// @return Floating point sample in (0, 1).
+/// @ingroup compute_shader_reference
 float SampleFloat(uint index, uint dimension, uint scramble) {
     uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
     if (dimension >= SAMPLE_DIMENSIONS) return ToUnit(Hash(index ^ seed));
@@ -142,11 +169,21 @@ float SampleFloat(uint index, uint dimension, uint scramble) {
     return ToUnit(NestedUniformScramble(value, seed));
 }
 
+/// Evaluates exponential Rayleigh and aerosol densities at a world-space position.
+/// @param pos Position in world space, in metres.
+/// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol densities.
+/// @ingroup compute_shader_reference
 vec4 air_density(vec3 pos) {
     float h = max(length(pos) - sceneData.skyRadiiScaleHeights.x, 0.0);
     return vec4(exp(-h / sceneData.skyRadiiScaleHeights.zw), 0.0, exp(-h / sceneData.skyVrtParams.w));
 }
 
+/// Computes the near and far intersections of a ray with a sphere.
+/// @param origin Ray origin in world space.
+/// @param dir Unit ray direction.
+/// @param radius Sphere radius, in metres.
+/// @return Near and far ray distances, or (-1, -1) when there is no intersection.
+/// @ingroup compute_shader_reference
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
     float b = dot(origin, dir);
     float d = b * b - dot(origin, origin) + radius * radius;
@@ -154,6 +191,13 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
     return vec2(-b - sqrt(d), -b + sqrt(d));
 }
 
+/// Clips a ray to the atmosphere and stops it at the ground when it intersects the planet.
+/// @param origin Ray origin in world space.
+/// @param dir Unit ray direction.
+/// @param[out] tStart Distance to the atmosphere entry point, clamped to zero.
+/// @param[out] tEnd Distance to the atmosphere exit or ground intersection.
+/// @return Whether the ray intersects the atmosphere.
+/// @ingroup compute_shader_reference
 bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
     vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.y);
     vec2 ground = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.x);
@@ -163,6 +207,11 @@ bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
     return atmosphere.y >= 0.0;
 }
 
+/// Bilinearly samples the preintegrated density columns from origin to the atmosphere boundary.
+/// @param origin Position in world space, in metres.
+/// @param dir Unit ray direction.
+/// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol density columns.
+/// @ingroup compute_shader_reference
 vec4 sun_air_depth(vec3 origin, vec3 dir) {
     float r = length(origin), mu = dot(origin, dir) / r;
     float x = sqrt(clamp((r - sceneData.skyRadiiScaleHeights.x) / (sceneData.skyRadiiScaleHeights.y - sceneData.skyRadiiScaleHeights.x), 0.0, 1.0)) * float(LUT_ALT - 1);
@@ -174,25 +223,71 @@ vec4 sun_air_depth(vec3 origin, vec3 dir) {
     return mix(mix(transmittanceLut.depth[k], transmittanceLut.depth[k + 1], f.y), mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
 }
 
+/// Evaluates scalar atmospheric transmittance for the current wavelength.
+/// @param depth Integrated Rayleigh and aerosol density columns.
+/// @return Fraction of radiance transmitted through the segment.
+/// @ingroup compute_shader_reference
 float wavelength_transmittance(vec4 depth) { return exp(-(gSpectralBand.x * depth.x + gMieBand.x * depth.y + gMieBand.z * depth.w)); }
+
+/// Constructs the renderer's structured Mueller matrix from its independent terms.
+/// @param m11 First intensity term.
+/// @param m12 Intensity and linear-polarization coupling term.
+/// @param m22 Second linear-polarization term.
+/// @param m33 First circular-polarization term.
+/// @param m34 Coupling between the two circular-polarization terms.
+/// @param m44 Second circular-polarization term.
+/// @return Mueller matrix in the shader's Stokes convention.
+/// @ingroup compute_shader_reference
 mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) { return mat4(m11, m12, 0.0, 0.0, m12, m22, 0.0, 0.0, 0.0, 0.0, m33, -m34, 0.0, 0.0, m34, m44); }
 
+/// Clamps a Stokes vector to nonnegative intensity and physically valid polarization magnitude.
+/// @param s Input Stokes vector ordered as I, Q, U, V.
+/// @return Physically valid Stokes vector.
+/// @ingroup compute_shader_reference
 vec4 stokes_make_physical(vec4 s) {
     s.x = max(s.x, 0.0);
     float p = length(s.yzw);
     return p > s.x ? vec4(s.x, s.yzw * s.x / p) : s;
 }
 
+/// Builds an orthonormal polarization basis perpendicular to a direction.
+/// @param d Unit direction of propagation.
+/// @param[out] a First transverse basis vector.
+/// @param[out] b Second transverse basis vector, equal to cross(d, a).
+/// @ingroup compute_shader_reference
 void beam_basis(vec3 d, out vec3 a, out vec3 b) {
     vec3 up = abs(d.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     a = normalize(up - d * dot(d, up));
     b = cross(d, a);
 }
 
+/// Converts cosine and sine of an angle to cosine and sine of twice that angle.
+/// @param c Cosine of the angle.
+/// @param sn Sine of the angle.
+/// @return Cosine and sine of twice the angle.
+/// @ingroup compute_shader_reference
 vec2 rotation(float c, float sn) { return vec2(c * c - sn * sn, 2.0 * c * sn); }
+
+/// Rotates the linear-polarization components of a Stokes vector.
+/// @param s Input Stokes vector ordered as I, Q, U, V.
+/// @param r Cosine and sine of twice the basis rotation angle.
+/// @return Stokes vector expressed in the rotated basis.
+/// @ingroup compute_shader_reference
 vec4 rotate(vec4 s, vec2 r) { return vec4(s.x, s.y * r.x + s.z * r.y, -s.y * r.y + s.z * r.x, s.w); }
+
+/// Re-expresses a Stokes vector using a new transverse reference axis.
+/// @param s Input Stokes vector ordered as I, Q, U, V.
+/// @param oldA First axis of the input basis.
+/// @param oldB Second axis of the input basis.
+/// @param newA First axis of the destination basis.
+/// @return Stokes vector expressed in the destination basis.
+/// @ingroup compute_shader_reference
 vec4 vec4_reframe(vec4 s, vec3 oldA, vec3 oldB, vec3 newA) { return rotate(s, rotation(dot(newA, oldA), dot(newA, oldB))); }
 
+/// Evaluates the Rayleigh Mueller matrix at a scattering angle.
+/// @param cosTheta Cosine of the angle between incoming and outgoing directions.
+/// @return Rayleigh Mueller matrix including configured depolarization.
+/// @ingroup compute_shader_reference
 mat4 rayleigh_mueller(float cosTheta) {
     float kingDepolarization = sceneData.skyVrtParams.y;
     float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
@@ -202,6 +297,13 @@ mat4 rayleigh_mueller(float cosTheta) {
     return mueller(mix(1.0, base, kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base, kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
 }
 
+/// Computes polarization-frame rotations and sign corrections for a scattering event.
+/// @param din Incoming unit direction.
+/// @param dout Outgoing unit direction.
+/// @param cosTheta Cosine of the scattering angle.
+/// @param[out] rot Input and output double-angle rotations.
+/// @param[out] flip Stokes-component signs for degenerate frames.
+/// @ingroup compute_shader_reference
 void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 flip) {
     rot = vec4(1.0, 0.0, 1.0, 0.0);
     flip = vec4(1.0);
@@ -222,6 +324,13 @@ void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 f
     rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
 }
 
+/// Applies a Mueller matrix between rotated polarization frames.
+/// @param m Scattering Mueller matrix.
+/// @param s Input Stokes vector.
+/// @param rot Input and output double-angle rotations.
+/// @param flip Stokes-component signs for degenerate frames.
+/// @return Output Stokes vector.
+/// @ingroup compute_shader_reference
 vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
 
 /// Geometry and lookup coordinates shared by Rayleigh and Mie scattering.
@@ -234,6 +343,11 @@ struct ScatterGeom {
     float frac; ///< Interpolation fraction from bin to the next angular sample.
 };
 
+/// Computes scattering angle, polarization frames, and Mie table coordinates.
+/// @param din Incoming unit direction.
+/// @param dout Outgoing unit direction.
+/// @return Shared geometry for Rayleigh and Mie scattering evaluation.
+/// @ingroup compute_shader_reference
 ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
     ScatterGeom g;
     float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
@@ -245,6 +359,11 @@ ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
     return g;
 }
 
+/// Interpolates the packed Mie phase table and constructs its Mueller matrix.
+/// @param g Scattering geometry and angular table coordinates.
+/// @param aerosol Aerosol table index, zero for fine and one for coarse.
+/// @return Mie Mueller matrix in the shader's Stokes convention.
+/// @ingroup compute_shader_reference
 mat4 mie_mueller(ScatterGeom g, int aerosol) {
     int bins = max(2, int(sceneData.skyVrtParams.z));
     int base0 = (aerosol * SPECTRAL_BANDS + gBandLower) * bins;
@@ -255,6 +374,12 @@ mat4 mie_mueller(ScatterGeom g, int aerosol) {
     return mueller(e.x, e.y, e.x, e.z, e.w, e.z);
 }
 
+/// Combines wavelength-scaled Rayleigh and aerosol scattering and applies the Stokes frame changes.
+/// @param g Scattering geometry and polarization frame data.
+/// @param s Input Stokes radiance.
+/// @param w Local Rayleigh, fine-aerosol, and coarse-aerosol density values.
+/// @return Scattered Stokes radiance at the current wavelength.
+/// @ingroup compute_shader_reference
 vec4 scatter_wavelength(ScatterGeom g, vec4 s, vec3 w) {
     mat4 m = gSpectralBand.x * w.x * g.rayleigh + gMieBand.y * w.y * mie_mueller(g, 0);
     m += w.z > 0.0 ? gMieBand.w * w.z * mie_mueller(g, 1) : mat4(0.0);
@@ -284,29 +409,59 @@ struct Level {
     vec4 angular; ///< Stokes angular-scattering estimate accumulated for the current sample.
 };
 
-const int STACK = int(SpecializedOrders);
-Level S[STACK];
-uint gRngIndex, gRngScramble;
+const int STACK = int(SpecializedOrders); ///< Maximum number of nested scattering levels.
+Level S[STACK]; ///< Per-level path estimator state.
+uint gRngIndex; ///< Current low-discrepancy sample index.
+uint gRngScramble; ///< Current pixel and path scramble seed.
 
+/// Constructs a unit direction at spherical angles around an axis.
+/// @param axis Unit reference axis.
+/// @param theta Polar angle from the axis, in radians.
+/// @param phi Azimuth angle around the axis, in radians.
+/// @return Unit direction.
+/// @ingroup compute_shader_reference
 vec3 spherical_around(vec3 axis, float theta, float phi) {
     vec3 a, b;
     beam_basis(axis, a, b);
     return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
 }
 
+/// Returns the base entry and angular bin count for one packed aerosol CDF.
+/// @param aerosol Aerosol table index, zero for fine and one for coarse.
+/// @return CDF base entry and number of angular samples.
+/// @ingroup compute_shader_reference
 ivec2 cdf_layout(int aerosol) {
     int bins = max(2, int(sceneData.skyVrtParams.z));
     return ivec2(bins * (2 * SPECTRAL_BANDS + aerosol), bins);
 }
 
+/// Reads a cumulative probability value from the packed Mie buffer.
+/// @param i Buffer entry index.
+/// @return CDF value stored in the entry's x component.
+/// @ingroup compute_shader_reference
 float cdf_at(int i) { return mieMatrixBuffer.entries[i].x; }
+
+/// Reads a fitted within-bin density parameter from the packed Mie buffer.
+/// @param i Buffer entry index.
+/// @return Shape parameter stored in the entry's y component.
+/// @ingroup compute_shader_reference
 float cdf_shape(int i) { return mieMatrixBuffer.entries[i].y; }
 
+/// Computes the solid-angle measure of an angular bin on the uniform theta grid.
+/// @param bin Angular bin index.
+/// @param bins Number of angular samples in the grid.
+/// @return Integral of sin(theta) across the bin.
+/// @ingroup compute_shader_reference
 float cdf_cosine_width(int bin, int bins) {
     float halfWidth = 0.5 * PI / float(bins - 1);
     return 2.0 * sin(float(2 * bin + 1) * halfWidth) * sin(halfWidth);
 }
 
+/// Evaluates the aerosol direction proposal density at a scattering angle.
+/// @param aerosol Aerosol table index, zero for fine and one for coarse.
+/// @param cosTheta Cosine of the scattering angle.
+/// @return Directional probability density per unit solid angle.
+/// @ingroup compute_shader_reference
 float cdf_pdf(int aerosol, float cosTheta) {
     ivec2 info = cdf_layout(aerosol);
     float theta = acos(clamp(cosTheta, -1.0, 1.0));
@@ -364,6 +519,11 @@ vec3 cdf_sample(int aerosol, vec3 axis, float u, float phi) {
     return spherical_around(axis, theta, phi);
 }
 
+/// Evaluates a normalized truncated exponential density on the unit interval.
+/// @param t Position in [0, 1].
+/// @param rate Signed exponential rate, with negative rates favoring the far end.
+/// @return Probability density at t.
+/// @ingroup compute_shader_reference
 float distance_pdf(float t, float rate) {
     float k = abs(rate);
     if (k < 1.0e-3) return 1.0;
@@ -461,6 +621,12 @@ void begin_step(int d, int steps) {
     S[d].sampleIndex = 0;
 }
 
+/// Converts the completed estimator state at one stack level to a physical Stokes value.
+/// @param leaf Whether this is the final scattering level.
+/// @param g Sun-scattering geometry used for a leaf contribution.
+/// @param d Stack depth containing the accumulated estimate.
+/// @return Physical Stokes radiance for this level.
+/// @ingroup compute_shader_reference
 vec4 level_value(bool leaf, ScatterGeom g, int d) {
     if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.xyz));
     return stokes_make_physical(S[d].result);

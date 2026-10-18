@@ -45,6 +45,14 @@ try {
     if (-not (Test-Path -LiteralPath $buildNinjaPath) -or -not (Test-Path -LiteralPath $compileCommandsPath)) { & $cmakeExecutable.Source --preset windows }
     if (-not (Test-Path -LiteralPath $compileCommandsPath)) { throw 'CMake did not generate build/compile_commands.json.' }
     & $cmakeExecutable.Source --build --preset windows --parallel
+    if (-not (Get-Command dot -CommandType Application -ErrorAction SilentlyContinue)) {
+        $programFilesRoots = @($env:ProgramW6432, $env:ProgramFiles) | Where-Object { $_ }
+        $graphvizBin = $programFilesRoots |
+            ForEach-Object { Join-Path $_ 'Graphviz\bin' } |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_ 'dot.exe') } |
+            Select-Object -First 1
+        if ($graphvizBin) { $env:PATH = "$graphvizBin;$env:PATH" }
+    }
     Write-Host 'Generating Doxygen documentation'
     & $doxygenExecutable.Source Doxyfile
     $clangTidyExecutable = Get-Command clang-tidy -CommandType Application | Select-Object -First 1
