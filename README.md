@@ -64,7 +64,17 @@ doxygen Doxyfile
 cmake --build --preset windows --target docs
 ```
 
-The HTML documentation is written to `build/docs/html/index.html`.
+The HTML documentation is written to `build/docs/html/index.html`. The build
+script and CMake docs target copy the image assets into the HTML output. For a
+direct Doxygen run, copy them with:
+
+```powershell
+cmake -E copy_directory assets build/docs/html/assets
+```
+
+Doxygen and Graphviz `dot` are required for documentation generation. The build
+script and CMake target locate `dot` in the default Graphviz install directory.
+For a direct Doxygen run, make sure `dot` is on `PATH`.
 
 ## Run
 

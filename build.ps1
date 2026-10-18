@@ -11,7 +11,8 @@ Doxygen documentation, then runs clang-tidy on each C++ source file using the
 compilation database.
 
 Requires CMake 4.4 or newer. Doxygen, clang-format, and clang-tidy must be
-available on PATH. The Windows preset also requires Ninja, clang-cl, and a
+available on PATH. Graphviz dot must be on PATH or installed in the default
+Graphviz directory. The Windows preset also requires Ninja, clang-cl, and a
 Vulkan SDK with glslc.
 
 .EXAMPLE
@@ -53,8 +54,12 @@ try {
             Select-Object -First 1
         if ($graphvizBin) { $env:PATH = "$graphvizBin;$env:PATH" }
     }
+    if (-not (Get-Command dot -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw 'Graphviz dot is required to generate the Doxygen documentation. Add Graphviz to PATH.'
+    }
     Write-Host 'Generating Doxygen documentation'
     & $doxygenExecutable.Source Doxyfile
+    & $cmakeExecutable.Source -E copy_directory (Join-Path $PSScriptRoot 'assets') (Join-Path $buildPath 'docs\html\assets')
     $clangTidyExecutable = Get-Command clang-tidy -CommandType Application | Select-Object -First 1
     $maxParallelTidyProcesses = [Math]::Min($cppFiles.Count, [Environment]::ProcessorCount)
     $pendingTidyFiles = [System.Collections.Generic.Queue[string]]::new()

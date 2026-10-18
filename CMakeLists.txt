@@ -68,13 +68,35 @@ target_link_libraries(
 target_compile_options(Vulkanic PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-nullability-completeness>)
 
 find_package(Doxygen QUIET)
-if(DOXYGEN_FOUND)
-    doxygen_add_docs(
+# The Doxyfile enables Graphviz, so locate dot even when it is outside PATH.
+find_program(
+    VULKANIC_DOT_EXECUTABLE
+    NAMES dot
+    HINTS
+        "$ENV{ProgramW6432}/Graphviz/bin"
+        "$ENV{ProgramFiles}/Graphviz/bin"
+)
+
+if(DOXYGEN_FOUND AND VULKANIC_DOT_EXECUTABLE)
+    get_filename_component(VULKANIC_DOT_DIRECTORY "${VULKANIC_DOT_EXECUTABLE}" DIRECTORY)
+    set(VULKANIC_DOCS_PATH "$ENV{PATH}")
+    if(VULKANIC_DOCS_PATH)
+        set(VULKANIC_DOCS_PATH "${VULKANIC_DOT_DIRECTORY};${VULKANIC_DOCS_PATH}")
+    else()
+        set(VULKANIC_DOCS_PATH "${VULKANIC_DOT_DIRECTORY}")
+    endif()
+
+    add_custom_target(
         docs
-        CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile"
+        COMMAND "${CMAKE_COMMAND}" -E env "PATH=${VULKANIC_DOCS_PATH}"
+                "$<TARGET_FILE:Doxygen::doxygen>" Doxyfile
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+                "${CMAKE_CURRENT_SOURCE_DIR}/build/docs/html/assets"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Generating Vulkanic API and shader documentation"
+        VERBATIM
     )
 else()
-    message(STATUS "Doxygen was not found. The optional docs target is unavailable")
+    message(STATUS "Doxygen or Graphviz dot was not found. The optional docs target is unavailable")
 endif()
