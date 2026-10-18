@@ -39,44 +39,6 @@ vec4 gSpectralBand, gCieXyz, gMieBand;
 
 float ToUnit(uint x) { return (float(x >> 9u) + 0.5) * (1.0 / 8388608.0); }
 
-float solar_limb_intensity(float mu, float wavelengthNm) {
-    float wavelengthUm = wavelengthNm * 0.001;
-    float inv = 1.0 / wavelengthUm, inv5 = inv * inv * inv * inv * inv;
-    float coefficients[6];
-
-    if (wavelengthNm >= 422.57) {
-        coefficients[0] = 0.75267 - 0.265577 * inv;
-        coefficients[1] = 0.93874 + 0.265577 * inv - 0.004095 * inv5;
-        coefficients[2] = -1.89287 + 0.012582 * inv5;
-        coefficients[3] = 2.42234 - 0.017117 * inv5;
-        coefficients[4] = -1.71150 + 0.011977 * inv5;
-        coefficients[5] = 0.49062 - 0.003347 * inv5;
-    } else {
-        float alpha = clamp(-0.507 + 0.441 * inv, 0.0, 1.0);
-        return 0.5 * (alpha + 2.0) * pow(max(mu, 0.0), alpha);
-    }
-
-    float profile = coefficients[5];
-    for (int i = 4; i >= 0; --i) profile = profile * mu + coefficients[i];
-    float diskAverage = 0.0;
-    for (int i = 0; i < 6; ++i) diskAverage += 2.0 * coefficients[i] / float(i + 2);
-    return profile / diskAverage;
-}
-
-float solar_limb_polarization(float mu, float wavelengthNm, float intensityRatio) {
-    const float continuumPercent[12] = float[12](0.188052, 0.115055, 0.073447, 0.048919, 0.033996, 0.024649, 0.018648, 0.014720, 0.012123, 0.010416, 0.009340, 0.008744);
-    float wavelength = clamp(wavelengthNm, 400.0, 675.0);
-    int lower = clamp(int(floor(0.04 * wavelength - 16.0)), 0, 10);
-    float t = 0.04 * wavelength - 16.0 - float(lower);
-    float pAtMuPoint = mix(continuumPercent[lower], continuumPercent[lower + 1], t) * 0.01;
-    float fitWavelengthNm = clamp(wavelengthNm, 400.0, 700.0);
-    float m = 0.14 - 1.6e-5 * fitWavelengthNm;
-    float limbFactor = (1.0 - mu * mu) / max((mu + m) * intensityRatio, 1.0e-6);
-    float referenceIntensity = solar_limb_intensity(0.1, wavelengthNm);
-    float referenceFactor = 0.99 / max((0.1 + m) * referenceIntensity, 1.0e-6);
-    return pAtMuPoint * limbFactor / referenceFactor;
-}
-
 uint Hash(uint x) {
     x = x * 747796405u + 2891336453u;
     x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
@@ -668,33 +630,15 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
         scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSamples), int(SpecializedSecondarySamples), sky);
     }
 
-    vec3 solarDirection = L;
     vec3 vertical, horizontal;
-    beam_basis(solarDirection, horizontal, vertical);
-    vec2 offset = vec2(dot(viewDir, cross(vertical, solarDirection)), dot(viewDir, vertical));
-    float r = dot(viewDir, solarDirection) > 0.0 ? length(offset) : 1.0;
-    float disk = 1.0 - smoothstep(sceneData.skySunDirectionRadius.w - sceneData.skyVrtParams.x, sceneData.skySunDirectionRadius.w + sceneData.skyVrtParams.x, r);
-    float limbMu = sqrt(max(0.0, 1.0 - r * r / (sceneData.skySunDirectionRadius.w * sceneData.skySunDirectionRadius.w)));
+    beam_basis(L, horizontal, vertical);
+    vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
+    float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
+    float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
     vec4 depth = sun_air_depth(origin, viewDir);
     bool sunVisible = disk > 0.0 && groundT <= 0.0;
-    vec3 solarRadial = cross(vertical, solarDirection) * offset.x + vertical * offset.y;
-    float radialLength = length(solarRadial);
-    vec3 sunA, sunB;
-    beam_basis(-viewDir, sunA, sunB);
-    float cos2Limb = 0.0, sin2Limb = 0.0;
-
-    if (radialLength > 1.0e-8) {
-        vec3 limbTangent = cross(solarDirection, solarRadial / radialLength);
-        float tangentA = dot(limbTangent, sunA), tangentB = dot(limbTangent, sunB);
-        float tangentNorm = max(tangentA * tangentA + tangentB * tangentB, 1.0e-12);
-        cos2Limb = (tangentA * tangentA - tangentB * tangentB) / tangentNorm;
-        sin2Limb = 2.0 * tangentA * tangentB / tangentNorm;
-    }
-
-    float limbIntensity = solar_limb_intensity(limbMu, gWavelengthNm);
-    float limbPolarization = solar_limb_polarization(limbMu, gWavelengthNm, limbIntensity);
-    float intensity = sunVisible ? disk * gSpectralBand.y * limbIntensity * wavelength_transmittance(depth) : 0.0;
-    sky += intensity * vec4(1.0, limbPolarization * cos2Limb, limbPolarization * sin2Limb, 0.0);
+    float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
+    sky.x += intensity;
     return stokes_make_physical(sky);
 }
 

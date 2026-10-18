@@ -118,10 +118,10 @@ struct alignas(16) SceneData {
 	glm::vec4 skySpectralParams; ///< 550 nm Rayleigh coefficient, first aerosol beta, reserved, and sun radiance.
 	glm::vec4 skyRadiiScaleHeights; ///< Earth radius, atmosphere radius, Rayleigh scale height, and first aerosol scale height.
 	glm::vec4 skySunDirectionRadius; ///< Sun direction in xyz and angular radius in radians.
-	glm::vec4 skyVrtParams; ///< Sun antialiasing angle, Rayleigh depolarization, Mie angle-bin count, and second aerosol scale height.
+	glm::vec4 skyVrtParams; ///< Reserved, Rayleigh depolarization, Mie angle-bin count, and second aerosol scale height.
 	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and a reserved value.
 	glm::vec4 cieXyz[kSpectralBandCount]; ///< Normalized CIE XYZ matching values for each spectral band.
-	glm::vec4 sunDisk; ///< Sun solid angle, angular antialiasing bounds as cosines, and a reserved value.
+	glm::vec4 sunDisk; ///< Sun solid angle followed by three reserved values.
 	glm::vec4 mieBands[kSpectralBandCount]; ///< Per-band extinction/scattering scales for the two aerosol populations.
 	glm::vec4 proposalScattering; ///< Wavelength-averaged scattering coefficients for path sampling.
 	glm::vec4 proposalExtinction; ///< Wavelength-averaged extinction coefficients for path sampling.
@@ -203,7 +203,7 @@ private:
 			.skySpectralParams = { s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550 },
 			.skyRadiiScaleHeights = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight },
 			.skySunDirectionRadius = { s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius },
-			.skyVrtParams = { s.sunAa, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight },
+			.skyVrtParams = { 0.0f, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight },
 		};
 
 		float ySum = 0.0f;
@@ -225,7 +225,7 @@ private:
 		for (auto& xyz : sceneData.cieXyz)
 			for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
 
-		sceneData.sunDisk = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), std::cos(s.sunRadius + s.sunAa), std::cos(s.sunRadius - s.sunAa), 0.0f };
+		sceneData.sunDisk = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), 0.0f, 0.0f, 0.0f };
 		for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
 			const double beta = s.aerosols[aerosol].beta;
 			const double reference = m_mieCrossSections[aerosol][6].x;

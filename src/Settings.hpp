@@ -30,7 +30,7 @@ struct SkySpectralConfig {
     float betaRayleigh550 = 13.5e-6f;
     float earthRadius = 6360e3f, atmosphereRadius = 6420e3f, scaleHeightRayleigh = 7994.0f, sunRadiance550 = 8317.742f;
     glm::vec3 sunDirection{0.35f, 0.01f, 0.25f};
-    float sunRadius = 0.00465f, sunAa = 0.0005f;
+    float sunRadius = 0.00465f;
     uint32_t secondarySamples = 1, viewSteps = 1, samples = 1, scatteringOrders = 1;
     float rayleighDepolarization = 0.0279f;
     uint32_t mieTableAngleBins = 181;
