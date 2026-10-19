@@ -9,21 +9,26 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 /// Storage image written by this workgroup's pixel invocation.
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
-    vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-    vec4 skyVrtParams;
-    vec4 spectralBands[17], cieXyz[17], sunDisk;
-    vec4 mieBands[17];
-    vec4 proposalScattering, proposalExtinction;
-} sceneData; ///< Scene uniforms shared by the host and compute shader.
+	vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
+	vec4 skyVrtParams;
+	vec4 spectralBands[17], cieXyz[17], sunDisk;
+	vec4 mieBands[17];
+	vec4 proposalScattering, proposalExtinction;
+}
+sceneData; ///< Scene uniforms shared by the host and compute shader.
 
-layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer { vec4 entries[]; } mieMatrixBuffer; ///< Mie phase rows followed by the angular sampling CDFs.
-layout(std430, set = 0, binding = 3) readonly buffer TransmittanceBuffer { vec4 depth[]; } transmittanceLut; ///< Preintegrated atmospheric density columns.
-layout(std430, set = 0, binding = 4) buffer AccumulationBuffer { vec4 pixels[]; } accumulation; ///< Per-pixel XYZ running averages and sample counts.
+layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer { vec4 entries[]; }
+mieMatrixBuffer; ///< Mie phase rows followed by the angular sampling CDFs.
+layout(std430, set = 0, binding = 3) readonly buffer TransmittanceBuffer { vec4 depth[]; }
+transmittanceLut; ///< Preintegrated atmospheric density columns.
+layout(std430, set = 0, binding = 4) buffer AccumulationBuffer { vec4 pixels[]; }
+accumulation; ///< Per-pixel XYZ running averages and sample counts.
 
 layout(push_constant) uniform PushConstants {
-    vec4 forward, right, up, frame, polarizer;
-    uvec2 imageSize;
-} pc; ///< Per-dispatch camera, exposure, polarization, and image data.
+	vec4 forward, right, up, frame, polarizer;
+	uvec2 imageSize;
+}
+pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
 layout(constant_id = 0) const uint SpecializedOrders = 1; ///< Maximum scattering order compiled into the pipeline.
 layout(constant_id = 1) const uint SpecializedViewSteps = 0; ///< Primary segment steps, zero selects the shader default.
@@ -55,9 +60,9 @@ float ToUnit(uint x) { return (float(x >> 9u) + 0.5) * (1.0 / 8388608.0); }
 /// @param x Input integer.
 /// @return Hashed integer.
 uint Hash(uint x) {
-    x = x * 747796405u + 2891336453u;
-    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-    return (x >> 22u) ^ x;
+	x = x * 747796405u + 2891336453u;
+	x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+	return (x >> 22u) ^ x;
 }
 
 const uint SAMPLE_DIMENSIONS = 16u; ///< Number of dimensions with Sobol direction numbers.
@@ -65,84 +70,83 @@ const uint WAVELENGTH_DIMENSION = 2u; ///< Sobol dimension used to choose a wave
 const uint TRANSPORT_DIMENSION = WAVELENGTH_DIMENSION + 1u; ///< First dimension used by the transport estimator.
 /// Sobol direction numbers, arranged as 32 values for each supported dimension.
 const uint SOBOL_DIRECTIONS[512] = uint[512](
-    0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
-    0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
-    0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u,
-    0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u,
-    0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u,
-    0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u,
-    0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u,
-    0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu,
-    0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u,
-    0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u,
-    0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u,
-    0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u,
-    0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u,
-    0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u,
-    0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u,
-    0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u,
-    0x80000000u, 0x40000000u, 0x20000000u, 0xb0000000u, 0xf8000000u, 0xdc000000u, 0x7a000000u, 0x9d000000u,
-    0x5a800000u, 0x2fc00000u, 0xa1600000u, 0xf0b00000u, 0xda880000u, 0x6fc40000u, 0x81620000u, 0x40bb0000u,
-    0x22878000u, 0xb3c9c000u, 0xfb65a000u, 0xddb2d000u, 0x78022800u, 0x9c0b3c00u, 0x5a0fb600u, 0x2d0ddb00u,
-    0xa2878080u, 0xf3c9c040u, 0xdb65a020u, 0x6db2d0b0u, 0x800228f8u, 0x400b3cdcu, 0x200fb67au, 0xb00ddb9du,
-    0x80000000u, 0x40000000u, 0x60000000u, 0x30000000u, 0xc8000000u, 0x24000000u, 0x56000000u, 0xfb000000u,
-    0xe0800000u, 0x70400000u, 0xa8600000u, 0x14300000u, 0x9ec80000u, 0xdf240000u, 0xb6d60000u, 0x8bbb0000u,
-    0x48008000u, 0x64004000u, 0x36006000u, 0xcb003000u, 0x2880c800u, 0x54402400u, 0xfe605600u, 0xef30fb00u,
-    0x7e48e080u, 0xaf647040u, 0x1eb6a860u, 0x9f8b1430u, 0xd6c81ec8u, 0xbb249f24u, 0x80d6d6d6u, 0x40bbbbbbu,
-    0x80000000u, 0xc0000000u, 0xa0000000u, 0xd0000000u, 0x58000000u, 0x94000000u, 0x3e000000u, 0xe3000000u,
-    0xbe800000u, 0x23c00000u, 0x1e200000u, 0xf3100000u, 0x46780000u, 0x67840000u, 0x78460000u, 0x84670000u,
-    0xc6788000u, 0xa784c000u, 0xd846a000u, 0x5467d000u, 0x9e78d800u, 0x33845400u, 0xe6469e00u, 0xb7673300u,
-    0x20f86680u, 0x104477c0u, 0xf8668020u, 0x4477c010u, 0x668020f8u, 0x77c01044u, 0x8020f866u, 0xc0104477u,
-    0x80000000u, 0x40000000u, 0xa0000000u, 0x50000000u, 0x88000000u, 0x24000000u, 0x12000000u, 0x2d000000u,
-    0x76800000u, 0x9e400000u, 0x08200000u, 0x64100000u, 0xb2280000u, 0x7d140000u, 0xfea20000u, 0xba490000u,
-    0x1a248000u, 0x491b4000u, 0xc4b5a000u, 0xe3739000u, 0xf6800800u, 0xde400400u, 0xa8200a00u, 0x34100500u,
-    0x3a280880u, 0x59140240u, 0xeca20120u, 0x974902d0u, 0x6ca48768u, 0xd75b49e4u, 0xcc95a082u, 0x87639641u,
-    0x80000000u, 0x40000000u, 0xa0000000u, 0x50000000u, 0x28000000u, 0xd4000000u, 0x6a000000u, 0x71000000u,
-    0x38800000u, 0x58400000u, 0xea200000u, 0x31100000u, 0x98a80000u, 0x08540000u, 0xc22a0000u, 0xe5250000u,
-    0xf2b28000u, 0x79484000u, 0xfaa42000u, 0xbd731000u, 0x18a80800u, 0x48540400u, 0x622a0a00u, 0xb5250500u,
-    0xdab28280u, 0xad484d40u, 0x90a426a0u, 0xcc731710u, 0x20280b88u, 0x10140184u, 0x880a04a2u, 0x84350611u,
-    0x80000000u, 0x40000000u, 0xe0000000u, 0xb0000000u, 0x98000000u, 0x94000000u, 0x8a000000u, 0x5b000000u,
-    0x33800000u, 0xd9c00000u, 0x72200000u, 0x3f100000u, 0xc1b80000u, 0xa6ec0000u, 0x53860000u, 0x29f50000u,
-    0x0a3a8000u, 0x1b2ac000u, 0xd392e000u, 0x69ff7000u, 0xea380800u, 0xab2c0400u, 0x4ba60e00u, 0xfde50b00u,
-    0x60028980u, 0xf006c940u, 0x7834e8a0u, 0x241a75b0u, 0x123a8b38u, 0xcf2ac99cu, 0xb992e922u, 0x82ff78f1u,
-    0x80000000u, 0x40000000u, 0xa0000000u, 0x10000000u, 0x08000000u, 0x6c000000u, 0x9e000000u, 0x23000000u,
-    0x57800000u, 0xadc00000u, 0x7fa00000u, 0x91d00000u, 0x49880000u, 0xced40000u, 0x880a0000u, 0x2c0f0000u,
-    0x3e0d8000u, 0x3317c000u, 0x5fb06000u, 0xc1f8b000u, 0xe18d8800u, 0xb2d7c400u, 0x1e106a00u, 0x6328b100u,
-    0xf7858880u, 0xbdc3c2c0u, 0x77ba63e0u, 0xfdf7b330u, 0xd7800df8u, 0xedc0081cu, 0xdfa0041au, 0x81d00a2du,
-    0x80000000u, 0x40000000u, 0x20000000u, 0x30000000u, 0x58000000u, 0xac000000u, 0x96000000u, 0x2b000000u,
-    0xd4800000u, 0x09400000u, 0xe2a00000u, 0x52500000u, 0x4e280000u, 0xc71c0000u, 0x629e0000u, 0x12670000u,
-    0x6e138000u, 0xf731c000u, 0x3a98a000u, 0xbe449000u, 0xf83b8800u, 0xdc2dc400u, 0xee06a200u, 0xb7239300u,
-    0x1aa80d80u, 0x8e5c0ec0u, 0xa03e0b60u, 0x703701b0u, 0x783b88c8u, 0x9c2dca54u, 0xce06a74au, 0x87239795u,
-    0x80000000u, 0xc0000000u, 0xa0000000u, 0x50000000u, 0xf8000000u, 0x8c000000u, 0xe2000000u, 0x33000000u,
-    0x0f800000u, 0x21400000u, 0x95a00000u, 0x5e700000u, 0xd8080000u, 0x1c240000u, 0xba160000u, 0xef370000u,
-    0x15868000u, 0x9e6fc000u, 0x781b6000u, 0x4c349000u, 0x420e8800u, 0x630bcc00u, 0xf7ad6a00u, 0xad739500u,
-    0x77800780u, 0x6d4004c0u, 0xd7a00420u, 0x3d700630u, 0x2f880f78u, 0xb1640ad4u, 0xcdb6077au, 0x824706d7u,
-    0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0x38000000u, 0xc4000000u, 0x42000000u, 0xa3000000u,
-    0xf1800000u, 0xaa400000u, 0xfce00000u, 0x85100000u, 0xe0080000u, 0x500c0000u, 0x58060000u, 0x54090000u,
-    0x7a038000u, 0x670c4000u, 0xb3842000u, 0x094a3000u, 0x0d6f1800u, 0x2f5aa400u, 0x1ce7ce00u, 0xd5145100u,
-    0xb8000080u, 0x040000c0u, 0x22000060u, 0x33000090u, 0xc9800038u, 0x6e4000c4u, 0xbee00042u, 0x261000a3u,
-    0x80000000u, 0x40000000u, 0x20000000u, 0xf0000000u, 0xa8000000u, 0x54000000u, 0x9a000000u, 0x9d000000u,
-    0x1e800000u, 0x5cc00000u, 0x7d200000u, 0x8d100000u, 0x24880000u, 0x71c40000u, 0xeba20000u, 0x75df0000u,
-    0x6ba28000u, 0x35d14000u, 0x4ba3a000u, 0xc5d2d000u, 0xe3a16800u, 0x91db8c00u, 0x79aef200u, 0x0cdf4100u,
-    0x672a8080u, 0x50154040u, 0x1a01a020u, 0xdd0dd0f0u, 0x3e83e8a8u, 0xaccacc54u, 0xd52d529au, 0xd91d919du,
-    0x80000000u, 0xc0000000u, 0x20000000u, 0xd0000000u, 0xd8000000u, 0xc4000000u, 0x46000000u, 0x85000000u,
-    0xa5800000u, 0x76c00000u, 0xada00000u, 0x6ab00000u, 0x2da80000u, 0xaabc0000u, 0x0daa0000u, 0x7ab10000u,
-    0xd5a78000u, 0xbebd4000u, 0x93a3e000u, 0x3bb51000u, 0x3629b800u, 0x4d727c00u, 0x9b836200u, 0x27c4d700u,
-    0xb629b880u, 0x8d727cc0u, 0xbb836220u, 0xf7c4d7d0u, 0x6e29b858u, 0x49727c04u, 0xfd836266u, 0x72c4d755u
-);
+	0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
+	0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u,
+	0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u,
+	0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u,
+	0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u,
+	0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u,
+	0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u,
+	0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu,
+	0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u,
+	0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u,
+	0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u,
+	0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u,
+	0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u,
+	0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u,
+	0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u,
+	0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u,
+	0x80000000u, 0x40000000u, 0x20000000u, 0xb0000000u, 0xf8000000u, 0xdc000000u, 0x7a000000u, 0x9d000000u,
+	0x5a800000u, 0x2fc00000u, 0xa1600000u, 0xf0b00000u, 0xda880000u, 0x6fc40000u, 0x81620000u, 0x40bb0000u,
+	0x22878000u, 0xb3c9c000u, 0xfb65a000u, 0xddb2d000u, 0x78022800u, 0x9c0b3c00u, 0x5a0fb600u, 0x2d0ddb00u,
+	0xa2878080u, 0xf3c9c040u, 0xdb65a020u, 0x6db2d0b0u, 0x800228f8u, 0x400b3cdcu, 0x200fb67au, 0xb00ddb9du,
+	0x80000000u, 0x40000000u, 0x60000000u, 0x30000000u, 0xc8000000u, 0x24000000u, 0x56000000u, 0xfb000000u,
+	0xe0800000u, 0x70400000u, 0xa8600000u, 0x14300000u, 0x9ec80000u, 0xdf240000u, 0xb6d60000u, 0x8bbb0000u,
+	0x48008000u, 0x64004000u, 0x36006000u, 0xcb003000u, 0x2880c800u, 0x54402400u, 0xfe605600u, 0xef30fb00u,
+	0x7e48e080u, 0xaf647040u, 0x1eb6a860u, 0x9f8b1430u, 0xd6c81ec8u, 0xbb249f24u, 0x80d6d6d6u, 0x40bbbbbbu,
+	0x80000000u, 0xc0000000u, 0xa0000000u, 0xd0000000u, 0x58000000u, 0x94000000u, 0x3e000000u, 0xe3000000u,
+	0xbe800000u, 0x23c00000u, 0x1e200000u, 0xf3100000u, 0x46780000u, 0x67840000u, 0x78460000u, 0x84670000u,
+	0xc6788000u, 0xa784c000u, 0xd846a000u, 0x5467d000u, 0x9e78d800u, 0x33845400u, 0xe6469e00u, 0xb7673300u,
+	0x20f86680u, 0x104477c0u, 0xf8668020u, 0x4477c010u, 0x668020f8u, 0x77c01044u, 0x8020f866u, 0xc0104477u,
+	0x80000000u, 0x40000000u, 0xa0000000u, 0x50000000u, 0x88000000u, 0x24000000u, 0x12000000u, 0x2d000000u,
+	0x76800000u, 0x9e400000u, 0x08200000u, 0x64100000u, 0xb2280000u, 0x7d140000u, 0xfea20000u, 0xba490000u,
+	0x1a248000u, 0x491b4000u, 0xc4b5a000u, 0xe3739000u, 0xf6800800u, 0xde400400u, 0xa8200a00u, 0x34100500u,
+	0x3a280880u, 0x59140240u, 0xeca20120u, 0x974902d0u, 0x6ca48768u, 0xd75b49e4u, 0xcc95a082u, 0x87639641u,
+	0x80000000u, 0x40000000u, 0xa0000000u, 0x50000000u, 0x28000000u, 0xd4000000u, 0x6a000000u, 0x71000000u,
+	0x38800000u, 0x58400000u, 0xea200000u, 0x31100000u, 0x98a80000u, 0x08540000u, 0xc22a0000u, 0xe5250000u,
+	0xf2b28000u, 0x79484000u, 0xfaa42000u, 0xbd731000u, 0x18a80800u, 0x48540400u, 0x622a0a00u, 0xb5250500u,
+	0xdab28280u, 0xad484d40u, 0x90a426a0u, 0xcc731710u, 0x20280b88u, 0x10140184u, 0x880a04a2u, 0x84350611u,
+	0x80000000u, 0x40000000u, 0xe0000000u, 0xb0000000u, 0x98000000u, 0x94000000u, 0x8a000000u, 0x5b000000u,
+	0x33800000u, 0xd9c00000u, 0x72200000u, 0x3f100000u, 0xc1b80000u, 0xa6ec0000u, 0x53860000u, 0x29f50000u,
+	0x0a3a8000u, 0x1b2ac000u, 0xd392e000u, 0x69ff7000u, 0xea380800u, 0xab2c0400u, 0x4ba60e00u, 0xfde50b00u,
+	0x60028980u, 0xf006c940u, 0x7834e8a0u, 0x241a75b0u, 0x123a8b38u, 0xcf2ac99cu, 0xb992e922u, 0x82ff78f1u,
+	0x80000000u, 0x40000000u, 0xa0000000u, 0x10000000u, 0x08000000u, 0x6c000000u, 0x9e000000u, 0x23000000u,
+	0x57800000u, 0xadc00000u, 0x7fa00000u, 0x91d00000u, 0x49880000u, 0xced40000u, 0x880a0000u, 0x2c0f0000u,
+	0x3e0d8000u, 0x3317c000u, 0x5fb06000u, 0xc1f8b000u, 0xe18d8800u, 0xb2d7c400u, 0x1e106a00u, 0x6328b100u,
+	0xf7858880u, 0xbdc3c2c0u, 0x77ba63e0u, 0xfdf7b330u, 0xd7800df8u, 0xedc0081cu, 0xdfa0041au, 0x81d00a2du,
+	0x80000000u, 0x40000000u, 0x20000000u, 0x30000000u, 0x58000000u, 0xac000000u, 0x96000000u, 0x2b000000u,
+	0xd4800000u, 0x09400000u, 0xe2a00000u, 0x52500000u, 0x4e280000u, 0xc71c0000u, 0x629e0000u, 0x12670000u,
+	0x6e138000u, 0xf731c000u, 0x3a98a000u, 0xbe449000u, 0xf83b8800u, 0xdc2dc400u, 0xee06a200u, 0xb7239300u,
+	0x1aa80d80u, 0x8e5c0ec0u, 0xa03e0b60u, 0x703701b0u, 0x783b88c8u, 0x9c2dca54u, 0xce06a74au, 0x87239795u,
+	0x80000000u, 0xc0000000u, 0xa0000000u, 0x50000000u, 0xf8000000u, 0x8c000000u, 0xe2000000u, 0x33000000u,
+	0x0f800000u, 0x21400000u, 0x95a00000u, 0x5e700000u, 0xd8080000u, 0x1c240000u, 0xba160000u, 0xef370000u,
+	0x15868000u, 0x9e6fc000u, 0x781b6000u, 0x4c349000u, 0x420e8800u, 0x630bcc00u, 0xf7ad6a00u, 0xad739500u,
+	0x77800780u, 0x6d4004c0u, 0xd7a00420u, 0x3d700630u, 0x2f880f78u, 0xb1640ad4u, 0xcdb6077au, 0x824706d7u,
+	0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0x38000000u, 0xc4000000u, 0x42000000u, 0xa3000000u,
+	0xf1800000u, 0xaa400000u, 0xfce00000u, 0x85100000u, 0xe0080000u, 0x500c0000u, 0x58060000u, 0x54090000u,
+	0x7a038000u, 0x670c4000u, 0xb3842000u, 0x094a3000u, 0x0d6f1800u, 0x2f5aa400u, 0x1ce7ce00u, 0xd5145100u,
+	0xb8000080u, 0x040000c0u, 0x22000060u, 0x33000090u, 0xc9800038u, 0x6e4000c4u, 0xbee00042u, 0x261000a3u,
+	0x80000000u, 0x40000000u, 0x20000000u, 0xf0000000u, 0xa8000000u, 0x54000000u, 0x9a000000u, 0x9d000000u,
+	0x1e800000u, 0x5cc00000u, 0x7d200000u, 0x8d100000u, 0x24880000u, 0x71c40000u, 0xeba20000u, 0x75df0000u,
+	0x6ba28000u, 0x35d14000u, 0x4ba3a000u, 0xc5d2d000u, 0xe3a16800u, 0x91db8c00u, 0x79aef200u, 0x0cdf4100u,
+	0x672a8080u, 0x50154040u, 0x1a01a020u, 0xdd0dd0f0u, 0x3e83e8a8u, 0xaccacc54u, 0xd52d529au, 0xd91d919du,
+	0x80000000u, 0xc0000000u, 0x20000000u, 0xd0000000u, 0xd8000000u, 0xc4000000u, 0x46000000u, 0x85000000u,
+	0xa5800000u, 0x76c00000u, 0xada00000u, 0x6ab00000u, 0x2da80000u, 0xaabc0000u, 0x0daa0000u, 0x7ab10000u,
+	0xd5a78000u, 0xbebd4000u, 0x93a3e000u, 0x3bb51000u, 0x3629b800u, 0x4d727c00u, 0x9b836200u, 0x27c4d700u,
+	0xb629b880u, 0x8d727cc0u, 0xbb836220u, 0xf7c4d7d0u, 0x6e29b858u, 0x49727c04u, 0xfd836266u, 0x72c4d755u);
 
 /// Applies a nested uniform scramble to a Sobol integer sample.
 /// @param value Unscrambled integer sample.
 /// @param seed Scramble seed for the sample dimension.
 /// @return Scrambled integer sample.
 uint NestedUniformScramble(uint value, uint seed) {
-    value = bitfieldReverse(value);
-    value ^= value * 0x3d20adeau;
-    value += seed;
-    value *= (seed >> 16u) | 1u;
-    value ^= value * 0x05526c56u;
-    value ^= value * 0x53a22864u;
-    return bitfieldReverse(value);
+	value = bitfieldReverse(value);
+	value ^= value * 0x3d20adeau;
+	value += seed;
+	value *= (seed >> 16u) | 1u;
+	value ^= value * 0x05526c56u;
+	value ^= value * 0x53a22864u;
+	return bitfieldReverse(value);
 }
 
 /// Generates a deterministic low-discrepancy variate for one sample dimension.
@@ -151,24 +155,24 @@ uint NestedUniformScramble(uint value, uint seed) {
 /// @param scramble Pixel or path specific scramble seed.
 /// @return Floating point sample in (0, 1).
 float SampleFloat(uint index, uint dimension, uint scramble) {
-    uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
-    if (dimension >= SAMPLE_DIMENSIONS) return ToUnit(Hash(index ^ seed));
+	uint seed = Hash(scramble ^ (dimension * 0x9e3779b9u));
+	if (dimension >= SAMPLE_DIMENSIONS) return ToUnit(Hash(index ^ seed));
 
-    uint value = 0u;
-    while (index != 0u) {
-        value ^= SOBOL_DIRECTIONS[dimension * 32u + uint(findLSB(index))];
-        index &= index - 1u;
-    }
+	uint value = 0u;
+	while (index != 0u) {
+		value ^= SOBOL_DIRECTIONS[dimension * 32u + uint(findLSB(index))];
+		index &= index - 1u;
+	}
 
-    return ToUnit(NestedUniformScramble(value, seed));
+	return ToUnit(NestedUniformScramble(value, seed));
 }
 
 /// Evaluates exponential Rayleigh and aerosol densities at a world-space position.
 /// @param pos Position in world space, in metres.
 /// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol densities.
 vec4 air_density(vec3 pos) {
-    float h = max(length(pos) - sceneData.skyRadiiScaleHeights.x, 0.0);
-    return vec4(exp(-h / sceneData.skyRadiiScaleHeights.zw), 0.0, exp(-h / sceneData.skyVrtParams.w));
+	float h = max(length(pos) - sceneData.skyRadiiScaleHeights.x, 0.0);
+	return vec4(exp(-h / sceneData.skyRadiiScaleHeights.zw), 0.0, exp(-h / sceneData.skyVrtParams.w));
 }
 
 /// Computes the near and far intersections of a ray with a sphere.
@@ -177,10 +181,10 @@ vec4 air_density(vec3 pos) {
 /// @param radius Sphere radius, in metres.
 /// @return Near and far ray distances, or (-1, -1) when there is no intersection.
 vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
-    float b = dot(origin, dir);
-    float d = b * b - dot(origin, origin) + radius * radius;
-    if (d < 0.0) return vec2(-1.0);
-    return vec2(-b - sqrt(d), -b + sqrt(d));
+	float b = dot(origin, dir);
+	float d = b * b - dot(origin, origin) + radius * radius;
+	if (d < 0.0) return vec2(-1.0);
+	return vec2(-b - sqrt(d), -b + sqrt(d));
 }
 
 /// Clips a ray to the atmosphere and stops it at the ground when it intersects the planet.
@@ -190,12 +194,12 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
 /// @param[out] tEnd Distance to the atmosphere exit or ground intersection.
 /// @return Whether the ray intersects the atmosphere.
 bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
-    vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.y);
-    vec2 ground = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.x);
-    tStart = max(atmosphere.x, 0.0);
+	vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.y);
+	vec2 ground = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.x);
+	tStart = max(atmosphere.x, 0.0);
 
-    tEnd = ground.x > 0.0 ? min(atmosphere.y, ground.x) : atmosphere.y;
-    return atmosphere.y >= 0.0;
+	tEnd = ground.x > 0.0 ? min(atmosphere.y, ground.x) : atmosphere.y;
+	return atmosphere.y >= 0.0;
 }
 
 /// Bilinearly samples the preintegrated density columns from origin to the atmosphere boundary.
@@ -203,14 +207,14 @@ bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
 /// @param dir Unit ray direction.
 /// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol density columns.
 vec4 sun_air_depth(vec3 origin, vec3 dir) {
-    float r = length(origin), mu = dot(origin, dir) / r;
-    float x = sqrt(clamp((r - sceneData.skyRadiiScaleHeights.x) / (sceneData.skyRadiiScaleHeights.y - sceneData.skyRadiiScaleHeights.x), 0.0, 1.0)) * float(LUT_ALT - 1);
-    float y = (0.5 + 0.5 * sign(mu) * sqrt(abs(mu))) * float(LUT_MU - 1);
-    ivec2 i = min(ivec2(x, y), ivec2(LUT_ALT - 2, LUT_MU - 2));
-    vec2 f = vec2(x, y) - vec2(i);
-    int k = i.x * LUT_MU + i.y;
+	float r = length(origin), mu = dot(origin, dir) / r;
+	float x = sqrt(clamp((r - sceneData.skyRadiiScaleHeights.x) / (sceneData.skyRadiiScaleHeights.y - sceneData.skyRadiiScaleHeights.x), 0.0, 1.0)) * float(LUT_ALT - 1);
+	float y = (0.5 + 0.5 * sign(mu) * sqrt(abs(mu))) * float(LUT_MU - 1);
+	ivec2 i = min(ivec2(x, y), ivec2(LUT_ALT - 2, LUT_MU - 2));
+	vec2 f = vec2(x, y) - vec2(i);
+	int k = i.x * LUT_MU + i.y;
 
-    return mix(mix(transmittanceLut.depth[k], transmittanceLut.depth[k + 1], f.y), mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
+	return mix(mix(transmittanceLut.depth[k], transmittanceLut.depth[k + 1], f.y), mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
 }
 
 /// Evaluates scalar atmospheric transmittance for the current wavelength.
@@ -232,9 +236,9 @@ mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) {
 /// @param s Input Stokes vector ordered as I, Q, U, V.
 /// @return Physically valid Stokes vector.
 vec4 stokes_make_physical(vec4 s) {
-    s.x = max(s.x, 0.0);
-    float p = length(s.yzw);
-    return p > s.x ? vec4(s.x, s.yzw * s.x / p) : s;
+	s.x = max(s.x, 0.0);
+	float p = length(s.yzw);
+	return p > s.x ? vec4(s.x, s.yzw * s.x / p) : s;
 }
 
 /// Builds an orthonormal polarization basis perpendicular to a direction.
@@ -242,9 +246,9 @@ vec4 stokes_make_physical(vec4 s) {
 /// @param[out] a First transverse basis vector.
 /// @param[out] b Second transverse basis vector, equal to cross(d, a).
 void beam_basis(vec3 d, out vec3 a, out vec3 b) {
-    vec3 up = abs(d.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    a = normalize(up - d * dot(d, up));
-    b = cross(d, a);
+	vec3 up = abs(d.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	a = normalize(up - d * dot(d, up));
+	b = cross(d, a);
 }
 
 /// Converts cosine and sine of an angle to cosine and sine of twice that angle.
@@ -271,12 +275,12 @@ vec4 vec4_reframe(vec4 s, vec3 oldA, vec3 oldB, vec3 newA) { return rotate(s, ro
 /// @param cosTheta Cosine of the angle between incoming and outgoing directions.
 /// @return Rayleigh Mueller matrix including configured depolarization.
 mat4 rayleigh_mueller(float cosTheta) {
-    float kingDepolarization = sceneData.skyVrtParams.y;
-    float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
-    float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
-    float mu2 = cosTheta * cosTheta;
-    float base = 0.75 * (1.0 + mu2), p33 = 1.5 * cosTheta;
-    return mueller(mix(1.0, base, kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base, kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
+	float kingDepolarization = sceneData.skyVrtParams.y;
+	float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
+	float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
+	float mu2 = cosTheta * cosTheta;
+	float base = 0.75 * (1.0 + mu2), p33 = 1.5 * cosTheta;
+	return mueller(mix(1.0, base, kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base, kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
 }
 
 /// Computes polarization-frame rotations and sign corrections for a scattering event.
@@ -286,23 +290,23 @@ mat4 rayleigh_mueller(float cosTheta) {
 /// @param[out] rot Input and output double-angle rotations.
 /// @param[out] flip Stokes-component signs for degenerate frames.
 void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 flip) {
-    rot = vec4(1.0, 0.0, 1.0, 0.0);
-    flip = vec4(1.0);
-    vec3 p = cross(din, dout);
-    float pl = length(p);
+	rot = vec4(1.0, 0.0, 1.0, 0.0);
+	flip = vec4(1.0);
+	vec3 p = cross(din, dout);
+	float pl = length(p);
 
-    if (pl < 1.0e-6) {
-        if (cosTheta < 0.0) flip = vec4(1.0, 1.0, -1.0, -1.0);
-        return;
-    }
+	if (pl < 1.0e-6) {
+		if (cosTheta < 0.0) flip = vec4(1.0, 1.0, -1.0, -1.0);
+		return;
+	}
 
-    p /= pl;
-    vec3 ain, bin, aout, bout;
-    beam_basis(din, ain, bin);
-    beam_basis(dout, aout, bout);
-    vec3 inAxis = cross(p, din);
+	p /= pl;
+	vec3 ain, bin, aout, bout;
+	beam_basis(din, ain, bin);
+	beam_basis(dout, aout, bout);
+	vec3 inAxis = cross(p, din);
 
-    rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
+	rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
 }
 
 /// Applies a Mueller matrix between rotated polarization frames.
@@ -315,11 +319,11 @@ vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rota
 
 /// Geometry and lookup coordinates shared by Rayleigh and Mie scattering.
 struct ScatterGeom {
-    mat4 rayleigh; ///< Rayleigh Mueller matrix for the current scattering angle.
-    vec4 rot; ///< Input and output Stokes-frame rotations, stored as cos(2 theta), sin(2 theta) pairs.
-    vec4 flip; ///< Stokes-component sign correction for degenerate forward or backward frames.
-    int bin; ///< Lower angular sample index in the Mie phase table.
-    float frac; ///< Interpolation fraction from bin to the next angular sample.
+	mat4 rayleigh; ///< Rayleigh Mueller matrix for the current scattering angle.
+	vec4 rot; ///< Input and output Stokes-frame rotations, stored as cos(2 theta), sin(2 theta) pairs.
+	vec4 flip; ///< Stokes-component sign correction for degenerate forward or backward frames.
+	int bin; ///< Lower angular sample index in the Mie phase table.
+	float frac; ///< Interpolation fraction from bin to the next angular sample.
 };
 
 /// Computes scattering angle, polarization frames, and Mie table coordinates.
@@ -327,14 +331,14 @@ struct ScatterGeom {
 /// @param dout Outgoing unit direction.
 /// @return Shared geometry for Rayleigh and Mie scattering evaluation.
 ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
-    ScatterGeom g;
-    float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
-    g.rayleigh = rayleigh_mueller(cosTheta);
-    float fbin = acos(cosTheta) / PI * float(max(2, int(sceneData.skyVrtParams.z)) - 1);
-    g.bin = int(floor(fbin));
-    g.frac = fbin - float(g.bin);
-    scatter_frame(din, dout, cosTheta, g.rot, g.flip);
-    return g;
+	ScatterGeom g;
+	float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
+	g.rayleigh = rayleigh_mueller(cosTheta);
+	float fbin = acos(cosTheta) / PI * float(max(2, int(sceneData.skyVrtParams.z)) - 1);
+	g.bin = int(floor(fbin));
+	g.frac = fbin - float(g.bin);
+	scatter_frame(din, dout, cosTheta, g.rot, g.flip);
+	return g;
 }
 
 /// Interpolates the packed Mie phase table and constructs its Mueller matrix.
@@ -342,13 +346,13 @@ ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
 /// @param aerosol Aerosol table index, zero for fine and one for coarse.
 /// @return Mie Mueller matrix in the shader's Stokes convention.
 mat4 mie_mueller(ScatterGeom g, int aerosol) {
-    int bins = max(2, int(sceneData.skyVrtParams.z));
-    int base0 = (aerosol * SPECTRAL_BANDS + gBandLower) * bins;
-    int base1 = (aerosol * SPECTRAL_BANDS + gBandUpper) * bins;
-    vec4 lower = mix(mieMatrixBuffer.entries[base0 + g.bin], mieMatrixBuffer.entries[base0 + min(g.bin + 1, bins - 1)], g.frac);
-    vec4 upper = mix(mieMatrixBuffer.entries[base1 + g.bin], mieMatrixBuffer.entries[base1 + min(g.bin + 1, bins - 1)], g.frac);
-    vec4 e = mix(lower, upper, gBandFraction);
-    return mueller(e.x, e.y, e.x, e.z, e.w, e.z);
+	int bins = max(2, int(sceneData.skyVrtParams.z));
+	int base0 = (aerosol * SPECTRAL_BANDS + gBandLower) * bins;
+	int base1 = (aerosol * SPECTRAL_BANDS + gBandUpper) * bins;
+	vec4 lower = mix(mieMatrixBuffer.entries[base0 + g.bin], mieMatrixBuffer.entries[base0 + min(g.bin + 1, bins - 1)], g.frac);
+	vec4 upper = mix(mieMatrixBuffer.entries[base1 + g.bin], mieMatrixBuffer.entries[base1 + min(g.bin + 1, bins - 1)], g.frac);
+	vec4 e = mix(lower, upper, gBandFraction);
+	return mueller(e.x, e.y, e.x, e.z, e.w, e.z);
 }
 
 /// Combines wavelength-scaled Rayleigh and aerosol scattering and applies the Stokes frame changes.
@@ -357,31 +361,31 @@ mat4 mie_mueller(ScatterGeom g, int aerosol) {
 /// @param w Local Rayleigh, fine-aerosol, and coarse-aerosol density values.
 /// @return Scattered Stokes radiance at the current wavelength.
 vec4 scatter_wavelength(ScatterGeom g, vec4 s, vec3 w) {
-    mat4 m = gSpectralBand.x * w.x * g.rayleigh + gMieBand.y * w.y * mie_mueller(g, 0);
-    m += w.z > 0.0 ? gMieBand.w * w.z * mie_mueller(g, 1) : mat4(0.0);
-    return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
+	mat4 m = gSpectralBand.x * w.x * g.rayleigh + gMieBand.y * w.y * mie_mueller(g, 0);
+	m += w.z > 0.0 ? gMieBand.w * w.z * mie_mueller(g, 1) : mat4(0.0);
+	return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
 /// State for one ray segment in the recursive multiple-scattering estimator.
 struct Level {
-    vec3 org; ///< Origin of the ray segment, in world-space metres.
-    vec3 dir; ///< Unit direction of the ray segment.
-    vec3 pos; ///< Current sampled position along the segment, in world space.
-    vec4 air; ///< Local Rayleigh, fine-aerosol, reserved, and coarse-aerosol densities.
-    vec4 camDepth; ///< Density columns from the segment start to the current sample.
-    vec4 depth0; ///< Density columns from the segment start to the atmosphere boundary.
-    vec2 dirJitter; ///< Two random variates used to sample the next scattering direction.
-    vec4 distanceRates; ///< Component rates for the segment-distance proposal on normalized [0, 1].
-    vec4 distanceWeights; ///< Mixture weights paired with distanceRates.
-    float span; ///< Length of the ray segment, in metres.
-    float start; ///< Distance from org to the segment start, in metres.
-    float stepWeight; ///< Segment-integration estimator weight for the current sample.
-    float sampleWeight; ///< Reciprocal PDF weight for the sampled scattering direction.
-    int stepIndex; ///< Integration sample index within this segment.
-    int sampleIndex; ///< Child direction sample index for this segment sample.
-    uint scramble; ///< Random-sequence scramble seed for this scattering level.
-    vec4 result; ///< Stokes radiance accumulated for this level.
-    vec4 angular; ///< Stokes angular-scattering estimate accumulated for the current sample.
+	vec3 org; ///< Origin of the ray segment, in world-space metres.
+	vec3 dir; ///< Unit direction of the ray segment.
+	vec3 pos; ///< Current sampled position along the segment, in world space.
+	vec4 air; ///< Local Rayleigh, fine-aerosol, reserved, and coarse-aerosol densities.
+	vec4 camDepth; ///< Density columns from the segment start to the current sample.
+	vec4 depth0; ///< Density columns from the segment start to the atmosphere boundary.
+	vec2 dirJitter; ///< Two random variates used to sample the next scattering direction.
+	vec4 distanceRates; ///< Component rates for the segment-distance proposal on normalized [0, 1].
+	vec4 distanceWeights; ///< Mixture weights paired with distanceRates.
+	float span; ///< Length of the ray segment, in metres.
+	float start; ///< Distance from org to the segment start, in metres.
+	float stepWeight; ///< Segment-integration estimator weight for the current sample.
+	float sampleWeight; ///< Reciprocal PDF weight for the sampled scattering direction.
+	int stepIndex; ///< Integration sample index within this segment.
+	int sampleIndex; ///< Child direction sample index for this segment sample.
+	uint scramble; ///< Random-sequence scramble seed for this scattering level.
+	vec4 result; ///< Stokes radiance accumulated for this level.
+	vec4 angular; ///< Stokes angular-scattering estimate accumulated for the current sample.
 };
 
 const int STACK = int(SpecializedOrders); ///< Maximum number of nested scattering levels.
@@ -395,17 +399,17 @@ uint gRngScramble; ///< Current pixel and path scramble seed.
 /// @param phi Azimuth angle around the axis, in radians.
 /// @return Unit direction.
 vec3 spherical_around(vec3 axis, float theta, float phi) {
-    vec3 a, b;
-    beam_basis(axis, a, b);
-    return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
+	vec3 a, b;
+	beam_basis(axis, a, b);
+	return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
 }
 
 /// Returns the base entry and angular bin count for one packed aerosol CDF.
 /// @param aerosol Aerosol table index, zero for fine and one for coarse.
 /// @return CDF base entry and number of angular samples.
 ivec2 cdf_layout(int aerosol) {
-    int bins = max(2, int(sceneData.skyVrtParams.z));
-    return ivec2(bins * (2 * SPECTRAL_BANDS + aerosol), bins);
+	int bins = max(2, int(sceneData.skyVrtParams.z));
+	return ivec2(bins * (2 * SPECTRAL_BANDS + aerosol), bins);
 }
 
 /// Reads a cumulative probability value from the packed Mie buffer.
@@ -423,8 +427,8 @@ float cdf_shape(int i) { return mieMatrixBuffer.entries[i].y; }
 /// @param bins Number of angular samples in the grid.
 /// @return Integral of sin(theta) across the bin.
 float cdf_cosine_width(int bin, int bins) {
-    float halfWidth = 0.5 * PI / float(bins - 1);
-    return 2.0 * sin(float(2 * bin + 1) * halfWidth) * sin(halfWidth);
+	float halfWidth = 0.5 * PI / float(bins - 1);
+	return 2.0 * sin(float(2 * bin + 1) * halfWidth) * sin(halfWidth);
 }
 
 /// Evaluates the aerosol direction proposal density at a scattering angle.
@@ -432,24 +436,24 @@ float cdf_cosine_width(int bin, int bins) {
 /// @param cosTheta Cosine of the scattering angle.
 /// @return Directional probability density per unit solid angle.
 float cdf_pdf(int aerosol, float cosTheta) {
-    ivec2 info = cdf_layout(aerosol);
-    float theta = acos(clamp(cosTheta, -1.0, 1.0));
-    int bin = min(int(theta / PI * float(info.y - 1)), info.y - 2);
-    float theta0 = float(bin) * PI / float(info.y - 1);
-    float theta1 = float(bin + 1) * PI / float(info.y - 1);
-    float fraction;
+	ivec2 info = cdf_layout(aerosol);
+	float theta = acos(clamp(cosTheta, -1.0, 1.0));
+	int bin = min(int(theta / PI * float(info.y - 1)), info.y - 2);
+	float theta0 = float(bin) * PI / float(info.y - 1);
+	float theta1 = float(bin + 1) * PI / float(info.y - 1);
+	float fraction;
 
-    if (bin * 2 < info.y - 1) {
-        float a = sin(0.5 * theta0), b = sin(0.5 * theta1), x = sin(0.5 * theta);
-        fraction = (x * x - a * a) / (b * b - a * a);
-    } else {
-        float a = cos(0.5 * theta0), b = cos(0.5 * theta1), x = cos(0.5 * theta);
-        fraction = (a * a - x * x) / (a * a - b * b);
-    }
+	if (bin * 2 < info.y - 1) {
+		float a = sin(0.5 * theta0), b = sin(0.5 * theta1), x = sin(0.5 * theta);
+		fraction = (x * x - a * a) / (b * b - a * a);
+	} else {
+		float a = cos(0.5 * theta0), b = cos(0.5 * theta1), x = cos(0.5 * theta);
+		fraction = (a * a - x * x) / (a * a - b * b);
+	}
 
-    float shape = cdf_shape(info.x + bin);
-    float density = 2.0 * mix(shape, 1.0 - shape, clamp(fraction, 0.0, 1.0));
-    return density * (cdf_at(info.x + bin + 1) - cdf_at(info.x + bin)) / (2.0 * PI * cdf_cosine_width(bin, info.y));
+	float shape = cdf_shape(info.x + bin);
+	float density = 2.0 * mix(shape, 1.0 - shape, clamp(fraction, 0.0, 1.0));
+	return density * (cdf_at(info.x + bin + 1) - cdf_at(info.x + bin)) / (2.0 * PI * cdf_cosine_width(bin, info.y));
 }
 
 /// Samples a direction from an aerosol phase CDF around the requested axis.
@@ -459,32 +463,33 @@ float cdf_pdf(int aerosol, float cosTheta) {
 /// @param phi Azimuth angle in radians.
 /// @return Unit direction sampled from the phase proposal.
 vec3 cdf_sample(int aerosol, vec3 axis, float u, float phi) {
-    ivec2 info = cdf_layout(aerosol);
-    int lo = 0, hi = info.y - 1;
+	ivec2 info = cdf_layout(aerosol);
+	int lo = 0, hi = info.y - 1;
 
-    while (hi - lo > 1) {
-        int mid = (lo + hi) / 2;
-        if (cdf_at(info.x + mid) < u) lo = mid; else hi = mid;
-    }
+	while (hi - lo > 1) {
+		int mid = (lo + hi) / 2;
+		if (cdf_at(info.x + mid) < u) lo = mid;
+		else hi = mid;
+	}
 
-    float c0 = cdf_at(info.x + lo), c1 = cdf_at(info.x + hi);
-    float fraction = clamp((u - c0) / max(c1 - c0, 1e-20), 0.0, 1.0);
-    float shape = cdf_shape(info.x + lo);
-    float root = sqrt(max(shape * shape + (1.0 - 2.0 * shape) * fraction, 0.0));
-    fraction = fraction > 0.0 ? fraction / max(shape + root, 1e-20) : 0.0;
-    float theta0 = float(lo) * PI / float(info.y - 1);
-    float theta1 = float(hi) * PI / float(info.y - 1);
-    float theta;
+	float c0 = cdf_at(info.x + lo), c1 = cdf_at(info.x + hi);
+	float fraction = clamp((u - c0) / max(c1 - c0, 1e-20), 0.0, 1.0);
+	float shape = cdf_shape(info.x + lo);
+	float root = sqrt(max(shape * shape + (1.0 - 2.0 * shape) * fraction, 0.0));
+	fraction = fraction > 0.0 ? fraction / max(shape + root, 1e-20) : 0.0;
+	float theta0 = float(lo) * PI / float(info.y - 1);
+	float theta1 = float(hi) * PI / float(info.y - 1);
+	float theta;
 
-    if (lo * 2 < info.y - 1) {
-        float a = sin(0.5 * theta0), b = sin(0.5 * theta1);
-        theta = 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
-    } else {
-        float a = cos(0.5 * theta0), b = cos(0.5 * theta1);
-        theta = PI - 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
-    }
+	if (lo * 2 < info.y - 1) {
+		float a = sin(0.5 * theta0), b = sin(0.5 * theta1);
+		theta = 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
+	} else {
+		float a = cos(0.5 * theta0), b = cos(0.5 * theta1);
+		theta = PI - 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
+	}
 
-    return spherical_around(axis, theta, phi);
+	return spherical_around(axis, theta, phi);
 }
 
 /// Evaluates a normalized truncated exponential density on the unit interval.
@@ -492,10 +497,10 @@ vec3 cdf_sample(int aerosol, vec3 axis, float u, float phi) {
 /// @param rate Signed exponential rate, with negative rates favoring the far end.
 /// @return Probability density at t.
 float distance_pdf(float t, float rate) {
-    float k = abs(rate);
-    if (k < 1.0e-3) return 1.0;
-    float mass = k < 0.01 ? k * (1.0 - k * (0.5 - k / 6.0)) : 1.0 - exp(-k);
-    return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / mass;
+	float k = abs(rate);
+	if (k < 1.0e-3) return 1.0;
+	float mass = k < 0.01 ? k * (1.0 - k * (0.5 - k / 6.0)) : 1.0 - exp(-k);
+	return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / mass;
 }
 
 /// Samples a normalized position from the four-component segment-distance proposal.
@@ -505,85 +510,86 @@ float distance_pdf(float t, float rate) {
 /// @param pdf Receives the full mixture density at the sampled position.
 /// @return Sampled position in [0, 1] along the ray segment.
 float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
-    float lower = 0.0;
-    int component = 3;
+	float lower = 0.0;
+	int component = 3;
 
-    for (int i = 0; i < 3; ++i) {
-        if (u < lower + weights[i]) {
-            component = i;
-            break;
-        }
-        lower += weights[i];
-    }
+	for (int i = 0; i < 3; ++i) {
+		if (u < lower + weights[i]) {
+			component = i;
+			break;
+		}
+		lower += weights[i];
+	}
 
-    float local = clamp((u - lower) / max(weights[component], 1.0e-30), 0.0, 1.0);
-    float rate = rates[component], k = abs(rate);
+	float local = clamp((u - lower) / max(weights[component], 1.0e-30), 0.0, 1.0);
+	float rate = rates[component], k = abs(rate);
 
-    float x = rate < 0.0 ? 1.0 - local : local;
-    float t = k < 1.0e-3 ? x : -log((1.0 - x) + x * exp(-k)) / k;
-    if (k >= 1.0e-3 && k < 0.01) t = x - 0.5 * k * x * (1.0 - x) + k * k * x * (1.0 - x) * (1.0 - 2.0 * x) / 6.0;
-    t = clamp(t, 0.0, 1.0);
+	float x = rate < 0.0 ? 1.0 - local : local;
+	float t = k < 1.0e-3 ? x : -log((1.0 - x) + x * exp(-k)) / k;
+	if (k >= 1.0e-3 && k < 0.01) t = x - 0.5 * k * x * (1.0 - x) + k * k * x * (1.0 - x) * (1.0 - 2.0 * x) / 6.0;
+	t = clamp(t, 0.0, 1.0);
 
-    t = rate < 0.0 ? 1.0 - t : t;
-    vec4 magnitudes = abs(rates);
-    vec4 mass, scale;
+	t = rate < 0.0 ? 1.0 - t : t;
+	vec4 magnitudes = abs(rates);
+	vec4 mass, scale;
 
-    for (int i = 0; i < 4; ++i) {
-        mass[i] = magnitudes[i] < 0.01 ? magnitudes[i] * (1.0 - magnitudes[i] * (0.5 - magnitudes[i] / 6.0)) : 1.0 - exp(-magnitudes[i]);
-        scale[i] = magnitudes[i] < 1.0e-3 ? 0.0 : weights[i] * magnitudes[i] / mass[i];
-    }
+	for (int i = 0; i < 4; ++i) {
+		mass[i] = magnitudes[i] < 0.01 ? magnitudes[i] * (1.0 - magnitudes[i] * (0.5 - magnitudes[i] / 6.0)) : 1.0 - exp(-magnitudes[i]);
+		scale[i] = magnitudes[i] < 1.0e-3 ? 0.0 : weights[i] * magnitudes[i] / mass[i];
+	}
 
-    float lo = 0.0, hi = 1.0;
-    for (int iteration = 0; iteration < 32; ++iteration) {
-        float cdf = 0.0;
-        pdf = 0.0;
+	float lo = 0.0, hi = 1.0;
+	for (int iteration = 0; iteration < 32; ++iteration) {
+		float cdf = 0.0;
+		pdf = 0.0;
 
-        for (int i = 0; i < 4; ++i) {
-            if (magnitudes[i] < 1.0e-3) {
-                cdf += weights[i] * t;
-                pdf += weights[i];
-            } else {
-                float x = rates[i] < 0.0 ? 1.0 - t : t;
-                float e = exp(-magnitudes[i] * x);
-                float z = magnitudes[i] * x;
-                float cumulative = z < 0.01 ? z * (1.0 - z * (0.5 - z / 6.0)) : 1.0 - e;
-                float componentCdf = cumulative / mass[i];
-                cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - componentCdf : componentCdf);
-                pdf += scale[i] * e;
-            }
-        }
+		for (int i = 0; i < 4; ++i) {
+			if (magnitudes[i] < 1.0e-3) {
+				cdf += weights[i] * t;
+				pdf += weights[i];
+			} else {
+				float x = rates[i] < 0.0 ? 1.0 - t : t;
+				float e = exp(-magnitudes[i] * x);
+				float z = magnitudes[i] * x;
+				float cumulative = z < 0.01 ? z * (1.0 - z * (0.5 - z / 6.0)) : 1.0 - e;
+				float componentCdf = cumulative / mass[i];
+				cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - componentCdf : componentCdf);
+				pdf += scale[i] * e;
+			}
+		}
 
-        float residual = cdf - u;
-        if (abs(residual) <= 1.0e-7 || hi - lo <= 1.0e-7) break;
-        if (residual < 0.0) lo = t; else hi = t;
+		float residual = cdf - u;
+		if (abs(residual) <= 1.0e-7 || hi - lo <= 1.0e-7) break;
+		if (residual < 0.0) lo = t;
+		else hi = t;
 
-        float candidate = t - residual / pdf;
-        t = iteration % 4 == 3 || candidate <= lo || candidate >= hi ? 0.5 * (lo + hi) : candidate;
-    }
+		float candidate = t - residual / pdf;
+		t = iteration % 4 == 3 || candidate <= lo || candidate >= hi ? 0.5 * (lo + hi) : candidate;
+	}
 
-    pdf = 0.0;
-    for (int i = 0; i < 4; ++i) pdf += weights[i] * distance_pdf(t, rates[i]);
-    return t;
+	pdf = 0.0;
+	for (int i = 0; i < 4; ++i) pdf += weights[i] * distance_pdf(t, rates[i]);
+	return t;
 }
 
 /// Draws the next weighted distance sample for one ray segment on the estimator stack.
 /// @param d Active stack depth.
 /// @param steps Number of integration samples assigned to this segment.
 void begin_step(int d, int steps) {
-    uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
-    uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
-    float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
+	uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
+	uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
+	float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
 
-    float pdf;
+	float pdf;
 
-    float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
-    S[d].dirJitter = vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
-    S[d].stepWeight = S[d].span / (float(steps) * pdf);
-    S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
-    S[d].air = air_density(S[d].pos);
-    S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), vec4(0.0));
-    S[d].angular = vec4(0.0);
-    S[d].sampleIndex = 0;
+	float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
+	S[d].dirJitter = vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
+	S[d].stepWeight = S[d].span / (float(steps) * pdf);
+	S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
+	S[d].air = air_density(S[d].pos);
+	S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), vec4(0.0));
+	S[d].angular = vec4(0.0);
+	S[d].sampleIndex = 0;
 }
 
 /// Converts the completed estimator state at one stack level to a physical Stokes value.
@@ -592,8 +598,8 @@ void begin_step(int d, int steps) {
 /// @param d Stack depth containing the accumulated estimate.
 /// @return Physical Stokes radiance for this level.
 vec4 level_value(bool leaf, ScatterGeom g, int d) {
-    if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.xyz));
-    return stokes_make_physical(S[d].result);
+	if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.xyz));
+	return stokes_make_physical(S[d].result);
 }
 
 /// Estimates one requested scattering order along a view ray and accumulates it into sky.
@@ -605,111 +611,113 @@ vec4 level_value(bool leaf, ScatterGeom g, int d) {
 /// @param secondarySteps Integration samples on each secondary segment.
 /// @param sky Stokes radiance accumulator updated by this estimate.
 void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int secondarySteps, inout vec4 sky) {
-    int last = clamp(order, 1, STACK) - 1, d = 0;
-    S[0].org = origin;
-    S[0].dir = viewDir;
-    S[0].scramble = gRngScramble;
-    bool entering = true;
+	int last = clamp(order, 1, STACK) - 1, d = 0;
+	S[0].org = origin;
+	S[0].dir = viewDir;
+	S[0].scramble = gRngScramble;
+	bool entering = true;
 
-    while (true) {
-        int steps = d == 0 ? viewSteps : secondarySteps;
-        if (entering) {
-            entering = false;
-            float tEnd;
-            if (!view_segment(S[d].org, S[d].dir, S[d].start, tEnd)) {
-                if (d-- == 0) return;
-                ++S[d].sampleIndex;
-                continue;
-            }
+	while (true) {
+		int steps = d == 0 ? viewSteps : secondarySteps;
+		if (entering) {
+			entering = false;
+			float tEnd;
+			if (!view_segment(S[d].org, S[d].dir, S[d].start, tEnd)) {
+				if (d-- == 0) return;
+				++S[d].sampleIndex;
+				continue;
+			}
 
-            vec3 first = S[d].org + S[d].dir * S[d].start;
-            S[d].span = max(tEnd - S[d].start, 1.0e-3);
-            S[d].depth0 = sun_air_depth(first, S[d].dir);
-            vec4 total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), vec4(0.0));
-            float tau = dot(sceneData.proposalExtinction, total);
-            float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
-            vec3 scaleHeights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
-            S[d].distanceRates = vec4(0.0, clamp(vec3(clamp(tau, 0.0, 8.0)) + altitudeChange / scaleHeights, vec3(-32.0), vec3(32.0)));
-            if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0) S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
-            vec3 scattering = max(total.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
-            float scatteringSum = dot(scattering, vec3(1.0));
-            S[d].distanceWeights = scatteringSum > 1.0e-30 ? vec4(0.1, 0.9 * scattering / scatteringSum) : vec4(1.0, 0.0, 0.0, 0.0);
-            S[d].result = vec4(0.0);
-            S[d].stepIndex = 0;
-            begin_step(d, steps);
-        }
+			vec3 first = S[d].org + S[d].dir * S[d].start;
+			S[d].span = max(tEnd - S[d].start, 1.0e-3);
+			S[d].depth0 = sun_air_depth(first, S[d].dir);
+			vec4 total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), vec4(0.0));
+			float tau = dot(sceneData.proposalExtinction, total);
+			float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
+			vec3 scaleHeights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
+			S[d].distanceRates = vec4(0.0, clamp(vec3(clamp(tau, 0.0, 8.0)) + altitudeChange / scaleHeights, vec3(-32.0), vec3(32.0)));
+			if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0) S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
+			vec3 scattering = max(total.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
+			float scatteringSum = dot(scattering, vec3(1.0));
+			S[d].distanceWeights = scatteringSum > 1.0e-30 ? vec4(0.1, 0.9 * scattering / scatteringSum) : vec4(1.0, 0.0, 0.0, 0.0);
+			S[d].result = vec4(0.0);
+			S[d].stepIndex = 0;
+			begin_step(d, steps);
+		}
 
-        if (d < last && S[d].sampleIndex == 0) {
-            float u = S[d].dirJitter.x;
-            float phi = GOLDEN_ANGLE * float(S[d].stepIndex) + 2.0 * PI * S[d].dirJitter.y;
-            S[d + 1].org = S[d].pos;
-            vec3 next;
+		if (d < last && S[d].sampleIndex == 0) {
+			float u = S[d].dirJitter.x;
+			float phi = GOLDEN_ANGLE * float(S[d].stepIndex) + 2.0 * PI * S[d].dirJitter.y;
+			S[d + 1].org = S[d].pos;
+			vec3 next;
 
-            vec3 current = S[d].dir;
-            vec3 strength = max(S[d].air.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
-            vec3 weights = 0.8 * strength / max(dot(strength, vec3(1.0)), 1.0e-30);
-            float fine = 0.5 * weights.y, coarse = 0.5 * weights.z;
-            float uniformWeight = 1.0 - dot(weights, vec3(1.0));
-            float rayleigh = 0.5 * weights.x;
-            float masses[7] = float[7](fine, coarse, fine, coarse, rayleigh, rayleigh, uniformWeight);
-            float lower = 0.0;
-            int component = 6;
+			vec3 current = S[d].dir;
+			vec3 strength = max(S[d].air.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
+			vec3 weights = 0.8 * strength / max(dot(strength, vec3(1.0)), 1.0e-30);
+			float fine = 0.5 * weights.y, coarse = 0.5 * weights.z;
+			float uniformWeight = 1.0 - dot(weights, vec3(1.0));
+			float rayleigh = 0.5 * weights.x;
+			float masses[7] = float[7](fine, coarse, fine, coarse, rayleigh, rayleigh, uniformWeight);
+			float lower = 0.0;
+			int component = 6;
 
-            for (int i = 0; i < 6; ++i) {
-                if (u < lower + masses[i]) {
-                    component = i;
-                    break;
-                }
+			for (int i = 0; i < 6; ++i) {
+				if (u < lower + masses[i]) {
+					component = i;
+					break;
+				}
 
-                lower += masses[i];
-            }
+				lower += masses[i];
+			}
 
-            u = clamp((u - lower) / masses[component], 0.0, 1.0);
+			u = clamp((u - lower) / masses[component], 0.0, 1.0);
 
-            if (component < 4) {
-                next = cdf_sample(component % 2, component < 2 ? L : current, u, phi);
-            } else if (component < 6) {
-                float mu = 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0);
-                next = spherical_around(component == 4 ? L : current, acos(clamp(mu, -1.0, 1.0)), phi);
-            } else { next = spherical_around(current, acos(1.0 - 2.0 * u), phi); }
+			if (component < 4) {
+				next = cdf_sample(component % 2, component < 2 ? L : current, u, phi);
+			} else if (component < 6) {
+				float mu = 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0);
+				next = spherical_around(component == 4 ? L : current, acos(clamp(mu, -1.0, 1.0)), phi);
+			} else {
+				next = spherical_around(current, acos(1.0 - 2.0 * u), phi);
+			}
 
-            float cosSun = dot(next, L), cosCurrent = dot(next, current);
-            float pdf = (uniformWeight + rayleigh * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
-            pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
-            S[d].sampleWeight = 1.0 / pdf;
-            S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^ uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
-            S[++d].dir = next;
-            entering = true;
-            continue;
-        }
+			float cosSun = dot(next, L), cosCurrent = dot(next, current);
+			float pdf = (uniformWeight + rayleigh * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
+			pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
+			S[d].sampleWeight = 1.0 / pdf;
+			S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^ uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
+			S[++d].dir = next;
+			entering = true;
+			continue;
+		}
 
-        vec4 midDepth = S[d].camDepth;
-        if (d < last) {
-            S[d].result += S[d].angular * (wavelength_transmittance(midDepth) * S[d].stepWeight);
-        } else if (ray_sphere(S[d].pos, L, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
-            vec4 depth = sun_air_depth(S[d].pos, L);
-            S[d].result.xyz += S[d].air.xyw * (wavelength_transmittance(midDepth) * S[d].stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
-        }
+		vec4 midDepth = S[d].camDepth;
+		if (d < last) {
+			S[d].result += S[d].angular * (wavelength_transmittance(midDepth) * S[d].stepWeight);
+		} else if (ray_sphere(S[d].pos, L, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
+			vec4 depth = sun_air_depth(S[d].pos, L);
+			S[d].result.xyz += S[d].air.xyw * (wavelength_transmittance(midDepth) * S[d].stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
+		}
 
-        if (++S[d].stepIndex < steps) {
-            begin_step(d, steps);
-            continue;
-        }
+		if (++S[d].stepIndex < steps) {
+			begin_step(d, steps);
+			continue;
+		}
 
-        bool leaf = d == last;
-        ScatterGeom sunGeom;
-        if (leaf) sunGeom = scatter_geometry(-L, -S[d].dir);
+		bool leaf = d == last;
+		ScatterGeom sunGeom;
+		if (leaf) sunGeom = scatter_geometry(-L, -S[d].dir);
 
-        int child = d;
-        if (d-- == 0) {
-            sky += level_value(leaf, sunGeom, child);
-            return;
-        }
+		int child = d;
+		if (d-- == 0) {
+			sky += level_value(leaf, sunGeom, child);
+			return;
+		}
 
-        ScatterGeom g = scatter_geometry(-S[child].dir, -S[d].dir);
-        S[d].angular += scatter_wavelength(g, level_value(leaf, sunGeom, child), S[d].air.xyw) * S[d].sampleWeight;
-        ++S[d].sampleIndex;
-    }
+		ScatterGeom g = scatter_geometry(-S[child].dir, -S[d].dir);
+		S[d].angular += scatter_wavelength(g, level_value(leaf, sunGeom, child), S[d].air.xyw) * S[d].sampleWeight;
+		++S[d].sampleIndex;
+	}
 }
 
 /// Evaluates spectral Stokes radiance for a view direction, including the visible solar disk.
@@ -717,82 +725,82 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 /// @param L Unit direction toward the Sun.
 /// @return Stokes radiance in the shader's current polarization frame.
 vec4 render_sky(vec3 viewDir, vec3 L) {
-    vec3 origin = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
-    vec4 sky = vec4(0.0);
-    float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
-    int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
-    uint orderScramble = gRngScramble;
+	vec3 origin = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
+	vec4 sky = vec4(0.0);
+	float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
+	int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
+	uint orderScramble = gRngScramble;
 
-    for (int order = 1; order <= orders; ++order) {
-        gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
-        scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), sky);
-    }
+	for (int order = 1; order <= orders; ++order) {
+		gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
+		scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), sky);
+	}
 
-    vec3 vertical, horizontal;
-    beam_basis(L, horizontal, vertical);
-    vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
-    float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
-    float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
-    vec4 depth = sun_air_depth(origin, viewDir);
-    bool sunVisible = disk > 0.0 && groundT <= 0.0;
-    float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
-    sky.x += intensity;
-    return stokes_make_physical(sky);
+	vec3 vertical, horizontal;
+	beam_basis(L, horizontal, vertical);
+	vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
+	float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
+	float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
+	vec4 depth = sun_air_depth(origin, viewDir);
+	bool sunVisible = disk > 0.0 && groundT <= 0.0;
+	float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
+	sky.x += intensity;
+	return stokes_make_physical(sky);
 }
 
 /// Interpolates the shader's spectral and Mie parameters at one wavelength.
 /// @param wavelengthNm Sample wavelength in nanometres.
 void set_wavelength(float wavelengthNm) {
-    gWavelengthNm = wavelengthNm;
-    float bandPosition = clamp((wavelengthNm - LAMBDA_MIN_NM) / LAMBDA_STEP_NM, 0.0, float(SPECTRAL_BANDS - 1));
-    gBandLower = int(floor(bandPosition));
-    gBandUpper = min(gBandLower + 1, SPECTRAL_BANDS - 1);
-    gBandFraction = bandPosition - float(gBandLower);
-    gSpectralBand = mix(sceneData.spectralBands[gBandLower], sceneData.spectralBands[gBandUpper], gBandFraction);
-    gCieXyz = mix(sceneData.cieXyz[gBandLower], sceneData.cieXyz[gBandUpper], gBandFraction);
-    gMieBand = mix(sceneData.mieBands[gBandLower], sceneData.mieBands[gBandUpper], gBandFraction);
+	gWavelengthNm = wavelengthNm;
+	float bandPosition = clamp((wavelengthNm - LAMBDA_MIN_NM) / LAMBDA_STEP_NM, 0.0, float(SPECTRAL_BANDS - 1));
+	gBandLower = int(floor(bandPosition));
+	gBandUpper = min(gBandLower + 1, SPECTRAL_BANDS - 1);
+	gBandFraction = bandPosition - float(gBandLower);
+	gSpectralBand = mix(sceneData.spectralBands[gBandLower], sceneData.spectralBands[gBandUpper], gBandFraction);
+	gCieXyz = mix(sceneData.cieXyz[gBandLower], sceneData.cieXyz[gBandUpper], gBandFraction);
+	gMieBand = mix(sceneData.mieBands[gBandLower], sceneData.mieBands[gBandUpper], gBandFraction);
 }
 
 /// Traces one pixel sample, updates its XYZ running average, and writes display RGB.
 void main() {
-    uvec2 pixel = gl_GlobalInvocationID.xy;
-    if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
-    uint pixelSeed = Hash(pixel.x + pixel.y * 9781u), frameSampleBase = uint(pc.frame.x);
-    uint rngScramble = pixelSeed ^ 0x5bd1e995u;
-    bool polarized = pc.polarizer.x > 0.5;
-    float linAmp = cos(2.0 * pc.polarizer.z);
-    vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
-    vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
+	uvec2 pixel = gl_GlobalInvocationID.xy;
+	if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
+	uint pixelSeed = Hash(pixel.x + pixel.y * 9781u), frameSampleBase = uint(pc.frame.x);
+	uint rngScramble = pixelSeed ^ 0x5bd1e995u;
+	bool polarized = pc.polarizer.x > 0.5;
+	float linAmp = cos(2.0 * pc.polarizer.z);
+	vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
+	vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
 
-    uint sobolIndex = frameSampleBase;
-    vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
-    float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
-    set_wavelength(wavelengthNm);
-    vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
-    vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
-    vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
-    beam_basis(-viewDir, na, nb);
-    gRngIndex = sobolIndex;
-    gRngScramble = rngScramble;
-    vec4 sky = render_sky(viewDir, sun);
-    float radiance = polarized ? 0.5 * dot(analyzer, vec4_reframe(sky, na, nb, frameX)) : sky.x;
-    vec3 xyz = max(radiance, 0.0) * gCieXyz.xyz * (LAMBDA_RANGE_NM / LAMBDA_STEP_NM);
+	uint sobolIndex = frameSampleBase;
+	vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
+	float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
+	set_wavelength(wavelengthNm);
+	vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
+	vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+	vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
+	vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
+	beam_basis(-viewDir, na, nb);
+	gRngIndex = sobolIndex;
+	gRngScramble = rngScramble;
+	vec4 sky = render_sky(viewDir, sun);
+	float radiance = polarized ? 0.5 * dot(analyzer, vec4_reframe(sky, na, nb, frameX)) : sky.x;
+	vec3 xyz = max(radiance, 0.0) * gCieXyz.xyz * (LAMBDA_RANGE_NM / LAMBDA_STEP_NM);
 
-    uint index = pixel.y * pc.imageSize.x + pixel.x;
-    vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
-    xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);
-    accumulation.pixels[index] = vec4(xyz, previous.w + 1.0);
-    vec3 rgb = mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * xyz;
-    float lowest = min(rgb.r, min(rgb.g, rgb.b));
-    rgb = lowest < 0.0 && xyz.y > 0.0 ? xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest)) : rgb;
-    rgb = max(rgb, vec3(0.0)) * pc.frame.y;
+	uint index = pixel.y * pc.imageSize.x + pixel.x;
+	vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
+	xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);
+	accumulation.pixels[index] = vec4(xyz, previous.w + 1.0);
+	vec3 rgb = mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * xyz;
+	float lowest = min(rgb.r, min(rgb.g, rgb.b));
+	rgb = lowest < 0.0 && xyz.y > 0.0 ? xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest)) : rgb;
+	rgb = max(rgb, vec3(0.0)) * pc.frame.y;
 
-    const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);
-    const mat3 agxOutset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438, -0.0980208811401368, 1.15190312990417, -0.0980434501171241, -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
-    vec3 x = (clamp(log2(max(agxInset * rgb, vec3(1.0e-10))), -12.47393, 4.026069) + 12.47393) / 16.499999;
-    x = 15.5 * x * x * x * x * x * x - 40.14 * x * x * x * x * x + 31.96 * x * x * x * x - 6.868 * x * x * x + 0.4298 * x * x + 0.1191 * x - 0.00232;
-    vec3 c = min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
-    c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308)));
-    imageStore(outputImage, ivec2(pixel), vec4(c, 1.0));
+	const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+	const mat3 agxOutset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438, -0.0980208811401368, 1.15190312990417, -0.0980434501171241, -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+	vec3 x = (clamp(log2(max(agxInset * rgb, vec3(1.0e-10))), -12.47393, 4.026069) + 12.47393) / 16.499999;
+	x = 15.5 * x * x * x * x * x * x - 40.14 * x * x * x * x * x + 31.96 * x * x * x * x - 6.868 * x * x * x + 0.4298 * x * x + 0.1191 * x - 0.00232;
+	vec3 c = min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
+	c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308)));
+	imageStore(outputImage, ivec2(pixel), vec4(c, 1.0));
 }
