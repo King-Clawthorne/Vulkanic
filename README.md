@@ -98,9 +98,9 @@ Measured on October 19, 2026, using the Release build and a stationary view.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,193 | 1.419 ms | 1.420 ms | 1.450 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,208 | 0.206 ms | 0.205 ms | 0.214 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,193 measured workloads span 8.3 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,208 measured workloads span 8.37 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 

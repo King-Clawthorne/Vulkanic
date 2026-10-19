@@ -30,9 +30,7 @@ struct SkyConfig {
     float sunRadiance550 = 8317.742f; ///< Solar radiance reference at 550 nm, in renderer radiance units.
     glm::vec3 sunDirection{0.35f, 0.01f, 0.25f}; ///< Direction toward the Sun in world space.
     float sunRadius = 0.00465f; ///< Angular radius of the Sun, in radians.
-    uint32_t secondarySamples = 2; ///< Number of path samples per secondary-ray segment.
     uint32_t viewSteps = 2; ///< Number of integration samples per primary view-ray segment.
-    uint32_t scatteringOrders = 2; ///< Maximum scattering order evaluated by the path tracer.
     float rayleighDepolarization = 0.0279f; ///< Depolarization parameter used by the Rayleigh Mueller matrix.
     /// Compares all sky parameters for exact equality.
     [[nodiscard]] friend bool operator==(const SkyConfig&, const SkyConfig&) = default;

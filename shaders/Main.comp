@@ -25,16 +25,13 @@ layout(push_constant) uniform PushConstants {
 }
 pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
-layout(constant_id = 0) const uint SpecializedOrders = 1; ///< Maximum scattering order compiled into the pipeline.
-layout(constant_id = 1) const uint SpecializedViewSteps = 0; ///< Primary segment steps, zero selects the shader default.
-layout(constant_id = 2) const uint SpecializedSecondarySamples = 0; ///< Secondary segment samples, zero selects the shader default.
+layout(constant_id = 0) const uint SpecializedViewSteps = 0; ///< Primary segment steps, zero selects the shader default.
 
 const float PI = 3.14159265358979323846; ///< Pi in radians.
 const int SPECTRAL_BANDS = 17; ///< Number of reference wavelengths in sceneData.
 const float LAMBDA_MIN_NM = 380.0; ///< First reference wavelength, in nanometres.
 const float LAMBDA_RANGE_NM = 400.0; ///< Width of the sampled wavelength interval, in nanometres.
 const float LAMBDA_STEP_NM = 25.0; ///< Spacing between adjacent reference wavelengths, in nanometres.
-const float GOLDEN_ANGLE = 2.39996322972865332; ///< Azimuthal rotation used to decorrelate scattering samples, in radians.
 const int LUT_ALT = 64; ///< Number of altitude samples in the transmittance table.
 const int LUT_MU = 256; ///< Number of direction cosine samples in each transmittance row.
 
@@ -340,42 +337,22 @@ vec4 scatter_wavelength(ScatterGeom g, vec4 s, float density) {
 	return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
-/// State for one ray segment in the recursive multiple-scattering estimator.
-struct Level {
-	vec3 org; ///< Origin of the ray segment, in world-space metres.
-	vec3 dir; ///< Unit direction of the ray segment.
-	vec3 pos; ///< Current sampled position along the segment, in world space.
+/// Sampling state for one primary view-ray segment.
+struct ViewPath {
+	vec3 dir; ///< Unit direction of the view ray.
+	vec3 pos; ///< Current sampled position along the view ray, in world space.
 	float air; ///< Local Rayleigh density.
 	float camDepth; ///< Rayleigh density column from the segment start to the current sample.
 	float depth0; ///< Rayleigh density column from the segment start to the atmosphere boundary.
-	vec2 dirJitter; ///< Two random variates used to sample the next scattering direction.
 	float distanceRate; ///< Signed exponential rate for the Rayleigh distance proposal.
 	float span; ///< Length of the ray segment, in metres.
-	float start; ///< Distance from org to the segment start, in metres.
+	float start; ///< Distance to the view-ray segment start, in metres.
 	float stepWeight; ///< Segment-integration estimator weight for the current sample.
-	float sampleWeight; ///< Reciprocal PDF weight for the sampled scattering direction.
-	int stepIndex; ///< Integration sample index within this segment.
-	int sampleIndex; ///< Child direction sample index for this segment sample.
-	uint scramble; ///< Random-sequence scramble seed for this scattering level.
-	vec4 result; ///< Stokes radiance accumulated for this level.
-	vec4 angular; ///< Stokes angular-scattering estimate accumulated for the current sample.
+	int stepIndex; ///< Integration sample index within the segment.
 };
 
-const int STACK = int(SpecializedOrders); ///< Maximum number of nested scattering levels.
-Level S[STACK]; ///< Per-level path estimator state.
 uint gRngIndex; ///< Current low-discrepancy sample index.
 uint gRngScramble; ///< Current pixel and path scramble seed.
-
-/// Constructs a unit direction at spherical angles around an axis.
-/// @param axis Unit reference axis.
-/// @param theta Polar angle from the axis, in radians.
-/// @param phi Azimuth angle around the axis, in radians.
-/// @return Unit direction.
-vec3 spherical_around(vec3 axis, float theta, float phi) {
-	vec3 a, b;
-	beam_basis(axis, a, b);
-	return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
-}
 
 /// Evaluates a normalized truncated exponential density on the unit interval.
 /// @param t Position in [0, 1].
@@ -421,124 +398,54 @@ float sample_distance(float u, float rate, out float pdf) {
 	return t;
 }
 
-/// Draws the next weighted distance sample for one ray segment on the estimator stack.
-/// @param d Active stack depth.
-/// @param steps Number of integration samples assigned to this segment.
-void begin_step(int d, int steps) {
-	uint dimension = TRANSPORT_DIMENSION + 4u * uint(d);
-	uint scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u);
-	float u = (float(S[d].stepIndex) + SampleFloat(gRngIndex, dimension, scramble)) / float(steps);
-
+/// Draws one weighted distance sample along the view-ray segment.
+/// @param path Sampling state for the view ray.
+/// @param origin Ray origin in world space.
+/// @param steps Number of integration samples assigned to the segment.
+void begin_step(inout ViewPath path, vec3 origin, int steps) {
+	uint scramble = Hash(gRngScramble ^ uint(path.stepIndex) * 0x9e3779b9u);
+	float u = (float(path.stepIndex) + SampleFloat(gRngIndex, TRANSPORT_DIMENSION, scramble)) / float(steps);
 	float pdf;
-
-	float t = sample_distance(u, S[d].distanceRate, pdf);
-	S[d].dirJitter = vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
-	S[d].stepWeight = S[d].span / (float(steps) * pdf);
-	S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
-	S[d].air = air_density(S[d].pos);
-	S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), 0.0);
-	S[d].angular = vec4(0.0);
-	S[d].sampleIndex = 0;
+	float t = sample_distance(u, path.distanceRate, pdf);
+	path.stepWeight = path.span / (float(steps) * pdf);
+	path.pos = origin + path.dir * (path.start + t * path.span);
+	path.air = air_density(path.pos);
+	path.camDepth = max(path.depth0 - sun_air_depth(path.pos, path.dir), 0.0);
 }
 
-/// Converts the completed estimator state at one stack level to a physical Stokes value.
-/// @param leaf Whether this is the final scattering level.
-/// @param g Sun-scattering geometry used for a leaf contribution.
-/// @param d Stack depth containing the accumulated estimate.
-/// @return Physical Stokes radiance for this level.
-vec4 level_value(bool leaf, ScatterGeom g, int d) {
-	if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.x));
-	return stokes_make_physical(S[d].result);
-}
-
-/// Estimates one requested scattering order along a view ray and accumulates it into sky.
+/// Integrates single scattering along the primary view ray.
 /// @param origin Ray origin in world space.
 /// @param viewDir Unit direction from the camera into the atmosphere.
 /// @param L Unit direction toward the Sun.
-/// @param order Maximum scattering depth for this estimate.
-/// @param viewSteps Integration samples on the primary view segment.
-/// @param secondarySteps Integration samples on each secondary segment.
-/// @param sky Stokes radiance accumulator updated by this estimate.
-void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, int secondarySteps, inout vec4 sky) {
-	int last = clamp(order, 1, STACK) - 1, d = 0;
-	S[0].org = origin;
-	S[0].dir = viewDir;
-	S[0].scramble = gRngScramble;
-	bool entering = true;
+/// @param viewSteps Integration samples on the view segment.
+/// @return Stokes radiance scattered toward the camera.
+vec4 scatter(vec3 origin, vec3 viewDir, vec3 L, int viewSteps) {
+	ViewPath path;
+	path.dir = viewDir;
+	float tEnd;
+	if (!view_segment(origin, path.dir, path.start, tEnd)) return vec4(0.0);
 
-	while (true) {
-		int steps = d == 0 ? viewSteps : secondarySteps;
-		if (entering) {
-			entering = false;
-			float tEnd;
-			if (!view_segment(S[d].org, S[d].dir, S[d].start, tEnd)) {
-				if (d-- == 0) return;
-				++S[d].sampleIndex;
-				continue;
-			}
+	vec3 first = origin + path.dir * path.start;
+	path.span = max(tEnd - path.start, 1.0e-3);
+	path.depth0 = sun_air_depth(first, path.dir);
+	float total = max(path.depth0 - sun_air_depth(first + path.dir * path.span, path.dir), 0.0);
+	float tau = gSpectralBand.x * total;
+	float altitudeChange = length(first + path.dir * path.span) - length(first);
+	path.distanceRate = clamp(clamp(tau, 0.0, 8.0) + altitudeChange / sceneData.skyParams.z, -32.0, 32.0);
+	if (dot(first, path.dir) < 0.0 && dot(first, path.dir) + path.span > 0.0) path.distanceRate = clamp(tau, 0.0, 8.0);
 
-			vec3 first = S[d].org + S[d].dir * S[d].start;
-			S[d].span = max(tEnd - S[d].start, 1.0e-3);
-			S[d].depth0 = sun_air_depth(first, S[d].dir);
-			float total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), 0.0);
-			float tau = gSpectralBand.x * total;
-			float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
-			S[d].distanceRate = clamp(clamp(tau, 0.0, 8.0) + altitudeChange / sceneData.skyParams.z, -32.0, 32.0);
-			if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0) S[d].distanceRate = clamp(tau, 0.0, 8.0);
-			S[d].result = vec4(0.0);
-			S[d].stepIndex = 0;
-			begin_step(d, steps);
+	float result = 0.0;
+	for (path.stepIndex = 0; path.stepIndex < viewSteps; ++path.stepIndex) {
+		begin_step(path, origin, viewSteps);
+		float midDepth = path.camDepth;
+		if (ray_sphere(path.pos, L, sceneData.skyParams.x).x <= 0.0) {
+			float depth = sun_air_depth(path.pos, L);
+			result += path.air * (wavelength_transmittance(midDepth) * path.stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
 		}
-
-		if (d < last && S[d].sampleIndex == 0) {
-			float u = S[d].dirJitter.x;
-			float phi = GOLDEN_ANGLE * float(S[d].stepIndex) + 2.0 * PI * S[d].dirJitter.y;
-			S[d + 1].org = S[d].pos;
-			vec3 current = S[d].dir;
-			const float rayleighWeight = 0.4, uniformWeight = 0.2;
-			int component = u < rayleighWeight ? 0 : (u < 2.0 * rayleighWeight ? 1 : 2);
-			u = component == 0 ? u / rayleighWeight : (component == 1 ? (u - rayleighWeight) / rayleighWeight : (u - 2.0 * rayleighWeight) / uniformWeight);
-			u = clamp(u, 0.0, 1.0);
-			vec3 axis = component == 0 ? L : current;
-			float mu = component < 2 ? 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0) : 1.0 - 2.0 * u;
-			vec3 next = spherical_around(axis, acos(clamp(mu, -1.0, 1.0)), phi);
-
-			float cosSun = dot(next, L), cosCurrent = dot(next, current);
-			float pdf = (uniformWeight + rayleighWeight * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI);
-			S[d].sampleWeight = 1.0 / pdf;
-			S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^ uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
-			S[++d].dir = next;
-			entering = true;
-			continue;
-		}
-
-		float midDepth = S[d].camDepth;
-		if (d < last) {
-			S[d].result += S[d].angular * (wavelength_transmittance(midDepth) * S[d].stepWeight);
-		} else if (ray_sphere(S[d].pos, L, sceneData.skyParams.x).x <= 0.0) {
-			float depth = sun_air_depth(S[d].pos, L);
-			S[d].result.x += S[d].air * (wavelength_transmittance(midDepth) * S[d].stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
-		}
-
-		if (++S[d].stepIndex < steps) {
-			begin_step(d, steps);
-			continue;
-		}
-
-		bool leaf = d == last;
-		ScatterGeom sunGeom;
-		if (leaf) sunGeom = scatter_geometry(-L, -S[d].dir);
-
-		int child = d;
-		if (d-- == 0) {
-			sky += level_value(leaf, sunGeom, child);
-			return;
-		}
-
-		ScatterGeom g = scatter_geometry(-S[child].dir, -S[d].dir);
-		S[d].angular += scatter_wavelength(g, level_value(leaf, sunGeom, child), S[d].air) * S[d].sampleWeight;
-		++S[d].sampleIndex;
 	}
+
+	ScatterGeom sunGeom = scatter_geometry(-L, -path.dir);
+	return stokes_make_physical(scatter_wavelength(sunGeom, vec4(1.0, 0.0, 0.0, 0.0), result));
 }
 
 /// Evaluates spectral Stokes radiance for a view direction, including the visible solar disk.
@@ -547,15 +454,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 /// @return Stokes radiance in the shader's current polarization frame.
 vec4 render_sky(vec3 viewDir, vec3 L) {
 	vec3 origin = vec3(0.0, sceneData.skyParams.x + 1.0, 0.0);
-	vec4 sky = vec4(0.0);
 	float groundT = ray_sphere(origin, viewDir, sceneData.skyParams.x).x;
-	int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
-	uint orderScramble = gRngScramble;
-
-	for (int order = 1; order <= orders; ++order) {
-		gRngScramble = Hash(orderScramble ^ uint(order) * 0x68bc21ebu);
-		scatter_order(origin, viewDir, L, order, int(SpecializedViewSteps), int(SpecializedSecondarySamples), sky);
-	}
+	gRngScramble = Hash(gRngScramble ^ 0x68bc21ebu);
+	vec4 sky = scatter(origin, viewDir, L, int(SpecializedViewSteps));
 
 	vec3 vertical, horizontal;
 	beam_basis(L, horizontal, vertical);

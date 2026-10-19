@@ -385,8 +385,8 @@ private:
 	/// Creates the compute pipeline and supplies specialization and push-constant layouts.
 	void CreatePipeline() {
 		const vk::raii::ShaderModule computeModule { m_device, vk::ShaderModuleCreateInfo { { }, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv) } };
-		const std::array<uint32_t, 3> settings = { std::max(1u, m_config.sky.scatteringOrders), m_config.sky.viewSteps, m_config.sky.secondarySamples };
-		const std::array<vk::SpecializationMapEntry, 3> entries = { { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 } } };
+		const std::array<uint32_t, 1> settings = { m_config.sky.viewSteps };
+		const std::array<vk::SpecializationMapEntry, 1> entries = { { { 0, 0, 4 } } };
 		const vk::SpecializationInfo specialization { static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data() };
 		const vk::PushConstantRange pushRange { vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants) };
 		vk::PipelineLayoutCreateInfo layoutInfo { };
