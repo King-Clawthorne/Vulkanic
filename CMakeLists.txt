@@ -53,7 +53,7 @@ add_custom_command(
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/Main.comp"
 )
 
-add_executable(Vulkanic src/App.cpp src/Baker.cpp "${SPV}")
+add_executable(Vulkanic src/App.cpp "${SPV}")
 target_include_directories(Vulkanic PRIVATE "${CMAKE_BINARY_DIR}")
 target_link_libraries(
     Vulkanic

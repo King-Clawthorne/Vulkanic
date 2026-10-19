@@ -1,37 +1,24 @@
 #pragma once
 
 /// @file Settings.hpp
-/// @brief Renderer configuration types, spectral dimensions, and table interfaces.
+/// @brief Renderer settings and Rayleigh lookup table construction.
 ///
-/// Declares the settings shared by the application and the CPU routines that
-/// build the lookup tables consumed by the compute shader.
+/// Defines the settings and CPU routines that prepare atmospheric and spectral
+/// values consumed by the compute shader.
 
+#include "DataTables.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <execution>
 #include <numbers>
+#include <ranges>
 #include <vector>
 #include <glm/glm.hpp>
 
 /// Single-precision pi used by the renderer and its camera calculations.
 inline constexpr float kPi = std::numbers::pi_v<float>;
-
-/// One aerosol population used by the atmospheric Mie-scattering model.
-///
-/// Aerosol density decays exponentially with altitude. The radius distribution
-/// is log-normal and the complex refractive index is relative to air.
-struct AerosolConfig {
-    float beta; ///< Extinction scale in inverse metres, normalized at the reference Mie band.
-    float scaleHeight; ///< Exponential density scale height, in metres.
-    float refractiveIndexReal; ///< Real part of the relative particle refractive index.
-    float refractiveIndexImag; ///< Imaginary part of the relative particle refractive index.
-    float meanRadiusMicrometers; ///< Geometric-mean particle radius for the log-normal distribution, in micrometres.
-    float sigma; ///< Geometric standard deviation of the log-normal radius distribution.
-
-    /// Compares all aerosol parameters for exact equality.
-    [[nodiscard]] friend bool operator==(const AerosolConfig&, const AerosolConfig&) = default;
-};
 
 /// Parameters used to build atmospheric lookup tables and shader constants.
 /// Sun direction is in world space. Radii and scale heights are in metres.
@@ -47,22 +34,6 @@ struct SkyConfig {
     uint32_t viewSteps = 2; ///< Number of integration samples per primary view-ray segment.
     uint32_t scatteringOrders = 2; ///< Maximum scattering order evaluated by the path tracer.
     float rayleighDepolarization = 0.0279f; ///< Depolarization parameter used by the Rayleigh Mueller matrix.
-    uint32_t mieTableAngleBins = 721; ///< Angular samples per Mie phase row over [0, pi].
-
-    /// Fine and coarse aerosol populations, in the order expected by the shader.
-    std::array<AerosolConfig, 2> aerosols{{{.beta = 21e-6f,
-                                            .scaleHeight = 1200.0f,
-                                            .refractiveIndexReal = 1.33f,
-                                            .refractiveIndexImag = 0.0f,
-                                            .meanRadiusMicrometers = 0.2f,
-                                            .sigma = 1.5f},
-                                           {.beta = 4.0e-6f,
-                                            .scaleHeight = 1500.0f,
-                                            .refractiveIndexReal = 1.53f,
-                                            .refractiveIndexImag = 0.008f,
-                                            .meanRadiusMicrometers = 1.0f,
-                                            .sigma = 2.0f}}};
-
     /// Compares all sky parameters for exact equality.
     [[nodiscard]] friend bool operator==(const SkyConfig&, const SkyConfig&) = default;
 };
@@ -103,41 +74,10 @@ inline constexpr double kSpectralLambdaMinNm = 380.0;
 /// Wavelength spacing between adjacent spectral bands, in nanometres.
 inline constexpr double kSpectralLambdaStepNm = 25.0;
 
-/// Builds normalized Stokes phase data for one aerosol at each spectral band.
-/// Rows are band-major, with one vec4 per angular bin.
-/// @param sky Atmospheric and spectral parameters used to build the table.
-/// @param aerosol Index of the aerosol population in sky.aerosols (0 or 1).
-/// @param crossSections Receives per-band extinction (x) and scattering (y) cross sections.
-/// @return Band-major Stokes phase table.
-std::vector<glm::vec4> ComputeMieScatteringTable(const SkyConfig& sky, int aerosol, std::array<glm::dvec2, kSpectralBandCount>& crossSections);
-
-/// Appends a normalized angular sampling CDF for a band-major phase table.
-///
-/// Reads one row of `bins` intensity samples for each spectral band starting at
-/// `firstEntry`, combines them using `bandWeights`, then appends `bins` vec4
-/// entries. Each appended entry stores its CDF value in x and fitted within-bin
-/// density shape in y. The CDF integrates over solid angle. Its cosine-linear
-/// within-bin density fit reduces the scalar phase proposal's quadrature estimate
-/// of the second moment.
-/// @param[in,out] table Phase rows followed by the appended CDF and shape entries.
-/// @param[in] bins Number of angular samples in each phase row.
-/// @param[in] firstEntry Index of the first phase sample in table.
-/// @param[in] bandWeights Relative displayed-radiance contribution of each spectral band.
-/// @pre bins is at least 2 and table contains kSpectralBandCount * bins samples from firstEntry.
-/// @post Exactly bins CDF and shape entries are appended to table.
-void AppendSamplingCdf(std::vector<glm::vec4>& table, int bins, size_t firstEntry, const std::array<double, kSpectralBandCount>& bandWeights);
-
 /// Number of altitude samples in the atmospheric transmittance table.
 inline constexpr int kTransmittanceAltitudeBins = 64;
 /// Number of direction-cosine samples in each transmittance row.
 inline constexpr int kTransmittanceMuBins = 256;
-
-/// Integrates atmospheric density columns for each altitude and direction.
-/// @param sky Atmospheric radii, scale heights, and aerosol parameters.
-/// @return Altitude-major table with kTransmittanceAltitudeBins rows and
-/// kTransmittanceMuBins direction samples per row. Each vec4 stores Rayleigh,
-/// fine-aerosol, reserved zero, and coarse-aerosol density columns, in that order.
-std::vector<glm::vec4> ComputeTransmittanceTable(const SkyConfig& sky);
 
 /// Wavelength-dependent values used to populate one shader spectral band.
 /// betaRayleighScale is relative to 550 nm. The remaining fields hold the
@@ -148,21 +88,117 @@ struct SpectralBand {
     glm::dvec3 cie; ///< CIE 1931 XYZ color-matching values at this wavelength.
 };
 
+namespace {
+    /// Abscissae for 8-point Gauss-Legendre integration.
+    constexpr std::array<double, 8> kGaussNodes = { -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498, 0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363 };
+    /// Weights paired with kGaussNodes for 8-point Gauss-Legendre integration.
+    constexpr std::array<double, 8> kGaussWeights = { 0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620, 0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763 };
+
+    /// Runs an integer-indexed loop with the standard parallel execution policy.
+    /// @tparam Body Callable invoked once for each index.
+    /// @param count Number of indices in the half-open range [0, count).
+    /// @param body Work to perform for each index. Calls may run concurrently.
+    template <class Body>
+    void ParallelFor(int count, Body body) {
+        const auto indices = std::views::iota(0, count);
+        std::for_each(std::execution::par, indices.begin(), indices.end(), body);
+    }
+}
+
+/// Integrates the Rayleigh density column for each altitude and direction.
+/// @param sky Atmospheric radii and Rayleigh scale height.
+/// @return Altitude-major table with kTransmittanceAltitudeBins rows and
+/// kTransmittanceMuBins direction samples per row.
+inline std::vector<float> ComputeTransmittanceTable(const SkyConfig& sky) {
+    const double re = sky.earthRadius;
+    const double ra = sky.atmosphereRadius;
+    std::vector<float> table(static_cast<size_t>(kTransmittanceAltitudeBins) * kTransmittanceMuBins);
+
+    ParallelFor(kTransmittanceAltitudeBins, [&](int a) {
+        const double x = static_cast<double>(a) / (kTransmittanceAltitudeBins - 1);
+        const double r = re + x * x * (ra - re);
+
+        for (int m = 0; m < kTransmittanceMuBins; ++m) {
+            const double v = 2.0 * m / (kTransmittanceMuBins - 1) - 1.0;
+            const double mu = v * std::abs(v);
+            const double b = r * mu;
+            const double end = std::sqrt(std::max(b * b + (ra - r) * (ra + r), 0.0)) - b;
+            std::vector<double> cuts { 0.0, end };
+
+            if (-b > 0.0 && -b < end) cuts.push_back(-b);
+            for (double height : { 0.0 }) {
+                const double shell = re + height;
+                const double discriminant = b * b + (shell - r) * (shell + r);
+                if (discriminant < 0.0) continue;
+                for (double t : { -b - std::sqrt(discriminant), -b + std::sqrt(discriminant) })
+                    if (t > 0.0 && t < end) cuts.push_back(t);
+            }
+
+            std::ranges::sort(cuts);
+            double column = 0.0;
+            const double panelLength = 8.0 * static_cast<double>(sky.scaleHeightRayleigh);
+
+            for (size_t segment = 1; segment < cuts.size(); ++segment) {
+                const double start = cuts[segment - 1], length = cuts[segment] - cuts[segment - 1];
+                const double middle = start + 0.5 * length;
+                if (r * r + middle * (middle + 2.0 * b) < re * re) {
+                    column += length;
+                    continue;
+                }
+
+                const int panels = std::max(1, static_cast<int>(std::ceil(length / panelLength)));
+                const double half = 0.5 * length / panels;
+                for (int panel = 0; panel < panels; ++panel) {
+                    for (size_t node = 0; node < kGaussNodes.size(); ++node) {
+                        const double t = start + (2 * panel + 1 + kGaussNodes[node]) * half;
+                        const double radius = std::sqrt(r * r + t * (t + 2.0 * b));
+                        const double altitude = std::max((r * r - re * re + t * (t + 2.0 * b)) / (radius + re), 0.0);
+                        column += half * kGaussWeights[node] * std::exp(-altitude / sky.scaleHeightRayleigh);
+                    }
+                }
+            }
+
+            table[static_cast<size_t>(a) * kTransmittanceMuBins + static_cast<size_t>(m)] = static_cast<float>(column);
+        }
+    });
+
+    return table;
+}
+
+namespace {
+    /// Samples the CIE 1931 matching functions on their 1 nm grid.
+    /// @param wavelengthNm Wavelength in nanometres.
+    /// @return Interpolated XYZ matching values, or zero outside 360 to 830 nm.
+    glm::dvec3 Cie1931Xyz(double wavelengthNm) {
+        if (wavelengthNm < 360.0 || wavelengthNm > 830.0) return { };
+        const double position = wavelengthNm - 360.0;
+        const auto lower = static_cast<size_t>(position);
+        const size_t upper = std::min(lower + 1, kCie1931Xyz.size() - 1);
+        return glm::mix(kCie1931Xyz[lower], kCie1931Xyz[upper], position - static_cast<double>(lower));
+    }
+
+    /// Evaluates the wavelength-dependent Rayleigh scattering shape factor.
+    /// @param wavelengthNm Wavelength in nanometres.
+    /// @return Relative shape factor before normalization to the 550 nm reference.
+    double RayleighShape(double wavelengthNm) {
+        const double sigma2 = 1.0e6 / (wavelengthNm * wavelengthNm);
+        const double n = 1.0 + 1.0e-8 * (8060.51 + 2480990.0 / (132.274 - sigma2) + 17455.7 / (39.32957 - sigma2));
+        const double n2 = n * n - 1.0;
+        return n2 * n2 / std::pow(wavelengthNm, 4.0);
+    }
+}
+
 /// Samples wavelength-dependent source datasets at the requested wavelength.
 /// @param wavelengthNm Wavelength to sample, in nanometres.
 /// @return Rayleigh scale, solar irradiance scale, and CIE XYZ values.
 /// @pre wavelengthNm is in [360, 830), the interval supported by solar-spectrum interpolation.
-SpectralBand ComputeSpectralAtWavelength(double wavelengthNm);
-
-/// Integrates the intensity component of a tabulated phase function for normalization.
-/// @param phase Stokes phase samples on a uniform angular grid spanning [0, pi].
-/// @return Solid-angle normalization under the renderer's phase convention.
-/// @pre phase contains at least two angular samples.
-inline double PhaseNormalization(const std::vector<glm::dvec4>& phase) {
-    const int bins = static_cast<int>(phase.size());
-    const double dTheta = std::numbers::pi / (bins - 1);
-
-    double integral = 0.0;
-    for (int i = 0; i + 1 < bins; ++i) { integral += phase[i].x * std::sin(i * dTheta) + phase[i + 1].x * std::sin((i + 1) * dTheta); }
-    return 0.25 * integral * dTheta;
+inline SpectralBand ComputeSpectralAtWavelength(double wavelengthNm) {
+    SpectralBand result { .betaRayleighScale = 0.0, .sunIrradianceScale = 0.0, .cie = { } };
+    result.betaRayleighScale = RayleighShape(wavelengthNm) / RayleighShape(550.0);
+    const double solarPosition = wavelengthNm - 360.0;
+    const auto solarLower = static_cast<size_t>(solarPosition);
+    const double solarFraction = solarPosition - static_cast<double>(solarLower);
+    result.sunIrradianceScale = std::lerp(kSolarIrradiance[solarLower], kSolarIrradiance[solarLower + 1], solarFraction);
+    result.cie = Cie1931Xyz(wavelengthNm);
+    return result;
 }

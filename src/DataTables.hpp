@@ -4,7 +4,7 @@
 /// @brief Wavelength-indexed material and reference spectral data.
 ///
 /// The arrays in this header are sampled on fixed wavelength grids and are
-/// interpolated by Baker.cpp when preparing renderer lookup tables.
+/// interpolated by Settings.hpp when preparing renderer lookup tables.
 
 #include <array>
 #include <glm/vec3.hpp>

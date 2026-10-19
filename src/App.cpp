@@ -1,7 +1,7 @@
 /// @file App.cpp
 /// @brief Creates the Vulkan window and runs the interactive spectral path tracer.
 ///
-/// This file connects runtime settings and precomputed scattering tables to the
+/// This file connects runtime settings and precomputed density tables to the
 /// compute shader, manages per-frame Vulkan resources, and translates camera
 /// and polarizer input into shader parameters.
 #include "Settings.hpp"
@@ -20,7 +20,6 @@
 #include <cstdio>
 #include <exception>
 #include <format>
-#include <iterator>
 #include <optional>
 #include <print>
 #include <ranges>
@@ -118,26 +117,21 @@ constexpr uint32_t kPathTracerSpirv[] = {
 /// Members are packed into 16-byte vectors to match the shader's std140 layout.
 /// The static assertions below guard the offsets and total size.
 struct alignas(16) SceneData {
-	glm::vec4 skySpectralParams; ///< 550 nm Rayleigh coefficient, first aerosol beta, reserved, and sun radiance.
-	glm::vec4 skyRadiiScaleHeights; ///< Earth radius, atmosphere radius, Rayleigh scale height, and first aerosol scale height.
+	glm::vec4 skyParams; ///< Earth radius, atmosphere radius, Rayleigh scale height, and depolarization.
 	glm::vec4 skySunDirectionRadius; ///< Sun direction in xyz and angular radius in radians.
-	glm::vec4 skyVrtParams; ///< Reserved, Rayleigh depolarization, Mie angle-bin count, and second aerosol scale height.
 	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and a reserved value.
 	glm::vec4 cieXyz[kSpectralBandCount]; ///< Normalized CIE XYZ matching values for each spectral band.
 	glm::vec4 sunDisk; ///< Sun solid angle followed by three reserved values.
-	glm::vec4 mieBands[kSpectralBandCount]; ///< Per-band extinction/scattering scales for the two aerosol populations.
-	glm::vec4 proposalScattering; ///< Wavelength-averaged scattering coefficients for path sampling.
-	glm::vec4 proposalExtinction; ///< Wavelength-averaged extinction coefficients for path sampling.
 };
 
-static_assert(offsetof(SceneData, skyVrtParams) == 48);
-static_assert(offsetof(SceneData, spectralBands) == 64);
-static_assert(offsetof(SceneData, proposalScattering) == 896);
-static_assert(offsetof(SceneData, proposalExtinction) == 912);
-static_assert(sizeof(SceneData) == 928);
+static_assert(offsetof(SceneData, skySunDirectionRadius) == 16);
+static_assert(offsetof(SceneData, spectralBands) == 32);
+static_assert(offsetof(SceneData, cieXyz) == 304);
+static_assert(offsetof(SceneData, sunDisk) == 576);
+static_assert(sizeof(SceneData) == 592);
 
 /// Descriptor types in the binding order expected by Main.comp.
-constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
+constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
 
 /// Per-dispatch camera, frame, polarizer, and image parameters.
 struct PushConstants {
@@ -205,10 +199,8 @@ private:
 	[[nodiscard]] SceneData BuildSceneData() const {
 		const SkyConfig& s = m_config.sky;
 		SceneData sceneData {
-			.skySpectralParams = { s.betaRayleigh550, s.aerosols[0].beta, 0.0f, s.sunRadiance550 },
-			.skyRadiiScaleHeights = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.aerosols[0].scaleHeight },
+			.skyParams = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.rayleighDepolarization },
 			.skySunDirectionRadius = { s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius },
-			.skyVrtParams = { 0.0f, s.rayleighDepolarization, static_cast<float>(s.mieTableAngleBins), s.aerosols[1].scaleHeight },
 		};
 
 		float ySum = 0.0f;
@@ -223,7 +215,12 @@ private:
 				0.0f
 			};
 
-			sceneData.cieXyz[band] = glm::vec4 { spectral.cie, 0.0 };
+			sceneData.cieXyz[band] = glm::vec4 {
+				static_cast<float>(spectral.cie.x),
+				static_cast<float>(spectral.cie.y),
+				static_cast<float>(spectral.cie.z),
+				0.0f
+			};
 			ySum += sceneData.cieXyz[band][1];
 		}
 
@@ -231,32 +228,6 @@ private:
 			for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
 
 		sceneData.sunDisk = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), 0.0f, 0.0f, 0.0f };
-		for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
-			const double beta = s.aerosols[aerosol].beta;
-			const double reference = m_mieCrossSections[aerosol][6].x;
-			for (int band = 0; band < kSpectralBandCount; ++band) {
-				const glm::dvec2& cross = m_mieCrossSections[aerosol][static_cast<size_t>(band)];
-				sceneData.mieBands[band][static_cast<int>(2 * aerosol)] = static_cast<float>(beta * cross.x / reference);
-				sceneData.mieBands[band][static_cast<int>((2 * aerosol) + 1)] = static_cast<float>(beta * cross.y / reference);
-			}
-		}
-
-		double proposalWeight = 0.0;
-		glm::dvec3 scattering { 0.0 };
-		glm::dvec4 extinction { 0.0 };
-		for (int band = 0; band < kSpectralBandCount; ++band) {
-			const auto& spectral = sceneData.spectralBands[band];
-			const auto& mie = sceneData.mieBands[band];
-			const double weight = spectral.y * glm::length(glm::dvec3(sceneData.cieXyz[band]));
-			proposalWeight += weight;
-			scattering += weight * glm::dvec3(spectral.x, mie.y, mie.w);
-			extinction += weight * glm::dvec4(spectral.x, mie.x, 0.0, mie.z);
-		}
-
-		if (proposalWeight > 0.0) {
-			sceneData.proposalScattering = glm::vec4(scattering / proposalWeight, 0.0);
-			sceneData.proposalExtinction = extinction / proposalWeight;
-		}
 
 		return sceneData;
 	}
@@ -272,27 +243,10 @@ private:
 		return buffer;
 	}
 
-	/// Builds spectral lookup tables and uploads them with the scene uniform data.
+	/// Builds the Rayleigh density table and uploads it with the scene uniform data.
 	void CreateSceneBuffers() {
 		const SkyConfig& s = m_config.sky;
 		m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
-		std::vector<glm::vec4> mie = ComputeMieScatteringTable(s, 0, m_mieCrossSections[0]);
-		std::ranges::copy(ComputeMieScatteringTable(s, 1, m_mieCrossSections[1]), std::back_inserter(mie));
-		const int bins = std::max(2, static_cast<int>(s.mieTableAngleBins));
-		std::array<double, kSpectralBandCount> visibleWeights { };
-		for (int band = 0; band < kSpectralBandCount; ++band) {
-			const double wavelength = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
-			const SpectralBand spectral = ComputeSpectralAtWavelength(wavelength);
-			visibleWeights[band] = spectral.sunIrradianceScale * glm::length(spectral.cie);
-		}
-
-		for (size_t aerosol = 0; aerosol < 2; ++aerosol) {
-			auto weights = visibleWeights;
-			for (int band = 0; band < kSpectralBandCount; ++band) weights[band] *= m_mieCrossSections[aerosol][band].y;
-			AppendSamplingCdf(mie, bins, aerosol * static_cast<size_t>(kSpectralBandCount * bins), weights);
-		}
-
-		m_mieScatteringBuffer = CreateTableBuffer(mie);
 		m_transmittanceBuffer = CreateTableBuffer(ComputeTransmittanceTable(s));
 		const SceneData sceneData = BuildSceneData();
 		UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span { &sceneData, 1 }));
@@ -504,7 +458,7 @@ private:
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
 		const vk::DescriptorImageInfo imageInfo { { }, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral };
 		const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo { *b, 0, vk::WholeSize }; };
-		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_mieScatteringBuffer), bufferInfo(m_transmittanceBuffer), bufferInfo(m_accumulationBuffer) };
+		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_transmittanceBuffer), bufferInfo(m_accumulationBuffer) };
 
 		std::array<vk::WriteDescriptorSet, kDescriptorTypes.size()> writes { };
 		writes[0] = vk::WriteDescriptorSet { { }, 0, 0, kDescriptorTypes[0], imageInfo };
@@ -602,10 +556,8 @@ private:
 
 	vma::raii::Allocator m_allocator { nullptr }; ///< VMA allocator used for renderer buffers.
 	vma::raii::Buffer m_sceneDataBuffer { nullptr }; ///< Uniform data shared with the compute shader.
-	vma::raii::Buffer m_mieScatteringBuffer { nullptr }; ///< Mie phase tables and appended angular-sampling CDFs.
-	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed atmospheric density-column table.
+	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed Rayleigh density-column table.
 	vma::raii::Buffer m_accumulationBuffer { nullptr }; ///< Per-pixel XYZ accumulation and sample counts.
-	std::array<std::array<glm::dvec2, kSpectralBandCount>, 2> m_mieCrossSections { }; ///< Extinction and scattering cross sections for each aerosol and spectral band.
 
 	vk::raii::SwapchainKHR m_swapchain { nullptr }; ///< RAII handle for the presentation swapchain.
 	vk::Extent2D m_swapchainExtent { }; ///< Actual swapchain image dimensions, in pixels.

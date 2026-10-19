@@ -9,19 +9,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 /// Storage image written by this workgroup's pixel invocation.
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
-	vec4 skySpectralParams, skyRadiiScaleHeights, skySunDirectionRadius;
-	vec4 skyVrtParams;
+	vec4 skyParams, skySunDirectionRadius;
 	vec4 spectralBands[17], cieXyz[17], sunDisk;
-	vec4 mieBands[17];
-	vec4 proposalScattering, proposalExtinction;
 }
 sceneData; ///< Scene uniforms shared by the host and compute shader.
 
-layout(std430, set = 0, binding = 2) readonly buffer MieMatrixBuffer { vec4 entries[]; }
-mieMatrixBuffer; ///< Mie phase rows followed by the angular sampling CDFs.
-layout(std430, set = 0, binding = 3) readonly buffer TransmittanceBuffer { vec4 depth[]; }
-transmittanceLut; ///< Preintegrated atmospheric density columns.
-layout(std430, set = 0, binding = 4) buffer AccumulationBuffer { vec4 pixels[]; }
+layout(std430, set = 0, binding = 2) readonly buffer TransmittanceBuffer { float depth[]; }
+transmittanceLut; ///< Preintegrated Rayleigh density columns.
+layout(std430, set = 0, binding = 3) buffer AccumulationBuffer { vec4 pixels[]; }
 accumulation; ///< Per-pixel XYZ running averages and sample counts.
 
 layout(push_constant) uniform PushConstants {
@@ -49,7 +44,6 @@ float gBandFraction; ///< Interpolation fraction between wavelength table rows.
 float gWavelengthNm; ///< Current sampled wavelength, in nanometres.
 vec4 gSpectralBand; ///< Interpolated Rayleigh and solar spectral parameters.
 vec4 gCieXyz; ///< Interpolated CIE XYZ matching values.
-vec4 gMieBand; ///< Interpolated fine and coarse aerosol parameters.
 
 /// Converts the high 23 bits of an integer to a floating point variate in (0, 1).
 /// @param x Integer random value.
@@ -167,12 +161,12 @@ float SampleFloat(uint index, uint dimension, uint scramble) {
 	return ToUnit(NestedUniformScramble(value, seed));
 }
 
-/// Evaluates exponential Rayleigh and aerosol densities at a world-space position.
+/// Evaluates the exponential Rayleigh density at a world-space position.
 /// @param pos Position in world space, in metres.
-/// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol densities.
-vec4 air_density(vec3 pos) {
-	float h = max(length(pos) - sceneData.skyRadiiScaleHeights.x, 0.0);
-	return vec4(exp(-h / sceneData.skyRadiiScaleHeights.zw), 0.0, exp(-h / sceneData.skyVrtParams.w));
+/// @return Relative Rayleigh density.
+float air_density(vec3 pos) {
+	float h = max(length(pos) - sceneData.skyParams.x, 0.0);
+	return exp(-h / sceneData.skyParams.z);
 }
 
 /// Computes the near and far intersections of a ray with a sphere.
@@ -194,21 +188,21 @@ vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
 /// @param[out] tEnd Distance to the atmosphere exit or ground intersection.
 /// @return Whether the ray intersects the atmosphere.
 bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
-	vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.y);
-	vec2 ground = ray_sphere(origin, dir, sceneData.skyRadiiScaleHeights.x);
+	vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyParams.y);
+	vec2 ground = ray_sphere(origin, dir, sceneData.skyParams.x);
 	tStart = max(atmosphere.x, 0.0);
 
 	tEnd = ground.x > 0.0 ? min(atmosphere.y, ground.x) : atmosphere.y;
 	return atmosphere.y >= 0.0;
 }
 
-/// Bilinearly samples the preintegrated density columns from origin to the atmosphere boundary.
+/// Bilinearly samples the preintegrated Rayleigh density column to the atmosphere boundary.
 /// @param origin Position in world space, in metres.
 /// @param dir Unit ray direction.
-/// @return Rayleigh, fine-aerosol, reserved zero, and coarse-aerosol density columns.
-vec4 sun_air_depth(vec3 origin, vec3 dir) {
+/// @return Integrated Rayleigh density column.
+float sun_air_depth(vec3 origin, vec3 dir) {
 	float r = length(origin), mu = dot(origin, dir) / r;
-	float x = sqrt(clamp((r - sceneData.skyRadiiScaleHeights.x) / (sceneData.skyRadiiScaleHeights.y - sceneData.skyRadiiScaleHeights.x), 0.0, 1.0)) * float(LUT_ALT - 1);
+	float x = sqrt(clamp((r - sceneData.skyParams.x) / (sceneData.skyParams.y - sceneData.skyParams.x), 0.0, 1.0)) * float(LUT_ALT - 1);
 	float y = (0.5 + 0.5 * sign(mu) * sqrt(abs(mu))) * float(LUT_MU - 1);
 	ivec2 i = min(ivec2(x, y), ivec2(LUT_ALT - 2, LUT_MU - 2));
 	vec2 f = vec2(x, y) - vec2(i);
@@ -218,9 +212,9 @@ vec4 sun_air_depth(vec3 origin, vec3 dir) {
 }
 
 /// Evaluates scalar atmospheric transmittance for the current wavelength.
-/// @param depth Integrated Rayleigh and aerosol density columns.
+/// @param depth Integrated Rayleigh density column.
 /// @return Fraction of radiance transmitted through the segment.
-float wavelength_transmittance(vec4 depth) { return exp(-(gSpectralBand.x * depth.x + gMieBand.x * depth.y + gMieBand.z * depth.w)); }
+float wavelength_transmittance(float depth) { return exp(-gSpectralBand.x * depth); }
 
 /// Constructs the renderer's structured Mueller matrix from its independent terms.
 /// @param m11 First intensity term.
@@ -275,7 +269,7 @@ vec4 vec4_reframe(vec4 s, vec3 oldA, vec3 oldB, vec3 newA) { return rotate(s, ro
 /// @param cosTheta Cosine of the angle between incoming and outgoing directions.
 /// @return Rayleigh Mueller matrix including configured depolarization.
 mat4 rayleigh_mueller(float cosTheta) {
-	float kingDepolarization = sceneData.skyVrtParams.y;
+	float kingDepolarization = sceneData.skyParams.w;
 	float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
 	float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
 	float mu2 = cosTheta * cosTheta;
@@ -317,52 +311,32 @@ void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 f
 /// @return Output Stokes vector.
 vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
 
-/// Geometry and lookup coordinates shared by Rayleigh and Mie scattering.
+/// Geometry shared by Rayleigh scattering and polarization-frame changes.
 struct ScatterGeom {
 	mat4 rayleigh; ///< Rayleigh Mueller matrix for the current scattering angle.
 	vec4 rot; ///< Input and output Stokes-frame rotations, stored as cos(2 theta), sin(2 theta) pairs.
 	vec4 flip; ///< Stokes-component sign correction for degenerate forward or backward frames.
-	int bin; ///< Lower angular sample index in the Mie phase table.
-	float frac; ///< Interpolation fraction from bin to the next angular sample.
 };
 
-/// Computes scattering angle, polarization frames, and Mie table coordinates.
+/// Computes the Rayleigh Mueller matrix and polarization frames for a scattering event.
 /// @param din Incoming unit direction.
 /// @param dout Outgoing unit direction.
-/// @return Shared geometry for Rayleigh and Mie scattering evaluation.
+/// @return Scattering geometry.
 ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
 	ScatterGeom g;
 	float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
 	g.rayleigh = rayleigh_mueller(cosTheta);
-	float fbin = acos(cosTheta) / PI * float(max(2, int(sceneData.skyVrtParams.z)) - 1);
-	g.bin = int(floor(fbin));
-	g.frac = fbin - float(g.bin);
 	scatter_frame(din, dout, cosTheta, g.rot, g.flip);
 	return g;
 }
 
-/// Interpolates the packed Mie phase table and constructs its Mueller matrix.
-/// @param g Scattering geometry and angular table coordinates.
-/// @param aerosol Aerosol table index, zero for fine and one for coarse.
-/// @return Mie Mueller matrix in the shader's Stokes convention.
-mat4 mie_mueller(ScatterGeom g, int aerosol) {
-	int bins = max(2, int(sceneData.skyVrtParams.z));
-	int base0 = (aerosol * SPECTRAL_BANDS + gBandLower) * bins;
-	int base1 = (aerosol * SPECTRAL_BANDS + gBandUpper) * bins;
-	vec4 lower = mix(mieMatrixBuffer.entries[base0 + g.bin], mieMatrixBuffer.entries[base0 + min(g.bin + 1, bins - 1)], g.frac);
-	vec4 upper = mix(mieMatrixBuffer.entries[base1 + g.bin], mieMatrixBuffer.entries[base1 + min(g.bin + 1, bins - 1)], g.frac);
-	vec4 e = mix(lower, upper, gBandFraction);
-	return mueller(e.x, e.y, e.x, e.z, e.w, e.z);
-}
-
-/// Combines wavelength-scaled Rayleigh and aerosol scattering and applies the Stokes frame changes.
+/// Applies wavelength-scaled Rayleigh scattering and Stokes-frame changes.
 /// @param g Scattering geometry and polarization frame data.
 /// @param s Input Stokes radiance.
-/// @param w Local Rayleigh, fine-aerosol, and coarse-aerosol density values.
+/// @param density Local Rayleigh density.
 /// @return Scattered Stokes radiance at the current wavelength.
-vec4 scatter_wavelength(ScatterGeom g, vec4 s, vec3 w) {
-	mat4 m = gSpectralBand.x * w.x * g.rayleigh + gMieBand.y * w.y * mie_mueller(g, 0);
-	m += w.z > 0.0 ? gMieBand.w * w.z * mie_mueller(g, 1) : mat4(0.0);
+vec4 scatter_wavelength(ScatterGeom g, vec4 s, float density) {
+	mat4 m = gSpectralBand.x * density * g.rayleigh;
 	return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
 }
 
@@ -371,12 +345,11 @@ struct Level {
 	vec3 org; ///< Origin of the ray segment, in world-space metres.
 	vec3 dir; ///< Unit direction of the ray segment.
 	vec3 pos; ///< Current sampled position along the segment, in world space.
-	vec4 air; ///< Local Rayleigh, fine-aerosol, reserved, and coarse-aerosol densities.
-	vec4 camDepth; ///< Density columns from the segment start to the current sample.
-	vec4 depth0; ///< Density columns from the segment start to the atmosphere boundary.
+	float air; ///< Local Rayleigh density.
+	float camDepth; ///< Rayleigh density column from the segment start to the current sample.
+	float depth0; ///< Rayleigh density column from the segment start to the atmosphere boundary.
 	vec2 dirJitter; ///< Two random variates used to sample the next scattering direction.
-	vec4 distanceRates; ///< Component rates for the segment-distance proposal on normalized [0, 1].
-	vec4 distanceWeights; ///< Mixture weights paired with distanceRates.
+	float distanceRate; ///< Signed exponential rate for the Rayleigh distance proposal.
 	float span; ///< Length of the ray segment, in metres.
 	float start; ///< Distance from org to the segment start, in metres.
 	float stepWeight; ///< Segment-integration estimator weight for the current sample.
@@ -404,94 +377,6 @@ vec3 spherical_around(vec3 axis, float theta, float phi) {
 	return normalize(axis * cos(theta) + (a * cos(phi) + b * sin(phi)) * sin(theta));
 }
 
-/// Returns the base entry and angular bin count for one packed aerosol CDF.
-/// @param aerosol Aerosol table index, zero for fine and one for coarse.
-/// @return CDF base entry and number of angular samples.
-ivec2 cdf_layout(int aerosol) {
-	int bins = max(2, int(sceneData.skyVrtParams.z));
-	return ivec2(bins * (2 * SPECTRAL_BANDS + aerosol), bins);
-}
-
-/// Reads a cumulative probability value from the packed Mie buffer.
-/// @param i Buffer entry index.
-/// @return CDF value stored in the entry's x component.
-float cdf_at(int i) { return mieMatrixBuffer.entries[i].x; }
-
-/// Reads a fitted within-bin density parameter from the packed Mie buffer.
-/// @param i Buffer entry index.
-/// @return Shape parameter stored in the entry's y component.
-float cdf_shape(int i) { return mieMatrixBuffer.entries[i].y; }
-
-/// Computes the solid-angle measure of an angular bin on the uniform theta grid.
-/// @param bin Angular bin index.
-/// @param bins Number of angular samples in the grid.
-/// @return Integral of sin(theta) across the bin.
-float cdf_cosine_width(int bin, int bins) {
-	float halfWidth = 0.5 * PI / float(bins - 1);
-	return 2.0 * sin(float(2 * bin + 1) * halfWidth) * sin(halfWidth);
-}
-
-/// Evaluates the aerosol direction proposal density at a scattering angle.
-/// @param aerosol Aerosol table index, zero for fine and one for coarse.
-/// @param cosTheta Cosine of the scattering angle.
-/// @return Directional probability density per unit solid angle.
-float cdf_pdf(int aerosol, float cosTheta) {
-	ivec2 info = cdf_layout(aerosol);
-	float theta = acos(clamp(cosTheta, -1.0, 1.0));
-	int bin = min(int(theta / PI * float(info.y - 1)), info.y - 2);
-	float theta0 = float(bin) * PI / float(info.y - 1);
-	float theta1 = float(bin + 1) * PI / float(info.y - 1);
-	float fraction;
-
-	if (bin * 2 < info.y - 1) {
-		float a = sin(0.5 * theta0), b = sin(0.5 * theta1), x = sin(0.5 * theta);
-		fraction = (x * x - a * a) / (b * b - a * a);
-	} else {
-		float a = cos(0.5 * theta0), b = cos(0.5 * theta1), x = cos(0.5 * theta);
-		fraction = (a * a - x * x) / (a * a - b * b);
-	}
-
-	float shape = cdf_shape(info.x + bin);
-	float density = 2.0 * mix(shape, 1.0 - shape, clamp(fraction, 0.0, 1.0));
-	return density * (cdf_at(info.x + bin + 1) - cdf_at(info.x + bin)) / (2.0 * PI * cdf_cosine_width(bin, info.y));
-}
-
-/// Samples a direction from an aerosol phase CDF around the requested axis.
-/// @param aerosol Aerosol table index, zero for fine and one for coarse.
-/// @param axis Direction around which the sampled angle is placed.
-/// @param u Uniform variate used to invert the angular CDF.
-/// @param phi Azimuth angle in radians.
-/// @return Unit direction sampled from the phase proposal.
-vec3 cdf_sample(int aerosol, vec3 axis, float u, float phi) {
-	ivec2 info = cdf_layout(aerosol);
-	int lo = 0, hi = info.y - 1;
-
-	while (hi - lo > 1) {
-		int mid = (lo + hi) / 2;
-		if (cdf_at(info.x + mid) < u) lo = mid;
-		else hi = mid;
-	}
-
-	float c0 = cdf_at(info.x + lo), c1 = cdf_at(info.x + hi);
-	float fraction = clamp((u - c0) / max(c1 - c0, 1e-20), 0.0, 1.0);
-	float shape = cdf_shape(info.x + lo);
-	float root = sqrt(max(shape * shape + (1.0 - 2.0 * shape) * fraction, 0.0));
-	fraction = fraction > 0.0 ? fraction / max(shape + root, 1e-20) : 0.0;
-	float theta0 = float(lo) * PI / float(info.y - 1);
-	float theta1 = float(hi) * PI / float(info.y - 1);
-	float theta;
-
-	if (lo * 2 < info.y - 1) {
-		float a = sin(0.5 * theta0), b = sin(0.5 * theta1);
-		theta = 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
-	} else {
-		float a = cos(0.5 * theta0), b = cos(0.5 * theta1);
-		theta = PI - 2.0 * asin(sqrt(mix(a * a, b * b, fraction)));
-	}
-
-	return spherical_around(axis, theta, phi);
-}
-
 /// Evaluates a normalized truncated exponential density on the unit interval.
 /// @param t Position in [0, 1].
 /// @param rate Signed exponential rate, with negative rates favoring the far end.
@@ -503,72 +388,36 @@ float distance_pdf(float t, float rate) {
 	return k * exp(-k * (rate < 0.0 ? 1.0 - t : t)) / mass;
 }
 
-/// Samples a normalized position from the four-component segment-distance proposal.
-/// @param u Uniform variate selecting a proposal component and position.
-/// @param rates Signed exponential rates for the proposal components.
-/// @param weights Mixture probabilities paired with rates.
+/// Evaluates a truncated exponential CDF on [0, 1].
+/// @param t Position in [0, 1].
+/// @param rate Signed exponential rate.
+/// @return Cumulative probability at t.
+float distance_cdf(float t, float rate) {
+	float k = abs(rate);
+	if (k < 1.0e-3) return t;
+	float x = rate < 0.0 ? 1.0 - t : t;
+	float z = k * x;
+	float cumulative = z < 0.01 ? z * (1.0 - z * (0.5 - z / 6.0)) : 1.0 - exp(-z);
+	float mass = k < 0.01 ? k * (1.0 - k * (0.5 - k / 6.0)) : 1.0 - exp(-k);
+	float componentCdf = cumulative / mass;
+	return rate < 0.0 ? 1.0 - componentCdf : componentCdf;
+}
+
+/// Inverts the uniform and Rayleigh-weighted distance proposal.
+/// @param u Stratified uniform variate.
+/// @param rate Signed exponential rate for the Rayleigh component.
 /// @param pdf Receives the full mixture density at the sampled position.
 /// @return Sampled position in [0, 1] along the ray segment.
-float sample_distance(float u, vec4 rates, vec4 weights, out float pdf) {
-	float lower = 0.0;
-	int component = 3;
-
-	for (int i = 0; i < 3; ++i) {
-		if (u < lower + weights[i]) {
-			component = i;
-			break;
-		}
-		lower += weights[i];
-	}
-
-	float local = clamp((u - lower) / max(weights[component], 1.0e-30), 0.0, 1.0);
-	float rate = rates[component], k = abs(rate);
-
-	float x = rate < 0.0 ? 1.0 - local : local;
-	float t = k < 1.0e-3 ? x : -log((1.0 - x) + x * exp(-k)) / k;
-	if (k >= 1.0e-3 && k < 0.01) t = x - 0.5 * k * x * (1.0 - x) + k * k * x * (1.0 - x) * (1.0 - 2.0 * x) / 6.0;
-	t = clamp(t, 0.0, 1.0);
-
-	t = rate < 0.0 ? 1.0 - t : t;
-	vec4 magnitudes = abs(rates);
-	vec4 mass, scale;
-
-	for (int i = 0; i < 4; ++i) {
-		mass[i] = magnitudes[i] < 0.01 ? magnitudes[i] * (1.0 - magnitudes[i] * (0.5 - magnitudes[i] / 6.0)) : 1.0 - exp(-magnitudes[i]);
-		scale[i] = magnitudes[i] < 1.0e-3 ? 0.0 : weights[i] * magnitudes[i] / mass[i];
-	}
-
+float sample_distance(float u, float rate, out float pdf) {
 	float lo = 0.0, hi = 1.0;
-	for (int iteration = 0; iteration < 32; ++iteration) {
-		float cdf = 0.0;
-		pdf = 0.0;
-
-		for (int i = 0; i < 4; ++i) {
-			if (magnitudes[i] < 1.0e-3) {
-				cdf += weights[i] * t;
-				pdf += weights[i];
-			} else {
-				float x = rates[i] < 0.0 ? 1.0 - t : t;
-				float e = exp(-magnitudes[i] * x);
-				float z = magnitudes[i] * x;
-				float cumulative = z < 0.01 ? z * (1.0 - z * (0.5 - z / 6.0)) : 1.0 - e;
-				float componentCdf = cumulative / mass[i];
-				cdf += weights[i] * (rates[i] < 0.0 ? 1.0 - componentCdf : componentCdf);
-				pdf += scale[i] * e;
-			}
-		}
-
-		float residual = cdf - u;
-		if (abs(residual) <= 1.0e-7 || hi - lo <= 1.0e-7) break;
-		if (residual < 0.0) lo = t;
+	for (int iteration = 0; iteration < 24; ++iteration) {
+		float t = 0.5 * (lo + hi);
+		float cdf = 0.1 * t + 0.9 * distance_cdf(t, rate);
+		if (cdf < u) lo = t;
 		else hi = t;
-
-		float candidate = t - residual / pdf;
-		t = iteration % 4 == 3 || candidate <= lo || candidate >= hi ? 0.5 * (lo + hi) : candidate;
 	}
-
-	pdf = 0.0;
-	for (int i = 0; i < 4; ++i) pdf += weights[i] * distance_pdf(t, rates[i]);
+	float t = 0.5 * (lo + hi);
+	pdf = 0.1 + 0.9 * distance_pdf(t, rate);
 	return t;
 }
 
@@ -582,12 +431,12 @@ void begin_step(int d, int steps) {
 
 	float pdf;
 
-	float t = sample_distance(u, S[d].distanceRates, S[d].distanceWeights, pdf);
+	float t = sample_distance(u, S[d].distanceRate, pdf);
 	S[d].dirJitter = vec2(SampleFloat(gRngIndex, dimension + 1u, scramble), SampleFloat(gRngIndex, dimension + 2u, scramble));
 	S[d].stepWeight = S[d].span / (float(steps) * pdf);
 	S[d].pos = S[d].org + S[d].dir * (S[d].start + t * S[d].span);
 	S[d].air = air_density(S[d].pos);
-	S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), vec4(0.0));
+	S[d].camDepth = max(S[d].depth0 - sun_air_depth(S[d].pos, S[d].dir), 0.0);
 	S[d].angular = vec4(0.0);
 	S[d].sampleIndex = 0;
 }
@@ -598,7 +447,7 @@ void begin_step(int d, int steps) {
 /// @param d Stack depth containing the accumulated estimate.
 /// @return Physical Stokes radiance for this level.
 vec4 level_value(bool leaf, ScatterGeom g, int d) {
-	if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.xyz));
+	if (leaf) return stokes_make_physical(scatter_wavelength(g, vec4(1.0, 0.0, 0.0, 0.0), S[d].result.x));
 	return stokes_make_physical(S[d].result);
 }
 
@@ -631,15 +480,11 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 			vec3 first = S[d].org + S[d].dir * S[d].start;
 			S[d].span = max(tEnd - S[d].start, 1.0e-3);
 			S[d].depth0 = sun_air_depth(first, S[d].dir);
-			vec4 total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), vec4(0.0));
-			float tau = dot(sceneData.proposalExtinction, total);
+			float total = max(S[d].depth0 - sun_air_depth(first + S[d].dir * S[d].span, S[d].dir), 0.0);
+			float tau = gSpectralBand.x * total;
 			float altitudeChange = length(first + S[d].dir * S[d].span) - length(first);
-			vec3 scaleHeights = vec3(sceneData.skyRadiiScaleHeights.zw, sceneData.skyVrtParams.w);
-			S[d].distanceRates = vec4(0.0, clamp(vec3(clamp(tau, 0.0, 8.0)) + altitudeChange / scaleHeights, vec3(-32.0), vec3(32.0)));
-			if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0) S[d].distanceRates = vec4(clamp(tau, 0.0, 8.0));
-			vec3 scattering = max(total.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
-			float scatteringSum = dot(scattering, vec3(1.0));
-			S[d].distanceWeights = scatteringSum > 1.0e-30 ? vec4(0.1, 0.9 * scattering / scatteringSum) : vec4(1.0, 0.0, 0.0, 0.0);
+			S[d].distanceRate = clamp(clamp(tau, 0.0, 8.0) + altitudeChange / sceneData.skyParams.z, -32.0, 32.0);
+			if (dot(first, S[d].dir) < 0.0 && dot(first, S[d].dir) + S[d].span > 0.0) S[d].distanceRate = clamp(tau, 0.0, 8.0);
 			S[d].result = vec4(0.0);
 			S[d].stepIndex = 0;
 			begin_step(d, steps);
@@ -649,41 +494,17 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 			float u = S[d].dirJitter.x;
 			float phi = GOLDEN_ANGLE * float(S[d].stepIndex) + 2.0 * PI * S[d].dirJitter.y;
 			S[d + 1].org = S[d].pos;
-			vec3 next;
-
 			vec3 current = S[d].dir;
-			vec3 strength = max(S[d].air.xyw * sceneData.proposalScattering.xyz, vec3(0.0));
-			vec3 weights = 0.8 * strength / max(dot(strength, vec3(1.0)), 1.0e-30);
-			float fine = 0.5 * weights.y, coarse = 0.5 * weights.z;
-			float uniformWeight = 1.0 - dot(weights, vec3(1.0));
-			float rayleigh = 0.5 * weights.x;
-			float masses[7] = float[7](fine, coarse, fine, coarse, rayleigh, rayleigh, uniformWeight);
-			float lower = 0.0;
-			int component = 6;
-
-			for (int i = 0; i < 6; ++i) {
-				if (u < lower + masses[i]) {
-					component = i;
-					break;
-				}
-
-				lower += masses[i];
-			}
-
-			u = clamp((u - lower) / masses[component], 0.0, 1.0);
-
-			if (component < 4) {
-				next = cdf_sample(component % 2, component < 2 ? L : current, u, phi);
-			} else if (component < 6) {
-				float mu = 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0);
-				next = spherical_around(component == 4 ? L : current, acos(clamp(mu, -1.0, 1.0)), phi);
-			} else {
-				next = spherical_around(current, acos(1.0 - 2.0 * u), phi);
-			}
+			const float rayleighWeight = 0.4, uniformWeight = 0.2;
+			int component = u < rayleighWeight ? 0 : (u < 2.0 * rayleighWeight ? 1 : 2);
+			u = component == 0 ? u / rayleighWeight : (component == 1 ? (u - rayleighWeight) / rayleighWeight : (u - 2.0 * rayleighWeight) / uniformWeight);
+			u = clamp(u, 0.0, 1.0);
+			vec3 axis = component == 0 ? L : current;
+			float mu = component < 2 ? 2.0 * sinh(asinh(4.0 * u - 2.0) / 3.0) : 1.0 - 2.0 * u;
+			vec3 next = spherical_around(axis, acos(clamp(mu, -1.0, 1.0)), phi);
 
 			float cosSun = dot(next, L), cosCurrent = dot(next, current);
-			float pdf = (uniformWeight + rayleigh * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI) + fine * (cdf_pdf(0, cosSun) + cdf_pdf(0, cosCurrent));
-			pdf += coarse > 0.0 ? coarse * (cdf_pdf(1, cosSun) + cdf_pdf(1, cosCurrent)) : 0.0;
+			float pdf = (uniformWeight + rayleighWeight * 0.75 * (2.0 + cosCurrent * cosCurrent + cosSun * cosSun)) / (4.0 * PI);
 			S[d].sampleWeight = 1.0 / pdf;
 			S[d + 1].scramble = Hash(S[d].scramble ^ uint(S[d].stepIndex) * 0x9e3779b9u ^ uint(S[d].sampleIndex) * 0x68bc21ebu ^ 0xa511e9b3u);
 			S[++d].dir = next;
@@ -691,12 +512,12 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 			continue;
 		}
 
-		vec4 midDepth = S[d].camDepth;
+		float midDepth = S[d].camDepth;
 		if (d < last) {
 			S[d].result += S[d].angular * (wavelength_transmittance(midDepth) * S[d].stepWeight);
-		} else if (ray_sphere(S[d].pos, L, sceneData.skyRadiiScaleHeights.x).x <= 0.0) {
-			vec4 depth = sun_air_depth(S[d].pos, L);
-			S[d].result.xyz += S[d].air.xyw * (wavelength_transmittance(midDepth) * S[d].stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
+		} else if (ray_sphere(S[d].pos, L, sceneData.skyParams.x).x <= 0.0) {
+			float depth = sun_air_depth(S[d].pos, L);
+			S[d].result.x += S[d].air * (wavelength_transmittance(midDepth) * S[d].stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
 		}
 
 		if (++S[d].stepIndex < steps) {
@@ -715,7 +536,7 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 		}
 
 		ScatterGeom g = scatter_geometry(-S[child].dir, -S[d].dir);
-		S[d].angular += scatter_wavelength(g, level_value(leaf, sunGeom, child), S[d].air.xyw) * S[d].sampleWeight;
+		S[d].angular += scatter_wavelength(g, level_value(leaf, sunGeom, child), S[d].air) * S[d].sampleWeight;
 		++S[d].sampleIndex;
 	}
 }
@@ -725,9 +546,9 @@ void scatter_order(vec3 origin, vec3 viewDir, vec3 L, int order, int viewSteps, 
 /// @param L Unit direction toward the Sun.
 /// @return Stokes radiance in the shader's current polarization frame.
 vec4 render_sky(vec3 viewDir, vec3 L) {
-	vec3 origin = vec3(0.0, sceneData.skyRadiiScaleHeights.x + 1.0, 0.0);
+	vec3 origin = vec3(0.0, sceneData.skyParams.x + 1.0, 0.0);
 	vec4 sky = vec4(0.0);
-	float groundT = ray_sphere(origin, viewDir, sceneData.skyRadiiScaleHeights.x).x;
+	float groundT = ray_sphere(origin, viewDir, sceneData.skyParams.x).x;
 	int orders = groundT > 0.0 ? 1 : int(SpecializedOrders);
 	uint orderScramble = gRngScramble;
 
@@ -741,14 +562,14 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
 	vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
 	float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
 	float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
-	vec4 depth = sun_air_depth(origin, viewDir);
+	float depth = sun_air_depth(origin, viewDir);
 	bool sunVisible = disk > 0.0 && groundT <= 0.0;
 	float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
 	sky.x += intensity;
 	return stokes_make_physical(sky);
 }
 
-/// Interpolates the shader's spectral and Mie parameters at one wavelength.
+/// Interpolates the shader's spectral parameters at one wavelength.
 /// @param wavelengthNm Sample wavelength in nanometres.
 void set_wavelength(float wavelengthNm) {
 	gWavelengthNm = wavelengthNm;
@@ -758,7 +579,6 @@ void set_wavelength(float wavelengthNm) {
 	gBandFraction = bandPosition - float(gBandLower);
 	gSpectralBand = mix(sceneData.spectralBands[gBandLower], sceneData.spectralBands[gBandUpper], gBandFraction);
 	gCieXyz = mix(sceneData.cieXyz[gBandLower], sceneData.cieXyz[gBandUpper], gBandFraction);
-	gMieBand = mix(sceneData.mieBands[gBandLower], sceneData.mieBands[gBandUpper], gBandFraction);
 }
 
 /// Traces one pixel sample, updates its XYZ running average, and writes display RGB.

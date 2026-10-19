@@ -4,7 +4,7 @@ Vulkanic is a real-time Vulkan path tracer for exploring a spectrally modeled sk
 
 ## Situation
 
-Atmospheric light changes with wavelength. A convincing sky renderer must account for effects such as Rayleigh and Mie scattering and the finite size of the Sun. Polarization adds further interactions to represent.
+Atmospheric light changes with wavelength. Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarization.
 
 ## Task
 
@@ -14,7 +14,7 @@ Vulkanic brings these effects together in an interactive renderer. It samples on
 
 The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk at the sampled wavelength. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
-Startup preprocessing integrates atmospheric density columns and computes wavelength-dependent particle phase functions at higher resolution. These tables contain optical properties, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
+Startup preprocessing integrates Rayleigh density columns. This table contains an optical property, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
 
 ## Result
 
@@ -120,7 +120,7 @@ The `.sqlite` file is a database, not a text SQL script. Query its `VULKAN_WORKL
 
 ## Project layout
 
-- `src/` - Vulkan renderer and CPU-side sky/scattering tables
+- `src/` - Vulkan renderer and CPU-side Rayleigh density table
 - `shaders/Main.comp` - Vulkan compute shader
 - `build.ps1` - clean configure and build helper
 - `CMakeLists.txt` - dependencies, shader compilation, and executable target
