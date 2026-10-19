@@ -1,8 +1,7 @@
 /// @file Main.comp
-/// @brief Vulkan compute shader that samples and accumulates a spectral sky path.
+/// @brief Vulkan compute shader that renders and accumulates a sky path.
 ///
-/// The shader evaluates one wavelength sample per pixel dispatch, accumulates
-/// Stokes radiance in XYZ, and writes the tone-mapped result to the output image.
+/// The shader accumulates Stokes radiance and writes a tone-mapped output image.
 #version 460
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -10,14 +9,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
 layout(set = 0, binding = 1) uniform SceneData {
 	vec4 skyParams, skySunDirectionRadius;
-	vec4 spectralBands[17], cieXyz[17], sunDisk;
+	vec4 rayleigh, sunParams;
 }
 sceneData; ///< Scene uniforms shared by the host and compute shader.
 
 layout(std430, set = 0, binding = 2) readonly buffer TransmittanceBuffer { float depth[]; }
 transmittanceLut; ///< Preintegrated Rayleigh density columns.
 layout(std430, set = 0, binding = 3) buffer AccumulationBuffer { vec4 pixels[]; }
-accumulation; ///< Per-pixel XYZ running averages and sample counts.
+accumulation; ///< Per-pixel running averages and sample counts.
 
 layout(push_constant) uniform PushConstants {
 	vec4 forward, right, up, frame, polarizer;
@@ -25,22 +24,11 @@ layout(push_constant) uniform PushConstants {
 }
 pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
-layout(constant_id = 0) const uint SpecializedViewSteps = 0; ///< Primary segment steps, zero selects the shader default.
-
 const float PI = 3.14159265358979323846; ///< Pi in radians.
-const int SPECTRAL_BANDS = 17; ///< Number of reference wavelengths in sceneData.
-const float LAMBDA_MIN_NM = 380.0; ///< First reference wavelength, in nanometres.
-const float LAMBDA_RANGE_NM = 400.0; ///< Width of the sampled wavelength interval, in nanometres.
-const float LAMBDA_STEP_NM = 25.0; ///< Spacing between adjacent reference wavelengths, in nanometres.
 const int LUT_ALT = 64; ///< Number of altitude samples in the transmittance table.
 const int LUT_MU = 256; ///< Number of direction cosine samples in each transmittance row.
 
-int gBandLower; ///< Lower wavelength table row used by the current sample.
-int gBandUpper; ///< Upper wavelength table row used by the current sample.
-float gBandFraction; ///< Interpolation fraction between wavelength table rows.
-float gWavelengthNm; ///< Current sampled wavelength, in nanometres.
-vec4 gSpectralBand; ///< Interpolated Rayleigh and solar spectral parameters.
-vec4 gCieXyz; ///< Interpolated CIE XYZ matching values.
+vec3 gRayleighCoefficient; ///< Rayleigh scattering coefficient for each color channel.
 
 /// Converts the high 23 bits of an integer to a floating point variate in (0, 1).
 /// @param x Integer random value.
@@ -57,8 +45,7 @@ uint Hash(uint x) {
 }
 
 const uint SAMPLE_DIMENSIONS = 16u; ///< Number of dimensions with Sobol direction numbers.
-const uint WAVELENGTH_DIMENSION = 2u; ///< Sobol dimension used to choose a wavelength.
-const uint TRANSPORT_DIMENSION = WAVELENGTH_DIMENSION + 1u; ///< First dimension used by the transport estimator.
+const uint TRANSPORT_DIMENSION = 2u; ///< Sobol dimension used by the transport estimator.
 /// Sobol direction numbers, arranged as 32 values for each supported dimension.
 const uint SOBOL_DIRECTIONS[512] = uint[512](
 	0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u,
@@ -208,10 +195,10 @@ float sun_air_depth(vec3 origin, vec3 dir) {
 	return mix(mix(transmittanceLut.depth[k], transmittanceLut.depth[k + 1], f.y), mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
 }
 
-/// Evaluates scalar atmospheric transmittance for the current wavelength.
+/// Evaluates per-channel atmospheric transmittance.
 /// @param depth Integrated Rayleigh density column.
-/// @return Fraction of radiance transmitted through the segment.
-float wavelength_transmittance(float depth) { return exp(-gSpectralBand.x * depth); }
+/// @return Per-channel fraction of radiance transmitted through the segment.
+vec3 rayleigh_transmittance(float depth) { return exp(-gRayleighCoefficient * depth); }
 
 /// Constructs the renderer's structured Mueller matrix from its independent terms.
 /// @param m11 First intensity term.
@@ -223,13 +210,17 @@ float wavelength_transmittance(float depth) { return exp(-gSpectralBand.x * dept
 /// @return Mueller matrix in the shader's Stokes convention.
 mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) { return mat4(m11, m12, 0.0, 0.0, m12, m22, 0.0, 0.0, 0.0, 0.0, m33, -m34, 0.0, 0.0, m34, m44); }
 
-/// Clamps a Stokes vector to nonnegative intensity and physically valid polarization magnitude.
-/// @param s Input Stokes vector ordered as I, Q, U, V.
-/// @return Physically valid Stokes vector.
-vec4 stokes_make_physical(vec4 s) {
-	s.x = max(s.x, 0.0);
-	float p = length(s.yzw);
-	return p > s.x ? vec4(s.x, s.yzw * s.x / p) : s;
+/// Clamps Stokes radiance to nonnegative intensity and valid polarization magnitude.
+/// @param s Input matrix with one vec4 Stokes column per color channel.
+/// @return Physically valid Stokes radiance.
+mat3x4 stokes_make_physical(mat3x4 s) {
+	vec3 intensity = max(vec3(s[0].x, s[1].x, s[2].x), vec3(0.0));
+	vec3 q = vec3(s[0].y, s[1].y, s[2].y);
+	vec3 u = vec3(s[0].z, s[1].z, s[2].z);
+	vec3 v = vec3(s[0].w, s[1].w, s[2].w);
+	vec3 p = sqrt(q * q + u * u + v * v);
+	vec3 scale = min(vec3(1.0), intensity / max(p, vec3(1.0e-20)));
+	return mat3x4(vec4(intensity.x, q.x * scale.x, u.x * scale.x, v.x * scale.x), vec4(intensity.y, q.y * scale.y, u.y * scale.y, v.y * scale.y), vec4(intensity.z, q.z * scale.z, u.z * scale.z, v.z * scale.z));
 }
 
 /// Builds an orthonormal polarization basis perpendicular to a direction.
@@ -254,13 +245,19 @@ vec2 rotation(float c, float sn) { return vec2(c * c - sn * sn, 2.0 * c * sn); }
 /// @return Stokes vector expressed in the rotated basis.
 vec4 rotate(vec4 s, vec2 r) { return vec4(s.x, s.y * r.x + s.z * r.y, -s.y * r.y + s.z * r.x, s.w); }
 
-/// Re-expresses a Stokes vector using a new transverse reference axis.
-/// @param s Input Stokes vector ordered as I, Q, U, V.
+/// Rotates each Stokes column using the same polarization basis change.
+/// @param s Matrix with one vec4 Stokes column per color channel.
+/// @param r Cosine and sine of twice the basis rotation angle.
+/// @return Rotated Stokes matrix.
+mat3x4 rotate(mat3x4 s, vec2 r) { return mat3x4(rotate(s[0], r), rotate(s[1], r), rotate(s[2], r)); }
+
+/// Re-expresses Stokes radiance using a new transverse reference axis.
+/// @param s Matrix with one vec4 Stokes column per color channel.
 /// @param oldA First axis of the input basis.
 /// @param oldB Second axis of the input basis.
 /// @param newA First axis of the destination basis.
-/// @return Stokes vector expressed in the destination basis.
-vec4 vec4_reframe(vec4 s, vec3 oldA, vec3 oldB, vec3 newA) { return rotate(s, rotation(dot(newA, oldA), dot(newA, oldB))); }
+/// @return Stokes radiance expressed in the destination basis.
+mat3x4 rgb_stokes_reframe(mat3x4 s, vec3 oldA, vec3 oldB, vec3 newA) { return rotate(s, rotation(dot(newA, oldA), dot(newA, oldB))); }
 
 /// Evaluates the Rayleigh Mueller matrix at a scattering angle.
 /// @param cosTheta Cosine of the angle between incoming and outgoing directions.
@@ -300,13 +297,16 @@ void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 f
 	rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
 }
 
-/// Applies a Mueller matrix between rotated polarization frames.
+/// Applies a Mueller matrix to Stokes radiance between rotated polarization frames.
 /// @param m Scattering Mueller matrix.
-/// @param s Input Stokes vector.
+/// @param s Matrix with one vec4 Stokes column per color channel.
 /// @param rot Input and output double-angle rotations.
 /// @param flip Stokes-component signs for degenerate frames.
-/// @return Output Stokes vector.
-vec4 apply_mueller(mat4 m, vec4 s, vec4 rot, vec4 flip) { return rotate(m * rotate(s, rot.xy), rot.zw) * flip; }
+/// @return Output Stokes radiance.
+mat3x4 apply_mueller(mat4 m, mat3x4 s, vec4 rot, vec4 flip) {
+	mat3x4 result = rotate(m * rotate(s, rot.xy), rot.zw);
+	return mat3x4(result[0] * flip, result[1] * flip, result[2] * flip);
+}
 
 /// Geometry shared by Rayleigh scattering and polarization-frame changes.
 struct ScatterGeom {
@@ -327,14 +327,14 @@ ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
 	return g;
 }
 
-/// Applies wavelength-scaled Rayleigh scattering and Stokes-frame changes.
+/// Applies Rayleigh scattering and Stokes-frame changes.
 /// @param g Scattering geometry and polarization frame data.
-/// @param s Input Stokes radiance.
-/// @param density Local Rayleigh density.
-/// @return Scattered Stokes radiance at the current wavelength.
-vec4 scatter_wavelength(ScatterGeom g, vec4 s, float density) {
-	mat4 m = gSpectralBand.x * density * g.rayleigh;
-	return apply_mueller(m / (4.0 * PI), s, g.rot, g.flip);
+/// @param intensity Input intensity for each color channel.
+/// @return Scattered Stokes radiance.
+mat3x4 scatter_color(ScatterGeom g, vec3 intensity) {
+	mat3x4 source = mat3x4(vec4(intensity.x, 0.0, 0.0, 0.0), vec4(intensity.y, 0.0, 0.0, 0.0), vec4(intensity.z, 0.0, 0.0, 0.0));
+	mat3x4 scattered = apply_mueller(g.rayleigh / (4.0 * PI), source, g.rot, g.flip);
+	return mat3x4(scattered[0] * gRayleighCoefficient.x, scattered[1] * gRayleighCoefficient.y, scattered[2] * gRayleighCoefficient.z);
 }
 
 /// Sampling state for one primary view-ray segment.
@@ -347,8 +347,7 @@ struct ViewPath {
 	float distanceRate; ///< Signed exponential rate for the Rayleigh distance proposal.
 	float span; ///< Length of the ray segment, in metres.
 	float start; ///< Distance to the view-ray segment start, in metres.
-	float stepWeight; ///< Segment-integration estimator weight for the current sample.
-	int stepIndex; ///< Integration sample index within the segment.
+	float sampleWeight; ///< Segment-integration estimator weight for the current sample.
 };
 
 uint gRngIndex; ///< Current low-discrepancy sample index.
@@ -387,7 +386,7 @@ float distance_cdf(float t, float rate) {
 /// @return Sampled position in [0, 1] along the ray segment.
 float sample_distance(float u, float rate, out float pdf) {
 	float lo = 0.0, hi = 1.0;
-	for (int iteration = 0; iteration < 24; ++iteration) {
+	for (int iteration = 0; iteration < 24; iteration++) {
 		float t = 0.5 * (lo + hi);
 		float cdf = 0.1 * t + 0.9 * distance_cdf(t, rate);
 		if (cdf < u) lo = t;
@@ -402,13 +401,11 @@ float sample_distance(float u, float rate, out float pdf) {
 /// Draws one weighted distance sample along the view-ray segment.
 /// @param path Sampling state for the view ray.
 /// @param origin Ray origin in world space.
-/// @param steps Number of integration samples assigned to the segment.
-void begin_step(inout ViewPath path, vec3 origin, int steps) {
-	uint scramble = Hash(gRngScramble ^ uint(path.stepIndex) * 0x9e3779b9u);
-	float u = (float(path.stepIndex) + SampleFloat(gRngIndex, TRANSPORT_DIMENSION, scramble)) / float(steps);
+void sample_view_path(inout ViewPath path, vec3 origin) {
+	float u = SampleFloat(gRngIndex, TRANSPORT_DIMENSION, gRngScramble);
 	float pdf;
 	float t = sample_distance(u, path.distanceRate, pdf);
-	path.stepWeight = path.span / (float(steps) * pdf);
+	path.sampleWeight = path.span / pdf;
 	path.pos = origin + path.dir * (path.start + t * path.span);
 	path.air = air_density(path.pos);
 	path.camDepth = max(path.depth0 - sun_air_depth(path.pos, path.dir), 0.0);
@@ -418,46 +415,44 @@ void begin_step(inout ViewPath path, vec3 origin, int steps) {
 /// @param origin Ray origin in world space.
 /// @param viewDir Unit direction from the camera into the atmosphere.
 /// @param L Unit direction toward the Sun.
-/// @param viewSteps Integration samples on the view segment.
 /// @return Stokes radiance scattered toward the camera.
-vec4 scatter(vec3 origin, vec3 viewDir, vec3 L, int viewSteps) {
+mat3x4 scatter(vec3 origin, vec3 viewDir, vec3 L) {
 	ViewPath path;
 	path.dir = viewDir;
 	float tEnd;
-	if (!view_segment(origin, path.dir, path.start, tEnd)) return vec4(0.0);
+	if (!view_segment(origin, path.dir, path.start, tEnd)) return mat3x4(vec4(0.0), vec4(0.0), vec4(0.0));
 
 	vec3 first = origin + path.dir * path.start;
 	path.span = max(tEnd - path.start, 1.0e-3);
 	path.depth0 = sun_air_depth(first, path.dir);
 	float total = max(path.depth0 - sun_air_depth(first + path.dir * path.span, path.dir), 0.0);
-	float tau = gSpectralBand.x * total;
+	vec3 tau = gRayleighCoefficient * total;
+	float proposalTau = max(tau.x, max(tau.y, tau.z));
 	float altitudeChange = length(first + path.dir * path.span) - length(first);
-	path.distanceRate = clamp(clamp(tau, 0.0, 8.0) + altitudeChange / sceneData.skyParams.z, -32.0, 32.0);
-	if (dot(first, path.dir) < 0.0 && dot(first, path.dir) + path.span > 0.0) path.distanceRate = clamp(tau, 0.0, 8.0);
+	path.distanceRate = clamp(clamp(proposalTau, 0.0, 8.0) + altitudeChange / sceneData.skyParams.z, -32.0, 32.0);
+	if (dot(first, path.dir) < 0.0 && dot(first, path.dir) + path.span > 0.0) path.distanceRate = clamp(proposalTau, 0.0, 8.0);
 
-	float result = 0.0;
-	for (path.stepIndex = 0; path.stepIndex < viewSteps; ++path.stepIndex) {
-		begin_step(path, origin, viewSteps);
-		float midDepth = path.camDepth;
-		if (ray_sphere(path.pos, L, sceneData.skyParams.x).x <= 0.0) {
-			float depth = sun_air_depth(path.pos, L);
-			result += path.air * (wavelength_transmittance(midDepth) * path.stepWeight * gSpectralBand.y * sceneData.sunDisk.x * wavelength_transmittance(depth));
-		}
+	vec3 result = vec3(0.0);
+	sample_view_path(path, origin);
+	float midDepth = path.camDepth;
+	if (ray_sphere(path.pos, L, sceneData.skyParams.x).x <= 0.0) {
+		float depth = sun_air_depth(path.pos, L);
+		result = path.air * (rayleigh_transmittance(midDepth) * path.sampleWeight * sceneData.sunParams.y * sceneData.sunParams.x * rayleigh_transmittance(depth));
 	}
 
 	ScatterGeom sunGeom = scatter_geometry(-L, -path.dir);
-	return stokes_make_physical(scatter_wavelength(sunGeom, vec4(1.0, 0.0, 0.0, 0.0), result));
+	return stokes_make_physical(scatter_color(sunGeom, result));
 }
 
-/// Evaluates spectral Stokes radiance for a view direction, including the visible solar disk.
+/// Evaluates Stokes radiance, including the visible solar disk.
 /// @param viewDir Unit direction from the camera into the atmosphere.
 /// @param L Unit direction toward the Sun.
 /// @return Stokes radiance in the shader's current polarization frame.
-vec4 render_sky(vec3 viewDir, vec3 L) {
+mat3x4 render_sky(vec3 viewDir, vec3 L) {
 	vec3 origin = vec3(0.0, sceneData.skyParams.x + 1.0, 0.0);
 	float groundT = ray_sphere(origin, viewDir, sceneData.skyParams.x).x;
 	gRngScramble = Hash(gRngScramble ^ 0x68bc21ebu);
-	vec4 sky = scatter(origin, viewDir, L, int(SpecializedViewSteps));
+	mat3x4 sky = scatter(origin, viewDir, L);
 
 	vec3 vertical, horizontal;
 	beam_basis(L, horizontal, vertical);
@@ -466,24 +461,14 @@ vec4 render_sky(vec3 viewDir, vec3 L) {
 	float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
 	float depth = sun_air_depth(origin, viewDir);
 	bool sunVisible = disk > 0.0 && groundT <= 0.0;
-	float intensity = sunVisible ? disk * gSpectralBand.y * wavelength_transmittance(depth) : 0.0;
-	sky.x += intensity;
+	vec3 intensity = sunVisible ? disk * sceneData.sunParams.y * rayleigh_transmittance(depth) : vec3(0.0);
+	sky[0].x += intensity.x;
+	sky[1].x += intensity.y;
+	sky[2].x += intensity.z;
 	return stokes_make_physical(sky);
 }
 
-/// Interpolates the shader's spectral parameters at one wavelength.
-/// @param wavelengthNm Sample wavelength in nanometres.
-void set_wavelength(float wavelengthNm) {
-	gWavelengthNm = wavelengthNm;
-	float bandPosition = clamp((wavelengthNm - LAMBDA_MIN_NM) / LAMBDA_STEP_NM, 0.0, float(SPECTRAL_BANDS - 1));
-	gBandLower = int(floor(bandPosition));
-	gBandUpper = min(gBandLower + 1, SPECTRAL_BANDS - 1);
-	gBandFraction = bandPosition - float(gBandLower);
-	gSpectralBand = mix(sceneData.spectralBands[gBandLower], sceneData.spectralBands[gBandUpper], gBandFraction);
-	gCieXyz = mix(sceneData.cieXyz[gBandLower], sceneData.cieXyz[gBandUpper], gBandFraction);
-}
-
-/// Traces one pixel sample, updates its XYZ running average, and writes display RGB.
+/// Traces one pixel sample, updates its running average, and writes the display color.
 void main() {
 	uvec2 pixel = gl_GlobalInvocationID.xy;
 	if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
@@ -496,26 +481,26 @@ void main() {
 
 	uint sobolIndex = frameSampleBase;
 	vec2 jitter = vec2(SampleFloat(sobolIndex, 0u, pixelSeed), SampleFloat(sobolIndex, 1u, pixelSeed));
-	float wavelengthNm = LAMBDA_MIN_NM + LAMBDA_RANGE_NM * SampleFloat(sobolIndex, WAVELENGTH_DIMENSION, Hash(pixelSeed ^ 0x7f4a7c15u));
-	set_wavelength(wavelengthNm);
 	vec2 uv = (vec2(pixel) + jitter) / vec2(pc.imageSize);
 	vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 	vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
 	vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
 	beam_basis(-viewDir, na, nb);
+	gRayleighCoefficient = sceneData.rayleigh.xyz;
 	gRngIndex = sobolIndex;
 	gRngScramble = rngScramble;
-	vec4 sky = render_sky(viewDir, sun);
-	float radiance = polarized ? 0.5 * dot(analyzer, vec4_reframe(sky, na, nb, frameX)) : sky.x;
-	vec3 xyz = max(radiance, 0.0) * gCieXyz.xyz * (LAMBDA_RANGE_NM / LAMBDA_STEP_NM);
+	mat3x4 sky = render_sky(viewDir, sun);
+	vec3 radiance = vec3(sky[0].x, sky[1].x, sky[2].x);
+	if (polarized) {
+		mat3x4 framedSky = rgb_stokes_reframe(sky, na, nb, frameX);
+		radiance = 0.5 * (transpose(framedSky) * analyzer);
+	}
 
+	vec3 rgb = max(radiance, vec3(0.0));
 	uint index = pixel.y * pc.imageSize.x + pixel.x;
 	vec4 previous = pc.frame.z > 0.5 ? vec4(0.0) : accumulation.pixels[index];
-	xyz = previous.xyz + (xyz - previous.xyz) / (previous.w + 1.0);
-	accumulation.pixels[index] = vec4(xyz, previous.w + 1.0);
-	vec3 rgb = mat3(3.2406, -0.9689, 0.0557, -1.5372, 1.8758, -0.2040, -0.4986, 0.0415, 1.0570) * xyz;
-	float lowest = min(rgb.r, min(rgb.g, rgb.b));
-	rgb = lowest < 0.0 && xyz.y > 0.0 ? xyz.y + (rgb - xyz.y) * (xyz.y / (xyz.y - lowest)) : rgb;
+	rgb = previous.xyz + (rgb - previous.xyz) / (previous.w + 1.0);
+	accumulation.pixels[index] = vec4(rgb, previous.w + 1.0);
 	rgb = max(rgb, vec3(0.0)) * pc.frame.y;
 
 	const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);

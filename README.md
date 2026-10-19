@@ -1,24 +1,24 @@
 # Vulkanic
 
-Vulkanic is a real-time Vulkan path tracer for exploring a spectrally modeled sky.
+Vulkanic is a real-time Vulkan renderer for exploring a polarized atmospheric sky.
 
 ## Situation
 
-Atmospheric light changes with wavelength. Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarization.
+Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarization in three color channels.
 
 ## Task
 
-Vulkanic brings these effects together in an interactive renderer. It samples one random wavelength from 380 to 780 nm for each path sample, interpolating lookup tables built at 17 reference wavelengths. It traces atmospheric scattering on the GPU.
+Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficients for the red, green, and blue channels. The coefficients approximate inverse fourth-power scattering at representative wavelengths of 650, 550, and 450 nm, without sampling or integrating a spectrum. Each channel uses one stochastic integration sample per primary view-ray segment. The solar source has equal intensity across all three channels.
 
 ## Action
 
-The C++ application computes spectral lookup tables, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk at the sampled wavelength. It accumulates results in XYZ, converts them to display RGB, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
+The C++ application computes a Rayleigh density table, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, accumulates the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
 Startup preprocessing integrates Rayleigh density columns. This table contains an optical property, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
 
 ## Result
 
-The result is an interactive sky-rendering demo that exposes how spectral scattering and polarization shape the image. Build and run it using the steps below.
+The result is an interactive sky-rendering demo that exposes how atmospheric scattering and polarization shape the image. Build and run it using the steps below.
 
 ![Vulkanic renderer output showing the solar disk and atmospheric scattering](assets/renderer-result.png)
 
@@ -98,14 +98,15 @@ Measured on October 19, 2026, using the Release build and a stationary view.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,208 | 0.206 ms | 0.205 ms | 0.214 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,220 | 0.131 ms | 0.162 ms | 0.552 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,208 measured workloads span 8.37 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,220 measured workloads span 8.45 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 
 ```powershell
-$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"; & $nsys profile --duration=10 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --output=build/vulkanic-benchmark ./build/Vulkanic.exe
+$nsys = "$env:ProgramW6432\NVIDIA Corporation\Nsight Systems 2026.3.2\target-windows-x64\nsys.exe"
+& $nsys profile --duration=10 --trace=vulkan --vulkan-gpu-workload=individual --sample=none --cpuctxsw=none --force-overwrite=true --output=build/vulkanic-benchmark ./build/Vulkanic.exe
 ```
 
 This path matches Nsight Systems 2026.3.2 on the benchmark machine. Adjust the version or install path if needed. The capture lasts 10 seconds, then Nsight Systems finalizes `build/vulkanic-benchmark.nsys-rep` and terminates the launched app. Keep the camera and scene fixed during that interval. The reported values come from the GPU timestamps in Nsight Systems Vulkan Workload records (`VULKAN_WORKLOAD`). The Vulkan API summary reports CPU-side API time instead.
@@ -116,11 +117,11 @@ Export the capture to a SQLite database for SQL queries:
 & $nsys export --type sqlite --output=build/vulkanic-benchmark.sqlite build/vulkanic-benchmark.nsys-rep
 ```
 
-The `.sqlite` file is a database, not a text SQL script. Query its `VULKAN_WORKLOAD` table and calculate each duration as `(end - start) / 1000000.0` milliseconds. Add `--force-overwrite=true` to the export command when replacing an existing database.
+The `.sqlite` file is a database and not a text SQL script. Query its `VULKAN_WORKLOAD` table and calculate each duration as `(end - start) / 1000000.0` milliseconds. The `--force-overwrite=true` option lets either command replace the previous capture or database.
 
 ## Project layout
 
-- `src/` - Vulkan renderer and CPU-side Rayleigh density table
+- `src/` - Vulkan renderer, settings, and CPU-side Rayleigh density table
 - `shaders/Main.comp` - Vulkan compute shader
 - `build.ps1` - clean configure and build helper
 - `CMakeLists.txt` - dependencies, shader compilation, and executable target

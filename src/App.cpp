@@ -1,5 +1,5 @@
 /// @file App.cpp
-/// @brief Creates the Vulkan window and runs the interactive spectral path tracer.
+/// @brief Creates the Vulkan window and runs the interactive sky renderer.
 ///
 /// This file connects runtime settings and precomputed density tables to the
 /// compute shader, manages per-frame Vulkan resources, and translates camera
@@ -119,16 +119,14 @@ constexpr uint32_t kPathTracerSpirv[] = {
 struct alignas(16) SceneData {
 	glm::vec4 skyParams; ///< Earth radius, atmosphere radius, Rayleigh scale height, and depolarization.
 	glm::vec4 skySunDirectionRadius; ///< Sun direction in xyz and angular radius in radians.
-	glm::vec4 spectralBands[kSpectralBandCount]; ///< Per-band Rayleigh scale, solar scale, wavelength in nm, and a reserved value.
-	glm::vec4 cieXyz[kSpectralBandCount]; ///< Normalized CIE XYZ matching values for each spectral band.
-	glm::vec4 sunDisk; ///< Sun solid angle followed by three reserved values.
+	glm::vec4 rayleigh; ///< Per-channel Rayleigh scattering coefficients.
+	glm::vec4 sunParams; ///< Solar disk solid angle, equal-channel radiance, and padding.
 };
 
 static_assert(offsetof(SceneData, skySunDirectionRadius) == 16);
-static_assert(offsetof(SceneData, spectralBands) == 32);
-static_assert(offsetof(SceneData, cieXyz) == 304);
-static_assert(offsetof(SceneData, sunDisk) == 576);
-static_assert(sizeof(SceneData) == 592);
+static_assert(offsetof(SceneData, sunParams) == 48);
+static_assert(offsetof(SceneData, rayleigh) == 32);
+static_assert(sizeof(SceneData) == 64);
 
 /// Descriptor types in the binding order expected by Main.comp.
 constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
@@ -194,40 +192,16 @@ private:
 		app->m_camera.OnKeyPress(key);
 	}
 
-	/// Packs configured atmospheric and spectral values for the shader.
+	/// Packs the configured values for the shader.
 	/// @return Uniform-buffer payload matching the shader's SceneData layout.
 	[[nodiscard]] SceneData BuildSceneData() const {
 		const SkyConfig& s = m_config.sky;
 		SceneData sceneData {
 			.skyParams = { s.earthRadius, s.atmosphereRadius, s.scaleHeightRayleigh, s.rayleighDepolarization },
 			.skySunDirectionRadius = { s.sunDirection[0], s.sunDirection[1], s.sunDirection[2], s.sunRadius },
+			.rayleigh = { s.betaRayleighGreen * kRayleighScale[0], s.betaRayleighGreen * kRayleighScale[1], s.betaRayleighGreen * kRayleighScale[2], 0.0f },
+			.sunParams = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), s.sunRadiance, 0.0f, 0.0f },
 		};
-
-		float ySum = 0.0f;
-		const double sun550 = ComputeSpectralAtWavelength(550.0).sunIrradianceScale;
-		for (int band = 0; band < kSpectralBandCount; ++band) {
-			const double wavelength = kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band);
-			const SpectralBand spectral = ComputeSpectralAtWavelength(wavelength);
-			sceneData.spectralBands[band] = {
-				static_cast<float>(s.betaRayleigh550 * spectral.betaRayleighScale),
-				static_cast<float>(s.sunRadiance550 * spectral.sunIrradianceScale / sun550),
-				static_cast<float>(kSpectralLambdaMinNm + (kSpectralLambdaStepNm * band)),
-				0.0f
-			};
-
-			sceneData.cieXyz[band] = glm::vec4 {
-				static_cast<float>(spectral.cie.x),
-				static_cast<float>(spectral.cie.y),
-				static_cast<float>(spectral.cie.z),
-				0.0f
-			};
-			ySum += sceneData.cieXyz[band][1];
-		}
-
-		for (auto& xyz : sceneData.cieXyz)
-			for (int i = 0; i < 3; ++i) xyz[i] /= ySum;
-
-		sceneData.sunDisk = { 2.0f * kPi * (1.0f - std::cos(s.sunRadius)), 0.0f, 0.0f, 0.0f };
 
 		return sceneData;
 	}
@@ -365,7 +339,7 @@ private:
 		m_swapchainImageViews.clear();
 		m_renderFinished.clear();
 
-		for (size_t i = 0; i < images.size(); ++i) {
+		for (size_t i = 0; i < images.size(); i++) {
 			m_swapchainImageViews.emplace_back(m_device, imageViews[i]);
 			m_renderFinished.emplace_back(m_device.createSemaphore({ }));
 		}
@@ -382,18 +356,15 @@ private:
 		m_descriptorSetLayout = vk::raii::DescriptorSetLayout(m_device, createInfo);
 	}
 
-	/// Creates the compute pipeline and supplies specialization and push-constant layouts.
+	/// Creates the compute pipeline with its descriptor and push-constant layouts.
 	void CreatePipeline() {
 		const vk::raii::ShaderModule computeModule { m_device, vk::ShaderModuleCreateInfo { { }, sizeof(kPathTracerSpirv), std::data(kPathTracerSpirv) } };
-		const std::array<uint32_t, 1> settings = { m_config.sky.viewSteps };
-		const std::array<vk::SpecializationMapEntry, 1> entries = { { { 0, 0, 4 } } };
-		const vk::SpecializationInfo specialization { static_cast<uint32_t>(entries.size()), entries.data(), sizeof(settings), settings.data() };
 		const vk::PushConstantRange pushRange { vk::ShaderStageFlagBits::eCompute, 0, sizeof(PushConstants) };
 		vk::PipelineLayoutCreateInfo layoutInfo { };
 		layoutInfo.setSetLayouts(*m_descriptorSetLayout);
 		layoutInfo.setPushConstantRanges(pushRange);
 		m_pipelineLayout = vk::raii::PipelineLayout(m_device, layoutInfo);
-		const vk::PipelineShaderStageCreateInfo stage { { }, vk::ShaderStageFlagBits::eCompute, *computeModule, "main", &specialization };
+		const vk::PipelineShaderStageCreateInfo stage { { }, vk::ShaderStageFlagBits::eCompute, *computeModule, "main", nullptr };
 		m_computePipeline = vk::raii::Pipeline(m_device, nullptr, vk::ComputePipelineCreateInfo { { }, stage, *m_pipelineLayout });
 	}
 
@@ -404,7 +375,7 @@ private:
 		const vk::FenceCreateInfo signaled { vk::FenceCreateFlagBits::eSignaled };
 		m_frames.clear();
 
-		for (uint32_t i = 0; i < count; ++i) m_frames.push_back({ .commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({ }), .inFlight = m_device.createFence(signaled) });
+		for (uint32_t i = 0; i < count; i++) m_frames.push_back({ .commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({ }), .inFlight = m_device.createFence(signaled) });
 		const vk::DeviceSize pixels = static_cast<vk::DeviceSize>(m_swapchainExtent.width) * m_swapchainExtent.height;
 		m_accumulationBuffer = CreateBuffer(pixels * 4 * sizeof(float), vk::BufferUsageFlagBits::eStorageBuffer, { });
 	}
@@ -462,7 +433,7 @@ private:
 
 		std::array<vk::WriteDescriptorSet, kDescriptorTypes.size()> writes { };
 		writes[0] = vk::WriteDescriptorSet { { }, 0, 0, kDescriptorTypes[0], imageInfo };
-		for (uint32_t i = 1; i < writes.size(); ++i) writes[i] = vk::WriteDescriptorSet { { }, i, 0, kDescriptorTypes[i], { }, bufferInfos[i - 1] };
+		for (uint32_t i = 1; i < writes.size(); i++) writes[i] = vk::WriteDescriptorSet { { }, i, 0, kDescriptorTypes[i], { }, bufferInfos[i - 1] };
 
 		commandBuffer.pushDescriptorSet(vk::PipelineBindPoint::eCompute, *m_pipelineLayout, 0, writes);
 		commandBuffer.pushConstants<PushConstants>(*m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, BuildPushConstants());
@@ -501,7 +472,7 @@ private:
 		presentInfo.setImageIndices(imageIndex);
 		std::ignore = m_presentQueue.presentKHR(presentInfo);
 
-		++m_frameIndex;
+		m_frameIndex++;
 		m_currentFrame = (m_currentFrame + 1) % static_cast<uint32_t>(m_frames.size());
 	}
 
@@ -520,7 +491,7 @@ private:
 			m_camera.Update(deltaSeconds, m_window, m_config);
 			RenderFrame();
 
-			++frames;
+			frames++;
 			const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - titleUpdate).count();
 			if (elapsed >= 1.0) {
 				m_displayFps = static_cast<float>(frames / elapsed);
@@ -557,7 +528,7 @@ private:
 	vma::raii::Allocator m_allocator { nullptr }; ///< VMA allocator used for renderer buffers.
 	vma::raii::Buffer m_sceneDataBuffer { nullptr }; ///< Uniform data shared with the compute shader.
 	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed Rayleigh density-column table.
-	vma::raii::Buffer m_accumulationBuffer { nullptr }; ///< Per-pixel XYZ accumulation and sample counts.
+	vma::raii::Buffer m_accumulationBuffer { nullptr }; ///< Per-pixel color accumulation and sample counts.
 
 	vk::raii::SwapchainKHR m_swapchain { nullptr }; ///< RAII handle for the presentation swapchain.
 	vk::Extent2D m_swapchainExtent { }; ///< Actual swapchain image dimensions, in pixels.
