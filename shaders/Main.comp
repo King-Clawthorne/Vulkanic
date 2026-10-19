@@ -393,6 +393,7 @@ float sample_distance(float u, float rate, out float pdf) {
 		if (cdf < u) lo = t;
 		else hi = t;
 	}
+
 	float t = 0.5 * (lo + hi);
 	pdf = 0.1 + 0.9 * distance_pdf(t, rate);
 	return t;
