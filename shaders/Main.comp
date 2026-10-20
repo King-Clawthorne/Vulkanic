@@ -287,7 +287,6 @@ mat3x4 render_sky(vec3 viewDir, vec3 L) {
 void main() {
 	uvec2 pixel = gl_GlobalInvocationID.xy;
 	if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
-	bool polarized = pc.polarizer.x > 0.5;
 	float linAmp = cos(2.0 * pc.polarizer.z);
 	vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
 	vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
@@ -300,7 +299,7 @@ void main() {
 	gRayleighCoefficient = sceneData.rayleigh.xyz;
 	mat3x4 sky = render_sky(viewDir, sun);
 	vec3 radiance = vec3(sky[0].x, sky[1].x, sky[2].x);
-	if (polarized) {
+	if (pc.polarizer.x > 0.5) {
 		mat3x4 framedSky = rgb_stokes_reframe(sky, na, nb, frameX);
 		radiance = 0.5 * (transpose(framedSky) * analyzer);
 	}

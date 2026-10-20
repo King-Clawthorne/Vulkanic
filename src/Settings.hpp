@@ -110,13 +110,9 @@ inline std::vector<float> ComputeTransmittanceTable(const SkyConfig& sky) {
             std::vector<double> cuts { 0.0, end };
 
             if (-b > 0.0 && -b < end) cuts.push_back(-b);
-            for (double height : { 0.0 }) {
-                const double shell = re + height;
-                const double discriminant = b * b + (shell - r) * (shell + r);
-                if (discriminant < 0.0) continue;
-                for (double t : { -b - std::sqrt(discriminant), -b + std::sqrt(discriminant) })
-                    if (t > 0.0 && t < end) cuts.push_back(t);
-            }
+			const double discriminant = b * b + (re - r) * (re + r);
+			for (double t : { -b - std::sqrt(discriminant), -b + std::sqrt(discriminant) })
+				if (t > 0.0 && t < end) cuts.push_back(t);
 
             std::ranges::sort(cuts);
             double column = 0.0;
