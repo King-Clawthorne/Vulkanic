@@ -8,11 +8,11 @@ Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarizatio
 
 ## Task
 
-Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficients for the red, green, and blue channels. The coefficients approximate inverse fourth-power scattering at representative wavelengths of 650, 550, and 450 nm, without sampling or integrating a spectrum. Each channel uses one stochastic integration sample per primary view-ray segment. The solar source has equal intensity across all three channels.
+Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficients for the red, green, and blue channels. The coefficients approximate inverse fourth-power scattering at representative wavelengths of 650, 550, and 450 nm. Each channel uses deterministic composite Gauss-Legendre integration with 16 evaluations per primary view ray. A squared distance mapping concentrates evaluations near the ray origin. The solar source has equal intensity across all 3 color channels.
 
 ## Action
 
-The C++ application computes a Rayleigh density table, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, accumulates the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
+The C++ application computes a Rayleigh density table, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, tone-maps the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
 Startup preprocessing integrates Rayleigh density columns. This table contains an optical property, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
 
@@ -94,13 +94,13 @@ The window title reports FPS and frame time. Controls:
 
 ## GPU performance profiling
 
-Measured on October 19, 2026, using the Release build and a stationary view.
+Measured on October 21, 2026, using the Release build with deterministic composite Gauss-Legendre integration and a stationary view.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,220 | 0.131 ms | 0.162 ms | 0.552 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,201 | 0.214 ms | 0.216 ms | 0.219 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,220 measured workloads span 8.45 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,201 measured workloads span 8.32 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 

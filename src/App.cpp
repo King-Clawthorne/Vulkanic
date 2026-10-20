@@ -37,7 +37,7 @@ struct CameraController {
 		bool polarizerEnabled; ///< Whether the polarizer is applied.
 		float polarizerAngle; ///< Linear polarizer angle, in radians.
 		float polarizerEllipticity; ///< Ellipticity angle, in radians, zero for linear polarization.
-		/// Compares the state that determines whether accumulated samples remain valid.
+		/// Compares camera and polarizer states.
 		friend bool operator==(const View&, const View&) = default;
 	};
 
@@ -101,7 +101,7 @@ struct CameraController {
 	}
 
 	/// Returns a snapshot of the state that affects rendered pixels.
-	/// @return Current camera angles and polarizer state used to detect accumulation resets.
+	/// @return Current camera angles and polarizer state.
 	[[nodiscard]] View GetView() const { return { .angles = angles, .polarizerEnabled = polarizerEnabled, .polarizerAngle = polarizerAngle, .polarizerEllipticity = elliptical ? ellipticity : 0.0f }; }
 };
 
@@ -129,15 +129,14 @@ static_assert(offsetof(SceneData, rayleigh) == 32);
 static_assert(sizeof(SceneData) == 64);
 
 /// Descriptor types in the binding order expected by Main.comp.
-constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer, vk::DescriptorType::eStorageBuffer };
+constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer };
 
-/// Per-dispatch camera, frame, polarizer, and image parameters.
+/// Per-dispatch camera, polarizer, exposure, and image parameters.
 struct PushConstants {
 	glm::vec4 forward; ///< Camera forward direction.
 	glm::vec4 right; ///< Horizontal camera basis scaled by aspect ratio and field of view.
 	glm::vec4 up; ///< Vertical camera basis scaled by field of view.
-	glm::vec4 frame; ///< Frame index, exposure, accumulation-reset flag, and reserved value.
-	glm::vec4 polarizer; ///< Enabled flag, linear angle, ellipticity, and reserved value.
+	glm::vec4 polarizer; ///< Enabled flag, linear angle, ellipticity, and exposure.
 	glm::uvec2 imageSize; ///< Swapchain width and height in pixels.
 };
 
@@ -368,7 +367,7 @@ private:
 		m_computePipeline = vk::raii::Pipeline(m_device, nullptr, vk::ComputePipelineCreateInfo { { }, stage, *m_pipelineLayout });
 	}
 
-	/// Creates per-frame command buffers and synchronization plus the accumulation buffer.
+	/// Creates per-frame command buffers and synchronization.
 	void CreateFrameResources() {
 		const uint32_t count = kFramesInFlight;
 		vk::raii::CommandBuffers commandBuffers(m_device, { *m_commandPool, vk::CommandBufferLevel::ePrimary, count });
@@ -376,17 +375,12 @@ private:
 		m_frames.clear();
 
 		for (uint32_t i = 0; i < count; i++) m_frames.push_back({ .commandBuffer = std::move(commandBuffers[i]), .imageAvailable = m_device.createSemaphore({ }), .inFlight = m_device.createFence(signaled) });
-		const vk::DeviceSize pixels = static_cast<vk::DeviceSize>(m_swapchainExtent.width) * m_swapchainExtent.height;
-		m_accumulationBuffer = CreateBuffer(pixels * 4 * sizeof(float), vk::BufferUsageFlagBits::eStorageBuffer, { });
 	}
 
-	/// Builds shader parameters from the current view and resets accumulation after view changes.
+	/// Builds shader parameters from the current view.
 	/// @return Push-constant payload for the next compute dispatch.
 	PushConstants BuildPushConstants() {
 		const CameraController::View view = m_camera.GetView();
-		const bool reset = m_lastView != view;
-		m_lastView = view;
-		if (reset) m_frameIndex = 0;
 
 		const float tanHalfFov = std::tan(m_config.camera.fovYDegrees * kPi / 360.0f);
 		const float aspect = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
@@ -400,8 +394,7 @@ private:
 			.forward = { fx, fy, fz, 0.0f },
 			.right = { rx * aspect * tanHalfFov, 0.0f, rz * aspect * tanHalfFov, 0.0 },
 			.up = { fy * rz * tanHalfFov, ((fz * rx) - (fx * rz)) * tanHalfFov, -fy * rx * tanHalfFov, 0.0 },
-			.frame = { static_cast<float>(m_frameIndex), m_config.camera.exposure, reset ? 1.0f : 0.0f, 0.0 },
-			.polarizer = { view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, 0.0 },
+			.polarizer = { view.polarizerEnabled ? 1.0f : 0.0f, view.polarizerAngle, view.polarizerEllipticity, m_config.camera.exposure },
 			.imageSize = { m_swapchainExtent.width, m_swapchainExtent.height },
 		};
 
@@ -422,14 +415,12 @@ private:
 		};
 
 		commandBuffer.begin({ });
-		const vk::MemoryBarrier2 accumulation { Stage::eComputeShader, Access::eShaderStorageWrite, Stage::eComputeShader, Access::eShaderStorageRead | Access::eShaderStorageWrite };
-		commandBuffer.pipelineBarrier2(vk::DependencyInfo { }.setMemoryBarriers(accumulation));
 		imageBarrier(Stage::eNone, Access::eNone, Stage::eComputeShader, Access::eShaderStorageWrite, vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
 
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
 		const vk::DescriptorImageInfo imageInfo { { }, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral };
 		const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo { *b, 0, vk::WholeSize }; };
-		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_transmittanceBuffer), bufferInfo(m_accumulationBuffer) };
+		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_transmittanceBuffer) };
 
 		std::array<vk::WriteDescriptorSet, kDescriptorTypes.size()> writes { };
 		writes[0] = vk::WriteDescriptorSet { { }, 0, 0, kDescriptorTypes[0], imageInfo };
@@ -472,7 +463,6 @@ private:
 		presentInfo.setImageIndices(imageIndex);
 		std::ignore = m_presentQueue.presentKHR(presentInfo);
 
-		m_frameIndex++;
 		m_currentFrame = (m_currentFrame + 1) % static_cast<uint32_t>(m_frames.size());
 	}
 
@@ -528,7 +518,6 @@ private:
 	vma::raii::Allocator m_allocator { nullptr }; ///< VMA allocator used for renderer buffers.
 	vma::raii::Buffer m_sceneDataBuffer { nullptr }; ///< Uniform data shared with the compute shader.
 	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed Rayleigh density-column table.
-	vma::raii::Buffer m_accumulationBuffer { nullptr }; ///< Per-pixel color accumulation and sample counts.
 
 	vk::raii::SwapchainKHR m_swapchain { nullptr }; ///< RAII handle for the presentation swapchain.
 	vk::Extent2D m_swapchainExtent { }; ///< Actual swapchain image dimensions, in pixels.
@@ -543,11 +532,9 @@ private:
 
 	std::vector<FrameResources> m_frames; ///< Command and synchronization resources for frames in flight.
 	uint32_t m_currentFrame = 0; ///< Index of the frame resource used by the next submission.
-	uint64_t m_frameIndex = 0; ///< Accumulation sample index sent to the shader.
 	float m_displayFps = 0.0f; ///< Most recently measured frame rate shown in the window title.
 	RuntimeConfig m_config { }; ///< Renderer configuration used to build tables and dispatch parameters.
 	CameraController m_camera; ///< Interactive camera and polarizer state.
-	std::optional<CameraController::View> m_lastView; ///< Previous render-affecting view used to reset accumulation.
 };
 
 /// Application entry point. Reports setup and runtime exceptions to stderr.

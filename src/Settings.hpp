@@ -46,7 +46,7 @@ struct CameraConfig {
     glm::vec3 initialLookAt{0.35f, 2.01f, -9.75f}; ///< Initial world-space point toward which the camera looks.
     float fovYDegrees = 40.0f; ///< Vertical camera field of view, in degrees.
     float maxPitchDegrees = 89.0f; ///< Maximum absolute camera pitch, in degrees.
-    float exposure = 10.0f; ///< Display exposure multiplier applied to accumulated radiance.
+    float exposure = 10.0f; ///< Display exposure multiplier applied to integrated radiance.
 };
 
 /// Mouse-look sensitivity in radians per cursor pixel and polarizer rotation rate in radians per second.
