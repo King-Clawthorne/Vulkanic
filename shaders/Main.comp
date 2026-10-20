@@ -13,8 +13,6 @@ layout(set = 0, binding = 1) uniform SceneData {
 }
 sceneData; ///< Scene uniforms shared by the host and compute shader.
 
-layout(std430, set = 0, binding = 2) readonly buffer TransmittanceBuffer { float depth[]; }
-transmittanceLut; ///< Preintegrated Rayleigh density columns.
 layout(push_constant) uniform PushConstants {
 	vec4 forward, right, up, polarizer;
 	uvec2 imageSize;
@@ -22,8 +20,15 @@ layout(push_constant) uniform PushConstants {
 pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
 const float PI = 3.14159265358979323846; ///< Pi in radians.
-const int LUT_ALT = 64; ///< Number of altitude samples in the transmittance table.
-const int LUT_MU = 256; ///< Number of direction cosine samples in each transmittance row.
+
+/// Eight-point Gauss-Legendre nodes on [-1, 1].
+const float QUADRATURE_NODES[8] = float[8](
+	-0.9602898565, -0.7966664774, -0.5255324099, -0.1834346425,
+	0.1834346425, 0.5255324099, 0.7966664774, 0.9602898565);
+/// Integration weights paired with QUADRATURE_NODES on [-1, 1].
+const float QUADRATURE_WEIGHTS[8] = float[8](
+	0.1012285363, 0.2223810345, 0.3137066459, 0.3626837834,
+	0.3626837834, 0.3137066459, 0.2223810345, 0.1012285363);
 
 vec3 gRayleighCoefficient; ///< Rayleigh scattering coefficient for each color channel.
 
@@ -62,19 +67,39 @@ bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
 	return atmosphere.y >= 0.0;
 }
 
-/// Bilinearly samples the preintegrated Rayleigh density column to the atmosphere boundary.
-/// @param origin Position in world space, in metres.
+/// Integrates the exponential Rayleigh density over a finite ray segment.
+/// @param origin Segment origin in world space, in metres.
 /// @param dir Unit ray direction.
-/// @return Integrated Rayleigh density column.
-float sun_air_depth(vec3 origin, vec3 dir) {
-	float r = length(origin), mu = dot(origin, dir) / r;
-	float x = sqrt(clamp((r - sceneData.skyParams.x) / (sceneData.skyParams.y - sceneData.skyParams.x), 0.0, 1.0)) * float(LUT_ALT - 1);
-	float y = (0.5 + 0.5 * sign(mu) * sqrt(abs(mu))) * float(LUT_MU - 1);
-	ivec2 i = min(ivec2(x, y), ivec2(LUT_ALT - 2, LUT_MU - 2));
-	vec2 f = vec2(x, y) - vec2(i);
-	int k = i.x * LUT_MU + i.y;
+/// @param distance Segment length, in metres. The segment must stay above ground.
+/// @return Integrated relative density, in metres.
+float air_depth(vec3 origin, vec3 dir, float distance) {
+	if (distance <= 0.0) return 0.0;
+	float closest = clamp(-dot(origin, dir), 0.0, distance);
+	float column = 0.0;
 
-	return mix(mix(transmittanceLut.depth[k], transmittanceLut.depth[k + 1], f.y), mix(transmittanceLut.depth[k + LUT_MU], transmittanceLut.depth[k + LUT_MU + 1], f.y), f.x);
+	for (int segment = 0; segment < 2; ++segment) {
+		float start = segment == 0 ? 0.0 : closest;
+		float span = segment == 0 ? closest : distance - closest;
+		if (span <= 0.0) continue;
+		int panels = max(1, int(ceil(span / (8.0 * sceneData.skyParams.z))));
+		float halfWidth = 0.5 * span / float(panels);
+		for (int panel = 0; panel < panels; ++panel) {
+			for (int i = 0; i < 8; ++i) {
+				float t = start + (2.0 * float(panel) + 1.0 + QUADRATURE_NODES[i]) * halfWidth;
+				column += halfWidth * QUADRATURE_WEIGHTS[i] * air_density(origin + dir * t);
+			}
+		}
+	}
+
+	return column;
+}
+
+/// Integrates the Rayleigh density column from an atmospheric point toward space.
+/// @param origin Position inside the atmosphere, in metres.
+/// @param dir Unit direction along a ray that is not occluded by the planet.
+/// @return Integrated relative density, in metres.
+float sun_air_depth(vec3 origin, vec3 dir) {
+	return air_depth(origin, dir, ray_sphere(origin, dir, sceneData.skyParams.y).y);
 }
 
 /// Evaluates per-channel atmospheric transmittance.
@@ -219,16 +244,6 @@ mat3x4 scatter_color(ScatterGeom g, vec3 intensity) {
 	return mat3x4(scattered[0] * gRayleighCoefficient.x, scattered[1] * gRayleighCoefficient.y, scattered[2] * gRayleighCoefficient.z);
 }
 
-/// Eight-point Gauss-Legendre nodes on [-1, 1].
-const float QUADRATURE_NODES[8] = float[8](
-	-0.9602898565, -0.7966664774, -0.5255324099, -0.1834346425,
-	0.1834346425, 0.5255324099, 0.7966664774, 0.9602898565);
-/// Integration weights paired with QUADRATURE_NODES on [-1, 1].
-const float QUADRATURE_WEIGHTS[8] = float[8](
-	0.1012285363, 0.2223810345, 0.3137066459, 0.3626837834,
-	0.3626837834, 0.3137066459, 0.2223810345, 0.1012285363);
-const int QUADRATURE_PANELS = 2; ///< Sixteen evaluations per view ray.
-
 /// Integrates single scattering along the primary view ray.
 /// @param origin Ray origin in world space.
 /// @param viewDir Unit direction from the camera into the atmosphere.
@@ -240,19 +255,17 @@ mat3x4 scatter(vec3 origin, vec3 viewDir, vec3 L) {
 		return mat3x4(vec4(0.0), vec4(0.0), vec4(0.0));
 
 	float span = end - start;
-	float depth0 = sun_air_depth(origin + viewDir * start, viewDir);
+	vec3 entry = origin + viewDir * start;
 	vec3 result = vec3(0.0);
 
-	for (int panel = 0; panel < QUADRATURE_PANELS; ++panel) {
-		for (int i = 0; i < 8; ++i) {
-			float u = (float(panel) + 0.5 * (QUADRATURE_NODES[i] + 1.0)) / float(QUADRATURE_PANELS);
-			float weight = QUADRATURE_WEIGHTS[i] * span * u / float(QUADRATURE_PANELS);
-			vec3 pos = origin + viewDir * (start + span * u * u);
-			if (ray_sphere(pos, L, sceneData.skyParams.x).x > 0.0) continue;
-			float cameraDepth = max(depth0 - sun_air_depth(pos, viewDir), 0.0);
-			float sunDepth = sun_air_depth(pos, L);
-			result += air_density(pos) * rayleigh_transmittance(cameraDepth + sunDepth) * weight;
-		}
+	for (int i = 0; i < 8; ++i) {
+		float u = 0.5 * (QUADRATURE_NODES[i] + 1.0);
+		float weight = QUADRATURE_WEIGHTS[i] * span * u;
+		vec3 pos = origin + viewDir * (start + span * u * u);
+		if (ray_sphere(pos, L, sceneData.skyParams.x).x > 0.0) continue;
+		float cameraDepth = air_depth(entry, viewDir, span * u * u);
+		float sunDepth = sun_air_depth(pos, L);
+		result += air_density(pos) * rayleigh_transmittance(cameraDepth + sunDepth) * weight;
 	}
 
 	result *= sceneData.sunParams.y * sceneData.sunParams.x;
@@ -263,24 +276,38 @@ mat3x4 scatter(vec3 origin, vec3 viewDir, vec3 L) {
 /// Evaluates Stokes radiance, including the visible solar disk.
 /// @param viewDir Unit direction from the camera into the atmosphere.
 /// @param L Unit direction toward the Sun.
-/// @return Stokes radiance in the shader's current polarization frame.
-mat3x4 render_sky(vec3 viewDir, vec3 L) {
+/// @param rayDx Change in view direction across one horizontal pixel.
+/// @param rayDy Change in view direction across one vertical pixel.
+/// @param[out] sunIntensity Unpolarized solar radiance for a fully covered pixel.
+/// @param[out] sunCoverage Filtered solar disk coverage.
+/// @return Atmospheric Stokes radiance without the direct solar disk.
+mat3x4 render_sky(vec3 viewDir, vec3 L, vec3 rayDx, vec3 rayDy, out vec3 sunIntensity, out float sunCoverage) {
 	vec3 origin = vec3(0.0, sceneData.skyParams.x + 1.0, 0.0);
 	float groundT = ray_sphere(origin, viewDir, sceneData.skyParams.x).x;
 	mat3x4 sky = scatter(origin, viewDir, L);
-
-	vec3 vertical, horizontal;
-	beam_basis(L, horizontal, vertical);
-	vec2 offset = vec2(dot(viewDir, cross(vertical, L)), dot(viewDir, vertical));
-	float r = dot(viewDir, L) > 0.0 ? length(offset) : 1.0;
-	float disk = r <= sin(sceneData.skySunDirectionRadius.w) ? 1.0 : 0.0;
-	float depth = sun_air_depth(origin, viewDir);
+	vec3 radial = viewDir - L * dot(viewDir, L);
+	float r = length(radial);
+	vec3 edgeNormal = radial / max(r, 1.0e-8);
+	float pixelWidth = max(abs(dot(edgeNormal, rayDx)) + abs(dot(edgeNormal, rayDy)), 1.0e-8);
+	float radius = sin(sceneData.skySunDirectionRadius.w);
+	float halfEdgeWidth = 0.5 * pixelWidth;
+	float disk = dot(viewDir, L) > 0.0 ? 1.0 - smoothstep(radius - halfEdgeWidth, radius + halfEdgeWidth, r) : 0.0;
 	bool sunVisible = disk > 0.0 && groundT <= 0.0;
-	vec3 intensity = sunVisible ? disk * sceneData.sunParams.y * rayleigh_transmittance(depth) : vec3(0.0);
-	sky[0].x += intensity.x;
-	sky[1].x += intensity.y;
-	sky[2].x += intensity.z;
+	sunCoverage = sunVisible ? disk : 0.0;
+	sunIntensity = sunVisible ? sceneData.sunParams.y * rayleigh_transmittance(sun_air_depth(origin, viewDir)) : vec3(0.0);
 	return stokes_make_physical(sky);
+}
+
+/// Tone-maps radiance into linear display RGB before coverage filtering.
+/// @param radiance Scene radiance before applying the configured exposure.
+/// @return Tone-mapped linear display RGB.
+vec3 tone_map(vec3 radiance) {
+	vec3 rgb = max(radiance, vec3(0.0)) * pc.polarizer.w;
+	const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+	const mat3 agxOutset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438, -0.0980208811401368, 1.15190312990417, -0.0980434501171241, -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+	vec3 x = (clamp(log2(max(agxInset * rgb, vec3(1.0e-10))), -12.47393, 4.026069) + 12.47393) / 16.499999;
+	x = 15.5 * x * x * x * x * x * x - 40.14 * x * x * x * x * x + 31.96 * x * x * x * x - 6.868 * x * x * x + 0.4298 * x * x + 0.1191 * x - 0.00232;
+	return min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
 }
 
 /// Integrates one fixed pixel-center ray and writes its display color.
@@ -290,28 +317,29 @@ void main() {
 	float linAmp = cos(2.0 * pc.polarizer.z);
 	vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
 	vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
-
 	vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(pc.imageSize);
 	vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-	vec3 viewDir = normalize(pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y);
+	vec3 ray = pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y;
+	float rayLength = length(ray);
+	vec3 viewDir = ray / rayLength;
+	vec3 rayDx = (pc.right.xyz - viewDir * dot(viewDir, pc.right.xyz)) * (2.0 / float(pc.imageSize.x)) / rayLength;
+	vec3 rayDy = (pc.up.xyz - viewDir * dot(viewDir, pc.up.xyz)) * (-2.0 / float(pc.imageSize.y)) / rayLength;
 	vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
+
 	beam_basis(-viewDir, na, nb);
 	gRayleighCoefficient = sceneData.rayleigh.xyz;
-	mat3x4 sky = render_sky(viewDir, sun);
+	vec3 sunIntensity;
+	float sunCoverage;
+
+	mat3x4 sky = render_sky(viewDir, sun, rayDx, rayDy, sunIntensity, sunCoverage);
 	vec3 radiance = vec3(sky[0].x, sky[1].x, sky[2].x);
 	if (pc.polarizer.x > 0.5) {
 		mat3x4 framedSky = rgb_stokes_reframe(sky, na, nb, frameX);
 		radiance = 0.5 * (transpose(framedSky) * analyzer);
+		sunIntensity *= 0.5;
 	}
 
-	vec3 rgb = max(radiance, vec3(0.0));
-	rgb = max(rgb, vec3(0.0)) * pc.polarizer.w;
-
-	const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);
-	const mat3 agxOutset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438, -0.0980208811401368, 1.15190312990417, -0.0980434501171241, -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
-	vec3 x = (clamp(log2(max(agxInset * rgb, vec3(1.0e-10))), -12.47393, 4.026069) + 12.47393) / 16.499999;
-	x = 15.5 * x * x * x * x * x * x - 40.14 * x * x * x * x * x + 31.96 * x * x * x * x - 6.868 * x * x * x + 0.4298 * x * x + 0.1191 * x - 0.00232;
-	vec3 c = min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
+	vec3 c = mix(tone_map(radiance), tone_map(radiance + sunIntensity), sunCoverage);
 	c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308)));
 	imageStore(outputImage, ivec2(pixel), vec4(c, 1.0));
 }

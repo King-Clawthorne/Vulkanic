@@ -9,12 +9,14 @@ project's C++ formatting style to the shader. The windows CMake preset compiles
 the shader with glslc and configures the project when either build/build.ninja
 or build/compile_commands.json is missing. The script builds in parallel,
 generates the Doxygen documentation, then runs clang-tidy on each C++ source
-file using the compilation database. clang-tidy does not support GLSL.
+file using the compilation database. GLSL is checked separately on every run
+with glslc (warnings treated as errors) and spirv-val. clang-tidy does not
+support GLSL.
 
 Requires CMake 4.4 or newer. Doxygen, clang-format, and clang-tidy must be
 available on PATH. Graphviz dot must be on PATH or installed in the default
 Graphviz directory. The Windows preset also requires Ninja, clang-cl, and a
-Vulkan SDK with glslc.
+Vulkan SDK with glslc and spirv-val.
 
 .EXAMPLE
 .\build.ps1
@@ -50,6 +52,16 @@ try {
     if (-not (Test-Path -LiteralPath $buildNinjaPath) -or -not (Test-Path -LiteralPath $compileCommandsPath)) { & $cmakeExecutable.Source --preset windows }
     if (-not (Test-Path -LiteralPath $compileCommandsPath)) { throw 'CMake did not generate build/compile_commands.json.' }
     & $cmakeExecutable.Source --build --preset windows --parallel
+    $glslcExecutable = Get-Command glslc -CommandType Application | Select-Object -First 1
+    $spirvValExecutable = Get-Command spirv-val -CommandType Application | Select-Object -First 1
+    $validationSpirvPath = Join-Path $buildPath 'Main.validation.spv'
+    Write-Host "Checking GLSL shader $shaderFile with glslc and spirv-val"
+    try {
+        & $glslcExecutable.Source --target-env=vulkan1.4 -Werror -O -o $validationSpirvPath $shaderFile
+        & $spirvValExecutable.Source --target-env vulkan1.4 $validationSpirvPath
+    } finally {
+        if (Test-Path -LiteralPath $validationSpirvPath) { Remove-Item -LiteralPath $validationSpirvPath }
+    }
     if (-not (Get-Command dot -CommandType Application -ErrorAction SilentlyContinue)) {
         $programFilesRoots = @($env:ProgramW6432, $env:ProgramFiles) | Where-Object { $_ }
         $graphvizBin = $programFilesRoots |

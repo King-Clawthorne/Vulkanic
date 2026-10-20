@@ -12,9 +12,9 @@ Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficie
 
 ## Action
 
-The C++ application computes a Rayleigh density table, creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, tone-maps the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
+The C++ application creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, tone-maps the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
 
-Startup preprocessing integrates Rayleigh density columns. This table contains an optical property, not rendered sky pixels. The compute shader still traces scattering and evaluates sunlight, polarization, and camera-dependent rays each frame.
+The compute shader integrates Rayleigh density columns along sunlight and camera segments with composite eight-point Gauss-Legendre quadrature. It evaluates scattering, sunlight, polarization, and camera-dependent rays each frame without a precomputed density table.
 
 ## Result
 
@@ -93,13 +93,13 @@ The window title reports FPS and frame time. Controls:
 
 ## GPU performance profiling
 
-Measured on October 21, 2026, using the Release build with deterministic composite Gauss-Legendre integration and a stationary view.
+Measured on October 21, 2026, using the Release build after a clean target and fresh CMake configuration at 1280 x 720 with shader-side Rayleigh density-column integration, 16 primary scattering evaluations per ray, and solar disk coverage blending after tone mapping. The default camera and scene remained stationary, with the polarizer disabled.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
-| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,201 | 0.214 ms | 0.216 ms | 0.219 ms |
+| NVIDIA GeForce RTX 5060 Ti (GB206) | 32.0.16.1742 | 1,202 | 1.269 ms | 1.306 ms | 1.551 ms |
 
-Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,201 measured workloads span 8.32 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
+Timings are per-frame Vulkan GPU workload durations from Nsight Systems 2026.3.2's [Vulkan workload trace](https://docs.nvidia.com/nsight-systems/UserGuide/), after excluding the first 120 workloads as warm-up. The 1,202 measured workloads span 8.32 seconds. The 95th percentile uses linear interpolation between sorted durations. Vulkanic submits one compute dispatch per frame. These timings cover the GPU workload for the submission, not only the shader, and are not end-to-end FPS.
 
 To capture a run, build the app and launch it through the Nsight Systems CLI:
 
@@ -120,7 +120,7 @@ The `.sqlite` file is a database and not a text SQL script. Query its `VULKAN_WO
 
 ## Project layout
 
-- `src/` - Vulkan renderer, settings, and CPU-side Rayleigh density table
+- `src/` - Vulkan renderer and settings
 - `shaders/Main.comp` - Vulkan compute shader
 - `build.ps1` - clean configure and build helper
 - `CMakeLists.txt` - dependencies, shader compilation, and executable target

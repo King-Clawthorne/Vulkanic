@@ -1,10 +1,9 @@
 /// @file App.cpp
 /// @brief Creates the Vulkan window and runs the interactive sky renderer.
 ///
-/// This file connects runtime settings and precomputed density tables to the
+/// This file connects runtime settings to the
 /// compute shader, manages per-frame Vulkan resources, and translates camera
 /// and polarizer input into shader parameters.
-#include "Settings.hpp"
 #include <VkBootstrap.h>
 #include <vulkan/vulkan_raii.hpp>
 #define GLFW_INCLUDE_VULKAN
@@ -20,6 +19,8 @@
 #include <cstdio>
 #include <exception>
 #include <format>
+#include <glm/glm.hpp>
+#include <numbers>
 #include <optional>
 #include <print>
 #include <ranges>
@@ -28,6 +29,57 @@
 #include <utility>
 #include <vector>
 #include <vk_mem_alloc_raii.hpp>
+
+/// Single-precision pi used by the renderer and its camera calculations.
+inline constexpr float kPi = std::numbers::pi_v<float>;
+
+/// Parameters used to build atmospheric shader constants.
+/// Sun direction is in world space. Radii and scale heights are in metres.
+struct SkyConfig {
+	float betaRayleighGreen = 13.5e-6f; ///< Green-channel Rayleigh scattering coefficient at 550 nm, in inverse metres.
+	float earthRadius = 6360e3f; ///< Planet radius, in metres.
+	float atmosphereRadius = 6420e3f; ///< Outer radius of the modeled atmosphere, in metres.
+	float scaleHeightRayleigh = 7994.0f; ///< Rayleigh density scale height, in metres.
+	float sunRadiance = 8317.742f; ///< Equal solar radiance per color channel, in renderer radiance units.
+	glm::vec3 sunDirection { 0.35f, 0.01f, 0.25f }; ///< Direction toward the Sun in world space.
+	float sunRadius = 0.00465f; ///< Angular radius of the Sun, in radians.
+	float rayleighDepolarization = 0.0279f; ///< Depolarization parameter used by the Rayleigh Mueller matrix.
+	/// Compares all sky parameters for exact equality.
+	[[nodiscard]] friend bool operator==(const SkyConfig&, const SkyConfig&) = default;
+};
+
+/// Output image width and height, in pixels, used for the window and swapchain.
+struct RenderConfig {
+	glm::uvec2 resolution = { 1280, 720 }; ///< Requested swapchain width and height, in pixels.
+};
+
+/// Initial camera pose and vertical field-of-view limits.
+/// Position and look-at coordinates are in world-space metres. Angles are in degrees.
+struct CameraConfig {
+	glm::vec3 initialPosition { 0.0f, 2.0f, -10.0f }; ///< Initial camera position in world-space metres.
+	glm::vec3 initialLookAt { 0.35f, 2.0f, -9.75f }; ///< Initial world-space point toward which the camera looks.
+	float fovYDegrees = 40.0f; ///< Vertical camera field of view, in degrees.
+	float maxPitchDegrees = 89.0f; ///< Maximum absolute camera pitch, in degrees.
+	float exposure = 10.0f; ///< Display exposure multiplier applied to integrated radiance.
+};
+
+/// Mouse-look sensitivity in radians per cursor pixel and polarizer rotation rate in radians per second.
+struct InputConfig {
+	float mouseSensitivity = 0.0035f; ///< Camera rotation in radians per cursor pixel.
+	float polarizerRotateSpeed = 1.5f; ///< Polarizer rotation in radians per second.
+};
+
+/// Complete set of renderer settings consumed by the application.
+struct RuntimeConfig {
+	RenderConfig render { }; ///< Window and swapchain dimensions.
+	CameraConfig camera { }; ///< Initial camera pose, field of view, and exposure.
+	InputConfig input { }; ///< Mouse and polarizer control rates.
+	SkyConfig sky { }; ///< Atmosphere, Sun, and scattering parameters.
+};
+
+/// Approximate Rayleigh scattering strength for red, green, and blue relative
+/// to green, using an inverse fourth-power fit at 650, 550, and 450 nm.
+inline constexpr glm::vec3 kRayleighScale = { 0.512f, 1.0f, 2.231f };
 
 /// Tracks the view and polarizer controls used by the renderer.
 struct CameraController {
@@ -129,7 +181,7 @@ static_assert(offsetof(SceneData, rayleigh) == 32);
 static_assert(sizeof(SceneData) == 64);
 
 /// Descriptor types in the binding order expected by Main.comp.
-constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer, vk::DescriptorType::eStorageBuffer };
+constexpr std::array kDescriptorTypes { vk::DescriptorType::eStorageImage, vk::DescriptorType::eUniformBuffer };
 
 /// Per-dispatch camera, polarizer, exposure, and image parameters.
 struct PushConstants {
@@ -205,22 +257,9 @@ private:
 		return sceneData;
 	}
 
-	/// Allocates a storage buffer and copies a lookup table into it.
-	/// @tparam T Element type stored in the table.
-	/// @param table Data to upload.
-	/// @return The allocated and populated Vulkan buffer.
-	template <typename T>
-	[[nodiscard]] vma::raii::Buffer CreateTableBuffer(const std::vector<T>& table) const {
-		vma::raii::Buffer buffer = CreateBuffer(table.size() * sizeof(T), vk::BufferUsageFlagBits::eStorageBuffer);
-		UploadToBuffer(buffer, std::as_bytes(std::span { table }));
-		return buffer;
-	}
-
-	/// Builds the Rayleigh density table and uploads it with the scene uniform data.
+	/// Allocates and uploads the scene uniform data.
 	void CreateSceneBuffers() {
-		const SkyConfig& s = m_config.sky;
 		m_sceneDataBuffer = CreateBuffer(sizeof(SceneData), vk::BufferUsageFlagBits::eUniformBuffer);
-		m_transmittanceBuffer = CreateTableBuffer(ComputeTransmittanceTable(s));
 		const SceneData sceneData = BuildSceneData();
 		UploadToBuffer(m_sceneDataBuffer, std::as_bytes(std::span { &sceneData, 1 }));
 	}
@@ -418,7 +457,7 @@ private:
 		commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *m_computePipeline);
 		const vk::DescriptorImageInfo imageInfo { { }, *m_swapchainImageViews[imageIndex], vk::ImageLayout::eGeneral };
 		const auto bufferInfo = [](const vma::raii::Buffer& b) { return vk::DescriptorBufferInfo { *b, 0, vk::WholeSize }; };
-		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer), bufferInfo(m_transmittanceBuffer) };
+		const std::array bufferInfos { bufferInfo(m_sceneDataBuffer) };
 
 		std::array<vk::WriteDescriptorSet, kDescriptorTypes.size()> writes { };
 		writes[0] = vk::WriteDescriptorSet { { }, 0, 0, kDescriptorTypes[0], imageInfo };
@@ -515,7 +554,6 @@ private:
 
 	vma::raii::Allocator m_allocator { nullptr }; ///< VMA allocator used for renderer buffers.
 	vma::raii::Buffer m_sceneDataBuffer { nullptr }; ///< Uniform data shared with the compute shader.
-	vma::raii::Buffer m_transmittanceBuffer { nullptr }; ///< Precomputed Rayleigh density-column table.
 
 	vk::raii::SwapchainKHR m_swapchain { nullptr }; ///< RAII handle for the presentation swapchain.
 	vk::Extent2D m_swapchainExtent { }; ///< Actual swapchain image dimensions, in pixels.
@@ -531,7 +569,7 @@ private:
 	std::vector<FrameResources> m_frames; ///< Command and synchronization resources for frames in flight.
 	uint32_t m_currentFrame = 0; ///< Index of the frame resource used by the next submission.
 	float m_displayFps = 0.0f; ///< Most recently measured frame rate shown in the window title.
-	RuntimeConfig m_config { }; ///< Renderer configuration used to build tables and dispatch parameters.
+	RuntimeConfig m_config { }; ///< Renderer configuration used to build scene and dispatch parameters.
 	CameraController m_camera; ///< Interactive camera and polarizer state.
 };
 
