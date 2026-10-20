@@ -4,17 +4,15 @@ Vulkanic is a real-time Vulkan renderer for exploring a polarized atmospheric sk
 
 ## Situation
 
-Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarization in three color channels.
+Vulkanic models Rayleigh scattering, the finite size of the Sun, and polarization in 3 color channels.
 
 ## Task
 
-Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficients for the red, green, and blue channels. The coefficients approximate inverse fourth-power scattering at representative wavelengths of 650, 550, and 450 nm. Each channel uses deterministic composite Gauss-Legendre integration with 16 evaluations per primary view ray. A squared distance mapping concentrates evaluations near the ray origin. The solar source has equal intensity across all 3 color channels.
+Vulkanic traces atmospheric scattering on the GPU using fixed Rayleigh coefficients for the red, green, and blue channels. The coefficients approximate inverse 4th-power scattering at representative wavelengths of 650, 550, and 450 nm. Each channel uses deterministic composite Gauss-Legendre integration with 8 evaluations per primary view ray. A squared distance mapping concentrates evaluations near the ray origin. The solar source has equal intensity across all 3 color channels.
 
 ## Action
 
-The C++ application creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, tone-maps the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer.
-
-The compute shader integrates Rayleigh density columns along sunlight and camera segments with composite eight-point Gauss-Legendre quadrature. It evaluates scattering, sunlight, polarization, and camera-dependent rays each frame without a precomputed density table.
+The C++ application creates the Vulkan resources, and dispatches a compute shader for each frame. The shader evaluates atmospheric scattering and the solar disk in each color channel, tone-maps the results, and presents the image in a GLFW window. Keyboard and mouse controls let you move the camera and inspect linear or elliptical polarization with a rotatable analyzer. The compute shader integrates Rayleigh density columns along sunlight and camera segments with composite eight-point Gauss-Legendre quadrature. It evaluates scattering, sunlight, polarization, and camera-dependent rays each frame.
 
 ## Result
 
@@ -93,7 +91,7 @@ The window title reports FPS and frame time. Controls:
 
 ## GPU performance profiling
 
-Measured on October 21, 2026, using the Release build after a clean target and fresh CMake configuration at 1280 x 720 with shader-side Rayleigh density-column integration, 16 primary scattering evaluations per ray, and solar disk coverage blending after tone mapping. The default camera and scene remained stationary, with the polarizer disabled.
+Measured on October 21, 2026, using the Release build with default settings. The default camera and scene remained stationary, with the polarizer disabled.
 
 | GPU | Driver | GPU workloads | Median | Mean | 95th percentile |
 | --- | --- | ---: | ---: | ---: | ---: |
