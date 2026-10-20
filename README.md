@@ -85,7 +85,6 @@ For a direct Doxygen run, make sure `dot` is on `PATH`.
 The window title reports FPS and frame time. Controls:
 
 - **W/A/S/D**: move forward, left, backward, and right
-- **Space / Left Ctrl**: move up and down
 - **Right mouse button + mouse**: look around
 - **[ / ]**: rotate the polarizer
 - **P**: toggle the polarizer

@@ -249,8 +249,6 @@ private:
 
 		glfwSetWindowUserPointer(m_window, this);
 		glfwSetKeyCallback(m_window, KeyCallback);
-		std::println("Controls: right-drag to look, R resets the view.");
-		std::println("Polarizer: P toggles it, C switches linear/elliptical, [ ] adjusts it.");
 		return true;
 	}
 
