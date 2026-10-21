@@ -19,16 +19,7 @@ layout(push_constant) uniform PushConstants {
 }
 pc; ///< Per-dispatch camera, exposure, polarization, and image data.
 
-const float PI = 3.14159265358979323846; ///< Pi in radians.
-
-/// Eight-point Gauss-Legendre nodes on [-1, 1].
-const float QUADRATURE_NODES[8] = float[8](
-	-0.9602898565, -0.7966664774, -0.5255324099, -0.1834346425,
-	0.1834346425, 0.5255324099, 0.7966664774, 0.9602898565);
-/// Integration weights paired with QUADRATURE_NODES on [-1, 1].
-const float QUADRATURE_WEIGHTS[8] = float[8](
-	0.1012285363, 0.2223810345, 0.3137066459, 0.3626837834,
-	0.3626837834, 0.3137066459, 0.2223810345, 0.1012285363);
+const float PI = 3.14159265358979323846; ///< Pi
 
 vec3 gRayleighCoefficient; ///< Rayleigh scattering coefficient for each color channel.
 
@@ -82,12 +73,10 @@ float air_depth(vec3 origin, vec3 dir, float distance) {
 		float span = segment == 0 ? closest : distance - closest;
 		if (span <= 0.0) continue;
 		int panels = max(1, int(ceil(span / (8.0 * sceneData.skyParams.z))));
-		float halfWidth = 0.5 * span / float(panels);
+		float width = 0.5 * span / float(panels);
 		for (int panel = 0; panel < panels; ++panel) {
-			for (int i = 0; i < 8; ++i) {
-				float t = start + (2.0 * float(panel) + 1.0 + QUADRATURE_NODES[i]) * halfWidth;
-				column += halfWidth * QUADRATURE_WEIGHTS[i] * air_density(origin + dir * t);
-			}
+			float t = start + (float(panel) + 0.5) * width;
+			column += width * air_density(origin + dir * t);
 		}
 	}
 
@@ -258,14 +247,11 @@ mat3x4 scatter(vec3 origin, vec3 viewDir, vec3 L) {
 	vec3 entry = origin + viewDir * start;
 	vec3 result = vec3(0.0);
 
-	for (int i = 0; i < 8; ++i) {
-		float u = 0.5 * (QUADRATURE_NODES[i] + 1.0);
-		float weight = QUADRATURE_WEIGHTS[i] * span * u;
-		vec3 pos = origin + viewDir * (start + span * u * u);
-		if (ray_sphere(pos, L, sceneData.skyParams.x).x > 0.0) continue;
-		float cameraDepth = air_depth(entry, viewDir, span * u * u);
+	vec3 pos = origin + viewDir * (start + span * 0.25);
+	if (ray_sphere(pos, L, sceneData.skyParams.x).x <= 0.0) {
+		float cameraDepth = air_depth(entry, viewDir, span * 0.25);
 		float sunDepth = sun_air_depth(pos, L);
-		result += air_density(pos) * rayleigh_transmittance(cameraDepth + sunDepth) * weight;
+		result += air_density(pos) * rayleigh_transmittance(cameraDepth + sunDepth) * span;
 	}
 
 	result *= sceneData.sunParams.y * sceneData.sunParams.x;
