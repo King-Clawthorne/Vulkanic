@@ -53,11 +53,10 @@ struct RenderConfig {
 	glm::uvec2 resolution = { 1280, 720 }; ///< Requested swapchain width and height, in pixels.
 };
 
-/// Initial camera pose and vertical field-of-view limits.
-/// Position and look-at coordinates are in world-space metres. Angles are in degrees.
+/// Initial camera angles and vertical field-of-view limits.
+/// Yaw and pitch are in radians. Fields suffixed with Degrees use degrees.
 struct CameraConfig {
-	glm::vec3 initialPosition { 0.0f, 2.0f, -10.0f }; ///< Initial camera position in world-space metres.
-	glm::vec3 initialLookAt { 0.35f, 2.0f, -9.75f }; ///< Initial world-space point toward which the camera looks.
+	glm::vec2 initialAngles { 0.95054686f, 0.0f }; ///< Initial camera yaw and pitch, in radians.
 	float fovYDegrees = 40.0f; ///< Vertical camera field of view, in degrees.
 	float maxPitchDegrees = 89.0f; ///< Maximum absolute camera pitch, in degrees.
 	float exposure = 10.0f; ///< Display exposure multiplier applied to integrated radiance.
@@ -102,12 +101,10 @@ struct CameraController {
 	bool polarizerEnabled = false; ///< Whether the polarizer is enabled.
 	bool elliptical = false; ///< Whether polarizer rotation edits ellipticity rather than angle.
 
-	/// Initializes yaw and pitch from the configured camera position and look-at point.
+	/// Initializes yaw and pitch from the camera configuration.
 	/// @param config Runtime camera limits and input sensitivities.
 	explicit CameraController(const RuntimeConfig& config) {
-		const glm::vec3 delta = config.camera.initialLookAt - config.camera.initialPosition;
-		angles.x = std::atan2(delta.x, delta.z);
-		angles.y = std::atan2(delta.y, std::hypot(delta.x, delta.z));
+		angles = config.camera.initialAngles;
 	}
 
 	/// Applies one-shot keyboard controls for the polarizer modes.
