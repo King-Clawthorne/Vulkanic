@@ -56,7 +56,7 @@ struct RenderConfig {
 /// Initial camera angles and vertical field-of-view limits.
 /// Yaw and pitch are in radians. Fields suffixed with Degrees use degrees.
 struct CameraConfig {
-	glm::vec2 initialAngles { 0.95054686f, 0.0f }; ///< Initial camera yaw and pitch, in radians.
+	glm::vec2 initialAngles { 0.951f, 0.0f }; ///< Initial camera yaw and pitch, in radians.
 	float fovYDegrees = 40.0f; ///< Vertical camera field of view, in degrees.
 	float maxPitchDegrees = 89.0f; ///< Maximum absolute camera pitch, in degrees.
 	float exposure = 10.0f; ///< Display exposure multiplier applied to integrated radiance.
