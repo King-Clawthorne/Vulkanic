@@ -73,7 +73,7 @@ float air_depth(vec3 origin, vec3 dir, float distance) {
 		float span = segment == 0 ? closest : distance - closest;
 		if (span <= 0.0) continue;
 		int panels = max(1, int(ceil(span / (8.0 * sceneData.skyParams.z))));
-		float width = 0.5 * span / float(panels);
+		float width = span / float(panels);
 		for (int panel = 0; panel < panels; ++panel) {
 			float t = start + (float(panel) + 0.5) * width;
 			column += width * air_density(origin + dir * t);
