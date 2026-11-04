@@ -1,0 +1,486 @@
+#version 460
+
+// Research mode evaluates a supplied ray per invocation; regular mode renders image pixels.
+#ifdef VULKANIC_RESEARCH
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct ResearchRay {
+	vec4 origin;
+	vec4 viewDir;
+	vec4 sunDir;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer ResearchRayBuffer {
+	ResearchRay rays[];
+} researchRayBuffer;
+#else
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform writeonly image2D outputImage;
+#endif
+layout(set = 0, binding = 1) uniform SceneData {
+	// Planet radius, atmosphere radius, scale height, and depolarization factor.
+	vec4 skyParams, skySunDirectionRadius;
+	// Per-channel Rayleigh coefficients and solar intensity parameters.
+	vec4 rayleigh, sunParams;
+}
+sceneData;
+
+#ifdef VULKANIC_RESEARCH
+struct ResearchResult {
+	vec4 red, green, blue, diagnostics;
+};
+layout(std430, set = 0, binding = 2) writeonly buffer ResearchResultBuffer {
+	ResearchResult results[];
+} researchResultBuffer;
+
+layout(push_constant) uniform PushConstants {
+	uint rayCount;
+	uint viewSamples;
+	uint maxAzimuth;
+	uint method;
+	float tolerance;
+}
+pc;
+#else
+layout(push_constant) uniform PushConstants {
+	vec4 forward, right, up, polarizer;
+	uvec2 imageSize;
+}
+pc;
+#endif
+
+const float PI = 3.14159265358979323846;
+
+// Shared by the scattering helpers during one shader invocation.
+vec3 gRayleighCoefficient;
+
+// Exponential atmosphere profile, measured outward from the planet surface.
+float air_density(vec3 pos) {
+	float h = max(length(pos) - sceneData.skyParams.x, 0.0);
+	return exp(-h / sceneData.skyParams.z);
+}
+
+vec2 ray_sphere(vec3 origin, vec3 dir, float radius) {
+	float b = dot(origin, dir);
+	float radialDistance = length(origin);
+	float c = (radialDistance - radius) * (radialDistance + radius);
+	float d = fma(b, b, -c);
+	if (d < 0.0) return vec2(-1.0);
+	return vec2(-b - sqrt(d), -b + sqrt(d));
+}
+
+// Restrict the view ray to the atmosphere and clip it at the ground when needed.
+bool view_segment(vec3 origin, vec3 dir, out float tStart, out float tEnd) {
+	vec2 atmosphere = ray_sphere(origin, dir, sceneData.skyParams.y);
+	vec2 ground = ray_sphere(origin, dir, sceneData.skyParams.x);
+	tStart = max(atmosphere.x, 0.0);
+
+	tEnd = ground.x > 0.0 ? min(atmosphere.y, ground.x) : atmosphere.y;
+	return atmosphere.y >= 0.0;
+}
+
+// Integrate density with split Gauss-Legendre panels around the ray's closest point.
+float air_depth(vec3 origin, vec3 dir, float distance) {
+	if (distance <= 0.0) return 0.0;
+	float closest = clamp(-dot(origin, dir), 0.0, distance);
+	float column = 0.0;
+	const float node0 = 0.3399810436;
+	const float node1 = 0.8611363116;
+	const float weight0 = 0.6521451549;
+	const float weight1 = 0.3478548451;
+
+	for (int segment = 0; segment < 2; ++segment) {
+		float start = segment == 0 ? 0.0 : closest;
+		float span = segment == 0 ? closest : distance - closest;
+		if (span <= 0.0) continue;
+		int panels = max(1, int(ceil(span / (4.0 * sceneData.skyParams.z))));
+		float width = span / float(panels);
+		for (int panel = 0; panel < panels; ++panel) {
+			float midpoint = start + (float(panel) + 0.5) * width;
+			float halfWidth = 0.5 * width;
+			float offset0 = halfWidth * node0;
+			float offset1 = halfWidth * node1;
+			column += halfWidth * (
+				weight0 * (air_density(origin + dir * (midpoint - offset0)) + air_density(origin + dir * (midpoint + offset0)))
+				+ weight1 * (air_density(origin + dir * (midpoint - offset1)) + air_density(origin + dir * (midpoint + offset1)))
+			);
+		}
+	}
+
+	return column;
+}
+
+float sun_air_depth(vec3 origin, vec3 dir) {
+	return air_depth(origin, dir, ray_sphere(origin, dir, sceneData.skyParams.y).y);
+}
+
+vec3 rayleigh_transmittance(float depth) {
+    return exp(-gRayleighCoefficient * depth);
+}
+
+mat4 mueller(float m11, float m12, float m22, float m33, float m34, float m44) {
+    return mat4(m11, m12, 0.0, 0.0, m12, m22, 0.0, 0.0, 0.0, 0.0, m33, -m34, 0.0, 0.0, m34, m44);
+}
+
+mat3x4 stokes_make_physical(mat3x4 s) {
+	vec3 intensity = max(vec3(s[0].x, s[1].x, s[2].x), vec3(0.0));
+	vec3 q = vec3(s[0].y, s[1].y, s[2].y);
+	vec3 u = vec3(s[0].z, s[1].z, s[2].z);
+	vec3 v = vec3(s[0].w, s[1].w, s[2].w);
+	vec3 p = sqrt(q * q + u * u + v * v);
+
+	vec3 scale = min(vec3(1.0), intensity / max(p, vec3(1.0e-20)));
+	return mat3x4(vec4(intensity.x, q.x * scale.x, u.x * scale.x, v.x * scale.x),
+                  vec4(intensity.y, q.y * scale.y, u.y * scale.y, v.y * scale.y),
+                  vec4(intensity.z, q.z * scale.z, u.z * scale.z, v.z * scale.z));
+}
+
+// Choose a stable pair of axes perpendicular to the propagation direction.
+void beam_basis(vec3 d, out vec3 a, out vec3 b) {
+	vec3 up = abs(d.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	a = normalize(up - d * dot(d, up));
+	b = cross(d, a);
+}
+
+vec2 rotation(float c, float sn) {
+    return vec2(c * c - sn * sn, 2.0 * c * sn);
+}
+
+vec4 rotate(vec4 s, vec2 r) {
+    return vec4(s.x, s.y * r.x + s.z * r.y, -s.y * r.y + s.z * r.x, s.w);
+}
+
+mat3x4 rotate(mat3x4 s, vec2 r) {
+    return mat3x4(rotate(s[0], r), rotate(s[1], r), rotate(s[2], r));
+}
+
+mat3x4 rgb_stokes_reframe(mat3x4 s, vec3 oldA, vec3 oldB, vec3 newA) {
+    return rotate(s, rotation(dot(newA, oldA), dot(newA, oldB)));
+}
+
+mat4 rayleigh_mueller(float cosTheta) {
+	float kingDepolarization = sceneData.skyParams.w;
+	float kingFactor = (1.0 - kingDepolarization) / (1.0 + 0.5 * kingDepolarization);
+	float polarizationFactor = (1.0 - 2.0 * kingDepolarization) / max(1.0 - kingDepolarization, 1.0e-4);
+	float mu2 = cosTheta * cosTheta;
+	float base = 0.75 * (1.0 + mu2), p33 = 1.5 * cosTheta;
+	return mueller(mix(1.0, base, kingFactor), -kingFactor * 0.75 * (1.0 - mu2), kingFactor * base, kingFactor * p33, 0.0, kingFactor * polarizationFactor * p33);
+}
+
+void scatter_frame(vec3 din, vec3 dout, float cosTheta, out vec4 rot, out vec4 flip) {
+	rot = vec4(1.0, 0.0, 1.0, 0.0);
+	flip = vec4(1.0);
+	vec3 p = cross(din, dout);
+	float pl = length(p);
+
+	if (pl < 1.0e-6) {
+		if (cosTheta < 0.0) flip = vec4(1.0, 1.0, -1.0, -1.0);
+		return;
+	}
+
+	p /= pl;
+	vec3 ain, bin, aout, bout;
+	beam_basis(din, ain, bin);
+	beam_basis(dout, aout, bout);
+	vec3 inAxis = cross(p, din);
+
+	rot = vec4(rotation(dot(inAxis, ain), dot(inAxis, bin)), rotation(dot(aout, cross(p, dout)), dot(aout, p)));
+}
+
+mat3x4 apply_mueller(mat4 m, mat3x4 s, vec4 rot, vec4 flip) {
+	mat3x4 result = rotate(m * rotate(s, rot.xy), rot.zw);
+	return mat3x4(result[0] * flip, result[1] * flip, result[2] * flip);
+}
+
+struct ScatterGeom {
+	mat4 rayleigh;
+	vec4 rot;
+	vec4 flip;
+};
+
+ScatterGeom scatter_geometry(vec3 din, vec3 dout) {
+	ScatterGeom g;
+	float cosTheta = clamp(dot(din, dout), -1.0, 1.0);
+	g.rayleigh = rayleigh_mueller(cosTheta);
+	scatter_frame(din, dout, cosTheta, g.rot, g.flip);
+	return g;
+}
+
+mat3x4 scatter_color(ScatterGeom g, vec3 intensity) {
+	mat3x4 source = mat3x4(vec4(intensity.x, 0.0, 0.0, 0.0), vec4(intensity.y, 0.0, 0.0, 0.0), vec4(intensity.z, 0.0, 0.0, 0.0));
+	mat3x4 scattered = apply_mueller(g.rayleigh / (4.0 * PI), source, g.rot, g.flip);
+	return mat3x4(scattered[0] * gRayleighCoefficient.x, scattered[1] * gRayleighCoefficient.y, scattered[2] * gRayleighCoefficient.z);
+}
+
+// Integrate selected solar-disk azimuths, clipping each polar interval at the horizon.
+float stokes_norm(mat3x4 value) {
+	return sqrt(dot(value[0], value[0]) + dot(value[1], value[1]) + dot(value[2], value[2]));
+}
+
+mat3x4 integrate_solar_azimuths(vec3 position, vec3 viewDir, vec3 L, int azimuthCount, int azimuthOffset, int azimuthStride, out uint quadratureNodes) {
+	mat3x4 result = mat3x4(0.0);
+	quadratureNodes = 0u;
+	float radius = sceneData.skyParams.x;
+	float r = length(position);
+	vec3 radial = position / r;
+	float centreDot = dot(radial, L);
+	vec3 tangent = radial - centreDot * L;
+	float tangentLength = length(tangent);
+	vec3 axisA, axisB;
+
+	if (tangentLength > 1.0e-8) {
+		axisA = tangent / tangentLength;
+		axisB = cross(L, axisA);
+	} else {
+		beam_basis(L, axisA, axisB);
+	}
+
+	float horizonCos = sqrt(max(1.0 - (radius / r) * (radius / r), 0.0));
+	float diskRadius = sceneData.skySunDirectionRadius.w;
+	float cosRadius = cos(diskRadius);
+	float sinRadius = sin(diskRadius);
+	float phiStep = 2.0 * PI / float(azimuthCount);
+	const float node0 = 0.3399810436;
+	const float node1 = 0.8611363116;
+	const float weight0 = 0.6521451549;
+	const float weight1 = 0.3478548451;
+
+	for (int index = azimuthOffset; index < azimuthCount; index += azimuthStride) {
+		quadratureNodes += 4u;
+		float phi = phiStep * float(index);
+		float cosPhi = cos(phi);
+		vec3 azimuthAxis = cosPhi * axisA + sin(phi) * axisB;
+		float f0 = centreDot + horizonCos;
+		float f1 = centreDot * cosRadius + tangentLength * cosPhi * sinRadius + horizonCos;
+		if (f0 < 0.0 && f1 < 0.0) continue;
+
+		float thetaMin = 0.0;
+		float thetaMax = diskRadius;
+		if ((f0 < 0.0) != (f1 < 0.0)) {
+			float left = 0.0;
+			float right = diskRadius;
+			bool lowerBlocked = f0 < 0.0;
+			for (int iteration = 0; iteration < 16; ++iteration) {
+				float middle = 0.5 * (left + right);
+				float fMiddle = centreDot * cos(middle) + tangentLength * cosPhi * sin(middle) + horizonCos;
+				if ((fMiddle < 0.0) == lowerBlocked) left = middle; else right = middle;
+			}
+
+			float boundary = 0.5 * (left + right);
+			if (lowerBlocked) thetaMin = boundary; else thetaMax = boundary;
+		}
+
+		float thetaHalf = 0.5 * (thetaMax - thetaMin);
+		float thetaMiddle = 0.5 * (thetaMax + thetaMin);
+		float theta0 = thetaMiddle - thetaHalf * node0;
+		float theta1 = thetaMiddle + thetaHalf * node0;
+		float theta2 = thetaMiddle - thetaHalf * node1;
+		float theta3 = thetaMiddle + thetaHalf * node1;
+		float angles[4] = float[4](theta0, theta1, theta2, theta3);
+		float weights[4] = float[4](weight0, weight0, weight1, weight1);
+		for (int radialIndex = 0; radialIndex < 4; ++radialIndex) {
+			float theta = angles[radialIndex];
+			vec3 sunDir = normalize(cos(theta) * L + sin(theta) * azimuthAxis);
+			float sunDepth = sun_air_depth(position, sunDir);
+			vec3 intensity = sceneData.sunParams.y * rayleigh_transmittance(sunDepth);
+			float solidAngleWeight = phiStep * thetaHalf * weights[radialIndex] * sin(theta);
+			ScatterGeom geom = scatter_geometry(-sunDir, -viewDir);
+			result += scatter_color(geom, intensity) * solidAngleWeight;
+		}
+	}
+
+	return result;
+}
+
+// Select point-source, fixed-disk, or successively refined adaptive integration.
+mat3x4 integrate_solar_source(vec3 position, vec3 viewDir, vec3 L, uint method, uint maxAzimuth, float tolerance, out uint workNodes, out uint selectedAzimuth, out float errorEstimate) {
+	workNodes = 0u;
+	selectedAzimuth = 0u;
+	errorEstimate = 0.0;
+
+	if (method == 0u) {
+		if (ray_sphere(position, L, sceneData.skyParams.x).x > 0.0) return mat3x4(0.0);
+		float sunDepth = sun_air_depth(position, L);
+		vec3 intensity = sceneData.sunParams.y * sceneData.sunParams.x * rayleigh_transmittance(sunDepth);
+		selectedAzimuth = 1u;
+		workNodes = 1u;
+		return scatter_color(scatter_geometry(-L, -viewDir), intensity);
+	}
+
+	if (maxAzimuth < 8u) maxAzimuth = 8u;
+	int maximum = int(maxAzimuth);
+
+	if (method == 1u) {
+		uint levelNodes;
+		mat3x4 fixedValue = integrate_solar_azimuths(position, viewDir, L, maximum, 0, 1, levelNodes);
+		workNodes = levelNodes;
+		selectedAzimuth = maxAzimuth;
+		return fixedValue;
+	}
+
+	uint levelNodes;
+	int currentAzimuth = 8;
+	mat3x4 previous = integrate_solar_azimuths(position, viewDir, L, currentAzimuth, 0, 1, levelNodes);
+	workNodes += levelNodes;
+	selectedAzimuth = 8u;
+
+	for (int level = 0; level < 6 && uint(currentAzimuth) < maxAzimuth; ++level) {
+		int nextAzimuth = min(2 * currentAzimuth, maximum);
+		uint addedNodes;
+		mat3x4 refined;
+		if (nextAzimuth == 2 * currentAzimuth) {
+			mat3x4 added = integrate_solar_azimuths(position, viewDir, L, nextAzimuth, 1, 2, addedNodes);
+			refined = 0.5 * previous + added;
+		} else {
+			refined = integrate_solar_azimuths(position, viewDir, L, nextAzimuth, 0, 1, addedNodes);
+		}
+
+		workNodes += addedNodes;
+		errorEstimate = stokes_norm(refined - previous) / max(stokes_norm(refined), 1.0e-30);
+		selectedAzimuth = uint(nextAzimuth);
+		if (errorEstimate <= tolerance || uint(nextAzimuth) >= maxAzimuth) return refined;
+		previous = refined;
+		currentAzimuth = nextAzimuth;
+	}
+
+	return previous;
+}
+
+// Accumulate single scattering along the clipped view ray using four-point panels.
+mat3x4 scatter_research(vec3 origin, vec3 viewDir, vec3 L, uint viewSamples, uint method, uint maxAzimuth, float tolerance, out uint workNodes, out uint maxSelectedAzimuth, out float maxErrorEstimate) {
+	float start, end;
+	workNodes = 0u;
+	maxSelectedAzimuth = 0u;
+	maxErrorEstimate = 0.0;
+	if (!view_segment(origin, viewDir, start, end) || end <= start) return mat3x4(0.0);
+
+    uint panels = max(viewSamples, 1u);
+	float span = end - start;
+	float panelWidth = span / float(panels);
+	float halfWidth = 0.5 * panelWidth;
+	vec3 entry = origin + viewDir * start;
+	mat3x4 result = mat3x4(0.0);
+	const float viewNodes[4] = float[4](-0.8611363116, -0.3399810436, 0.3399810436, 0.8611363116);
+	const float viewWeights[4] = float[4](0.3478548451, 0.6521451549, 0.6521451549, 0.3478548451);
+
+    for (uint panel = 0u; panel < panels; ++panel) {
+		float midpoint = (float(panel) + 0.5) * panelWidth;
+		for (int viewIndex = 0; viewIndex < 4; ++viewIndex) {
+			float distance = midpoint + halfWidth * viewNodes[viewIndex];
+			float viewWeight = halfWidth * viewWeights[viewIndex];
+			vec3 position = entry + viewDir * distance;
+			float cameraDepth = air_depth(entry, viewDir, distance);
+			uint localNodes, localAzimuth;
+			float localError;
+			mat3x4 source = integrate_solar_source(position, viewDir, L, method, maxAzimuth, tolerance, localNodes, localAzimuth, localError);
+			vec3 cameraTransmission = rayleigh_transmittance(cameraDepth);
+			source = mat3x4(source[0] * cameraTransmission.r, source[1] * cameraTransmission.g, source[2] * cameraTransmission.b);
+			result += source * (air_density(position) * viewWeight);
+			workNodes += localNodes;
+			maxSelectedAzimuth = max(maxSelectedAzimuth, localAzimuth);
+			maxErrorEstimate = max(maxErrorEstimate, localError);
+		}
+	}
+
+	return result;
+}
+
+mat3x4 scatter(vec3 origin, vec3 viewDir, vec3 L) {
+	uint workNodes, selectedAzimuth;
+	float errorEstimate;
+	return scatter_research(origin, viewDir, L, 8u, 0u, 8u, 1.0e-3, workNodes, selectedAzimuth, errorEstimate);
+}
+
+// Render atmospheric Stokes radiance and estimate filtered coverage of the solar disk.
+mat3x4 render_sky(vec3 viewDir, vec3 L, vec3 rayDx, vec3 rayDy, out vec3 sunIntensity, out float sunCoverage) {
+	vec3 origin = vec3(0.0, sceneData.skyParams.x + 1.0, 0.0);
+	float groundT = ray_sphere(origin, viewDir, sceneData.skyParams.x).x;
+	mat3x4 sky = scatter(origin, viewDir, L);
+	vec3 radial = viewDir - L * dot(viewDir, L);
+	float r = length(radial);
+	vec3 edgeNormal = radial / max(r, 1.0e-8);
+	float pixelWidth = max(abs(dot(edgeNormal, rayDx)) + abs(dot(edgeNormal, rayDy)), 1.0e-8);
+	float radius = sin(sceneData.skySunDirectionRadius.w);
+	float halfEdgeWidth = 0.5 * pixelWidth;
+	float disk = dot(viewDir, L) > 0.0 ? 1.0 - smoothstep(radius - halfEdgeWidth, radius + halfEdgeWidth, r) : 0.0;
+	bool sunVisible = disk > 0.0 && groundT <= 0.0;
+	sunCoverage = sunVisible ? disk : 0.0;
+	sunIntensity = sunVisible ? sceneData.sunParams.y * rayleigh_transmittance(sun_air_depth(origin, viewDir)) : vec3(0.0);
+	return stokes_make_physical(sky);
+}
+
+vec3 tone_map(vec3 radiance) {
+	float exposure = 1.0;
+#ifndef VULKANIC_RESEARCH
+	exposure = pc.polarizer.w;
+#endif
+	vec3 rgb = max(radiance, vec3(0.0)) * exposure;
+	const mat3 agxInset = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051, 0.0784335999999992, 0.878468636469772, 0.0784336, 0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+	const mat3 agxOutset = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438, -0.0980208811401368, 1.15190312990417, -0.0980434501171241, -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+	vec3 x = (clamp(log2(max(agxInset * rgb, vec3(1.0e-10))), -12.47393, 4.026069) + 12.47393) / 16.499999;
+	x = 15.5 * x * x * x * x * x * x - 40.14 * x * x * x * x * x + 31.96 * x * x * x * x - 6.868 * x * x * x + 0.4298 * x * x + 0.1191 * x - 0.00232;
+	return min(pow(max(agxOutset * x, vec3(0.0)), vec3(2.2)), 1.0);
+}
+
+#ifdef VULKANIC_RESEARCH
+// Research dispatch writes RGB Stokes vectors and quadrature diagnostics per ray.
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index >= pc.rayCount) return;
+	ResearchRay ray = researchRayBuffer.rays[index];
+	gRayleighCoefficient = sceneData.rayleigh.xyz;
+	uint workNodes, maxSelectedAzimuth;
+	float maxErrorEstimate;
+	mat3x4 stokes = scatter_research(
+		ray.origin.xyz,
+		normalize(ray.viewDir.xyz),
+		normalize(ray.sunDir.xyz),
+		pc.viewSamples,
+		pc.method,
+		pc.maxAzimuth,
+		pc.tolerance,
+		workNodes,
+		maxSelectedAzimuth,
+		maxErrorEstimate
+	);
+
+	researchResultBuffer.results[index].red = stokes[0];
+	researchResultBuffer.results[index].green = stokes[1];
+	researchResultBuffer.results[index].blue = stokes[2];
+	researchResultBuffer.results[index].diagnostics = vec4(float(workNodes), float(maxSelectedAzimuth), maxErrorEstimate, 0.0);
+}
+#else
+// Image dispatch builds a camera ray, applies optional polarization analysis, and stores RGB.
+void main() {
+	uvec2 pixel = gl_GlobalInvocationID.xy;
+	if (pixel.x >= pc.imageSize.x || pixel.y >= pc.imageSize.y) return;
+	float linAmp = cos(2.0 * pc.polarizer.z);
+	vec4 analyzer = vec4(1.0, linAmp * cos(2.0 * pc.polarizer.y), linAmp * sin(2.0 * pc.polarizer.y), sin(2.0 * pc.polarizer.z));
+	vec3 sun = normalize(sceneData.skySunDirectionRadius.xyz);
+	vec2 uv = (vec2(pixel) + vec2(0.5)) / vec2(pc.imageSize);
+	vec2 screen = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+	vec3 ray = pc.forward.xyz + pc.right.xyz * screen.x + pc.up.xyz * screen.y;
+	float rayLength = length(ray);
+	vec3 viewDir = ray / rayLength;
+	vec3 rayDx = (pc.right.xyz - viewDir * dot(viewDir, pc.right.xyz)) * (2.0 / float(pc.imageSize.x)) / rayLength;
+	vec3 rayDy = (pc.up.xyz - viewDir * dot(viewDir, pc.up.xyz)) * (-2.0 / float(pc.imageSize.y)) / rayLength;
+	vec3 frameX = normalize(pc.right.xyz - viewDir * dot(pc.right.xyz, viewDir)), na, nb;
+
+	beam_basis(-viewDir, na, nb);
+	gRayleighCoefficient = sceneData.rayleigh.xyz;
+	vec3 sunIntensity;
+	float sunCoverage;
+
+	mat3x4 sky = render_sky(viewDir, sun, rayDx, rayDy, sunIntensity, sunCoverage);
+	vec3 radiance = vec3(sky[0].x, sky[1].x, sky[2].x);
+	if (pc.polarizer.x > 0.5) {
+		mat3x4 framedSky = rgb_stokes_reframe(sky, na, nb, frameX);
+		radiance = 0.5 * (transpose(framedSky) * analyzer);
+		sunIntensity *= 0.5;
+	}
+
+	vec3 c = mix(tone_map(radiance), tone_map(radiance + sunIntensity), sunCoverage);
+	c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, 12.92 * c, lessThanEqual(c, vec3(0.0031308)));
+	imageStore(outputImage, ivec2(pixel), vec4(c, 1.0));
+}
+#endif

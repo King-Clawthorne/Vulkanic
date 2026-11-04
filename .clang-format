@@ -1,0 +1,19 @@
+BasedOnStyle: WebKit
+Language: Cpp
+TabWidth: 4
+UseTab: Always
+
+IncludeBlocks: Merge
+NamespaceIndentation: All
+PackConstructorInitializers: BinPack
+
+BreakArrays: False
+BreakBeforeBraces: Attach
+BreakAfterReturnType: Automatic
+BreakBeforeConceptDeclarations: Never
+BreakConstructorInitializers: AfterColon
+
+AllowShortLoopsOnASingleLine: True
+AllowShortBlocksOnASingleLine: Always
+AllowShortNamespacesOnASingleLine: True
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse

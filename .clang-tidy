@@ -1,0 +1,6 @@
+Checks: >
+  -*,
+  performance-*,
+HeaderFilterRegex: '^C:/Users/cohen/Vulkanic/src/.*'
+SystemHeaders: false
+WarningsAsErrors: '*'

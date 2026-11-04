@@ -1,0 +1,33 @@
+{
+  "description": "Double precision CPU reference Stokes values for the 20 recorded GPU geometries",
+  "source_cpu_reference_py_sha256": "60a66cb407228877e65c4977499212e998515a38c0c4337b219294f306607f76",
+  "source_gpu_sweep_csv_sha256": "2ac5576962e6f31c280ae62803782b5cef6b9be00dadc124e9d23928973d4af2",
+  "stokes_csv_sha256": "40bcfe02fe5d38b6d3e09179f3d5012de72cb8962237e76fc29d219911e34068",
+  "python_version": "3.13.5",
+  "numpy_version": "2.1.3",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "view_azimuth_deg": 90,
+  "view_rule": "composite four-point Gauss-Legendre",
+  "view_panels": 48,
+  "optical_depth_gauss_order": 96,
+  "source_method": "gnomonic horizon clipping with analytic visible solid angle normalization",
+  "source_gauss_order": 64,
+  "geometry_count": 20,
+  "settings": {
+    "earth_radius_m": 6360000.0,
+    "atmosphere_radius_m": 6420000.0,
+    "scale_height_m": 7994.0,
+    "beta_rgb_per_m": [
+      6.912e-06,
+      1.35e-05,
+      3.0118499999999996e-05
+    ],
+    "depolarization": 0.0279,
+    "sun_radiance": 8317.742,
+    "sun_radius_rad": 0.00465,
+    "view_samples": 48,
+    "depth_order": 96
+  },
+  "note": "Reference values are retained data. The CPU reference code is not included after project simplification.",
+  "created_utc": "2026-10-29T10:50:13.997627+00:00"
+}
